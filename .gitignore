@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Database
+prisma/migrations/
+*.db
+*.db-journal
+
+# Uploads & Temp
+uploads/*
+!uploads/.gitkeep
+temp/*
+!temp/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+/src/generated/prisma

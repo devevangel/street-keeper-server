@@ -1,0 +1,2 @@
+# Middleware directory
+# Place Express middleware files here (e.g., auth.middleware.ts, error.middleware.ts)
