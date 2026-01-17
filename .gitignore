@@ -39,3 +39,4 @@ Thumbs.db
 logs/
 *.log
 /src/generated/prisma
+package-lock.json
