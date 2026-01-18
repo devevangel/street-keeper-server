@@ -5,14 +5,15 @@
 
 import { Router } from "express";
 import authRoutes from "./auth.routes.js";
+import runsRoutes from "./runs.routes.js";
 
 const router = Router();
 
 // Mount route modules
 router.use("/auth", authRoutes);
+router.use("/runs", runsRoutes);
 
 // Future routes will be added here:
-// router.use("/runs", runRoutes);
 // router.use("/goals", goalRoutes);
 // router.use("/streets", streetRoutes);
 

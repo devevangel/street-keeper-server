@@ -5,6 +5,8 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["src/tests/**/*.test.ts"],
-    testTimeout: 10000,
+    testTimeout: 60000, // Increased for Overpass API calls
+    pool: "forks",
+    isolate: true,
   },
 });

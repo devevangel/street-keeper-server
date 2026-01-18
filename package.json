@@ -17,17 +17,23 @@
   "dependencies": {
     "@prisma/adapter-pg": "^7.2.0",
     "@prisma/client": "^7.2.0",
+    "@tmcw/togeojson": "^7.1.2",
+    "@turf/turf": "^7.3.2",
+    "@types/geojson": "^7946.0.16",
+    "@xmldom/xmldom": "^0.8.11",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
+    "multer": "^2.0.2",
     "pg": "^8.17.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/multer": "^2.0.0",
     "@types/node": "^25.0.9",
     "@types/pg": "^8.16.0",
     "@types/supertest": "^6.0.3",
