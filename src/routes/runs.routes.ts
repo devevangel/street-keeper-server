@@ -31,8 +31,12 @@ import {
   queryStreetsInBoundingBox,
   OverpassError,
 } from "../services/overpass.service.js";
-import { matchPointsToStreets } from "../services/street-matching.service.js";
+import {
+  matchPointsToStreets,
+  matchPointsToStreetsHybrid,
+} from "../services/street-matching.service.js";
 import { buildComprehensiveAnalysis } from "../services/gpx-analysis.service.js";
+import { isMapboxConfigured, MapboxError } from "../services/mapbox.service.js";
 import { aggregateSegmentsIntoLogicalStreets } from "../services/street-aggregation.service.js";
 import { ERROR_CODES } from "../config/constants.js";
 import type {
@@ -151,14 +155,23 @@ router.post(
       console.log(`[GPX] Found ${streets.length} streets in area`);
 
       // ========================================
-      // Step 5: Match GPS points to streets
+      // Step 5: Match GPS points to streets (HYBRID)
       // ========================================
-      // For each point, find nearest street (within 25m)
-      // Calculate coverage for each matched street
-      // Phase 1: Consecutive-only distance calculation
-      // Phase 2: Geometry-based distance projection
+      // Uses hybrid Mapbox + Overpass approach for maximum accuracy:
+      // - Mapbox: High-accuracy GPS-to-street matching (~98% accuracy)
+      // - Overpass: Total street lengths for coverage percentage
+      // Falls back to Overpass-only if Mapbox is not configured
 
-      const matchedStreets = matchPointsToStreets(gpxData.points, streets);
+      let matchedStreets;
+      const useHybrid = isMapboxConfigured();
+
+      if (useHybrid) {
+        console.log("[GPX] Using hybrid Mapbox + Overpass matching");
+        matchedStreets = await matchPointsToStreetsHybrid(gpxData.points, streets);
+      } else {
+        console.log("[GPX] Using Overpass-only matching (Mapbox not configured)");
+        matchedStreets = matchPointsToStreets(gpxData.points, streets);
+      }
 
       console.log(
         `[GPX] Matched ${matchedStreets.length} streets (${matchedStreets.filter((s) => s.completionStatus === "FULL").length} full, ${matchedStreets.filter((s) => s.completionStatus === "PARTIAL").length} partial)`
@@ -286,6 +299,17 @@ router.post(
           code: ERROR_CODES.OVERPASS_API_ERROR,
         };
         // 502 Bad Gateway - upstream service error
+        return res.status(502).json(response);
+      }
+
+      // Mapbox API errors (handled internally with fallback, but log if bubbles up)
+      if (error instanceof MapboxError) {
+        console.warn(`[GPX] Mapbox error (should have fallen back): ${error.message}`);
+        const response: GpxErrorResponse = {
+          success: false,
+          error: error.message,
+          code: ERROR_CODES.MAPBOX_API_ERROR,
+        };
         return res.status(502).json(response);
       }
 

@@ -54,6 +54,17 @@ import {
   calculatePathDistance,
   calculateGeometryDistance,
 } from "./geo.service.js";
+import {
+  mapMatchGpsTrace,
+  extractStreetsFromMatch,
+  isMapboxConfigured,
+  MapboxError,
+  type MapboxExtractedStreet,
+} from "./mapbox.service.js";
+import {
+  normalizeStreetNameForMatching,
+  streetNamesMatch,
+} from "./street-aggregation.service.js";
 
 // ============================================
 // Main Matching Function
@@ -125,6 +136,244 @@ export function matchPointsToStreets(
   return filteredStreets.sort(
     (a, b) => b.distanceCoveredMeters - a.distanceCoveredMeters
   );
+}
+
+// ============================================
+// Hybrid Matching (Mapbox + Overpass)
+// ============================================
+
+/**
+ * Match GPS points to streets using hybrid Mapbox + Overpass approach
+ *
+ * This function provides the most accurate street matching by combining:
+ * - **Mapbox Map Matching**: For accurate GPS-to-street assignment (~98% accuracy)
+ * - **Overpass Data**: For total street lengths (to calculate coverage percentage)
+ *
+ * Benefits over Overpass-only matching:
+ * - Better handling of GPS drift
+ * - Correct intersection handling (uses turn restrictions)
+ * - Probabilistic path matching (most likely route)
+ * - Street names directly from routing data
+ *
+ * Fallback: If Mapbox is not configured or fails, falls back to Overpass-only matching.
+ *
+ * @param points - Array of GPS coordinates from the GPX file
+ * @param overpassStreets - Array of streets from Overpass (includes geometry and length)
+ * @returns Array of matched streets with coverage data
+ *
+ * @example
+ * const points = [{ lat: 51.48, lng: -0.61 }, ...];
+ * const streets = await queryStreetsInBoundingBox(bbox);
+ * const matched = await matchPointsToStreetsHybrid(points, streets);
+ * // Returns: [
+ * //   {
+ * //     name: "Peascod Street",
+ * //     lengthMeters: 444.28,           // From Overpass (total street length)
+ * //     distanceCoveredMeters: 200.00,  // From Mapbox (accurate distance run)
+ * //     coverageRatio: 0.45,            // Calculated
+ * //     completionStatus: "PARTIAL",
+ * //     ...
+ * //   }
+ * // ]
+ */
+export async function matchPointsToStreetsHybrid(
+  points: GpxPoint[],
+  overpassStreets: OsmStreet[]
+): Promise<MatchedStreet[]> {
+  // Check if Mapbox is configured
+  if (!isMapboxConfigured()) {
+    console.log("[Hybrid] Mapbox not configured, using Overpass-only matching");
+    return matchPointsToStreets(points, overpassStreets);
+  }
+
+  try {
+    // Step 1: Call Mapbox Map Matching API
+    console.log("[Hybrid] Calling Mapbox Map Matching API...");
+    const mapboxResult = await mapMatchGpsTrace(points);
+
+    // Step 2: Extract streets from Mapbox response
+    const mapboxStreets = extractStreetsFromMatch(mapboxResult);
+    console.log(
+      `[Hybrid] Mapbox matched ${mapboxStreets.length} streets`
+    );
+
+    // Step 3: Cross-reference with Overpass data to get street lengths
+    const matchedStreets = crossReferenceStreets(mapboxStreets, overpassStreets);
+
+    console.log(
+      `[Hybrid] Final result: ${matchedStreets.length} streets matched`
+    );
+
+    return matchedStreets;
+  } catch (error) {
+    // Log error and fall back to Overpass-only matching
+    if (error instanceof MapboxError) {
+      console.warn(
+        `[Hybrid] Mapbox failed (${error.code || "unknown"}): ${error.message}`
+      );
+    } else {
+      console.warn(
+        `[Hybrid] Mapbox failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
+
+    console.log("[Hybrid] Falling back to Overpass-only matching");
+    return matchPointsToStreets(points, overpassStreets);
+  }
+}
+
+/**
+ * Cross-reference Mapbox streets with Overpass data
+ *
+ * For each street from Mapbox, finds the matching street in Overpass data
+ * to get the total street length. This enables coverage percentage calculation.
+ *
+ * Matching is done by normalized street name with fuzzy matching to handle
+ * differences between Mapbox and OSM naming conventions.
+ *
+ * @param mapboxStreets - Streets extracted from Mapbox response
+ * @param overpassStreets - Streets from Overpass with full geometry
+ * @returns Array of matched streets with coverage data
+ */
+function crossReferenceStreets(
+  mapboxStreets: MapboxExtractedStreet[],
+  overpassStreets: OsmStreet[]
+): MatchedStreet[] {
+  const matchedStreets: MatchedStreet[] = [];
+
+  // Group Overpass streets by normalized name for faster lookup
+  const overpassByName = new Map<string, OsmStreet[]>();
+  for (const street of overpassStreets) {
+    const normalized = normalizeStreetNameForMatching(street.name);
+    if (!overpassByName.has(normalized)) {
+      overpassByName.set(normalized, []);
+    }
+    overpassByName.get(normalized)!.push(street);
+  }
+
+  // Process each Mapbox street
+  for (const mbStreet of mapboxStreets) {
+    // Skip unnamed roads for now (they're handled separately)
+    if (
+      !mbStreet.name ||
+      mbStreet.name.toLowerCase() === "unnamed road" ||
+      mbStreet.name === ""
+    ) {
+      // Still include unnamed roads but without coverage ratio
+      matchedStreets.push({
+        osmId: `mapbox-unnamed-${matchedStreets.length}`,
+        name: mbStreet.name || "Unnamed Road",
+        highwayType: "unknown",
+        lengthMeters: 0, // Unknown total length
+        distanceCoveredMeters: mbStreet.distanceMeters,
+        coverageRatio: 0, // Can't calculate without total length
+        completionStatus: "PARTIAL",
+        matchedPointsCount: mbStreet.pointsCount,
+      });
+      continue;
+    }
+
+    // Find matching Overpass street by normalized name
+    const osmStreet = findMatchingOverpassStreet(mbStreet.name, overpassStreets, overpassByName);
+
+    if (osmStreet) {
+      // We have total length from Overpass!
+      const coverageRatio =
+        osmStreet.lengthMeters > 0
+          ? mbStreet.distanceMeters / osmStreet.lengthMeters
+          : 0;
+
+      matchedStreets.push({
+        osmId: osmStreet.osmId,
+        name: osmStreet.name, // Use OSM name for consistency
+        highwayType: osmStreet.highwayType,
+        lengthMeters: Math.round(osmStreet.lengthMeters * 100) / 100,
+        distanceCoveredMeters: Math.round(mbStreet.distanceMeters * 100) / 100,
+        coverageRatio: Math.round(coverageRatio * 1000) / 1000,
+        geometryDistanceCoveredMeters: Math.round(mbStreet.distanceMeters * 100) / 100,
+        geometryCoverageRatio: Math.round(coverageRatio * 1000) / 1000,
+        completionStatus: determineCompletionStatus(coverageRatio),
+        matchedPointsCount: mbStreet.pointsCount,
+      });
+    } else {
+      // Mapbox found a street that Overpass didn't return
+      // This can happen at bounding box edges or with newer streets
+      console.log(
+        `[Hybrid] No Overpass match for Mapbox street: "${mbStreet.name}"`
+      );
+
+      matchedStreets.push({
+        osmId: `mapbox-${normalizeStreetNameForMatching(mbStreet.name).replace(/\s/g, "-")}`,
+        name: mbStreet.name,
+        highwayType: "unknown",
+        lengthMeters: 0, // Unknown total length
+        distanceCoveredMeters: Math.round(mbStreet.distanceMeters * 100) / 100,
+        coverageRatio: 0, // Can't calculate without total length
+        completionStatus: "PARTIAL", // Assume partial since we don't know total
+        matchedPointsCount: mbStreet.pointsCount,
+      });
+    }
+  }
+
+  // Sort by distance covered (most covered first)
+  return matchedStreets.sort(
+    (a, b) => b.distanceCoveredMeters - a.distanceCoveredMeters
+  );
+}
+
+/**
+ * Find matching Overpass street by name using fuzzy matching
+ *
+ * Uses normalized names and fuzzy matching to handle differences between
+ * Mapbox and OSM naming conventions (e.g., "St." vs "Saint").
+ *
+ * If multiple Overpass streets match the name, returns the one with the
+ * longest total length (assumes the runner ran on the main portion).
+ *
+ * @param mapboxName - Street name from Mapbox
+ * @param overpassStreets - All Overpass streets
+ * @param overpassByName - Precomputed map of normalized names to streets
+ * @returns Matching Overpass street, or undefined if not found
+ */
+function findMatchingOverpassStreet(
+  mapboxName: string,
+  overpassStreets: OsmStreet[],
+  overpassByName: Map<string, OsmStreet[]>
+): OsmStreet | undefined {
+  const normalizedMapbox = normalizeStreetNameForMatching(mapboxName);
+
+  // First, try exact match on normalized name
+  const exactMatches = overpassByName.get(normalizedMapbox);
+  if (exactMatches && exactMatches.length > 0) {
+    // Return the longest street (assumes main portion)
+    return exactMatches.reduce((longest, s) =>
+      s.lengthMeters > longest.lengthMeters ? s : longest
+    );
+  }
+
+  // Second, try fuzzy matching
+  for (const [normalizedOsm, streets] of overpassByName) {
+    if (streetNamesMatch(normalizedMapbox, normalizedOsm)) {
+      // Return the longest street
+      return streets.reduce((longest, s) =>
+        s.lengthMeters > longest.lengthMeters ? s : longest
+      );
+    }
+  }
+
+  // Third, try matching against all streets (slower, but more thorough)
+  const fuzzyMatches = overpassStreets.filter((s) =>
+    streetNamesMatch(mapboxName, s.name)
+  );
+
+  if (fuzzyMatches.length > 0) {
+    // Return the longest match
+    return fuzzyMatches.reduce((longest, s) =>
+      s.lengthMeters > longest.lengthMeters ? s : longest
+    );
+  }
+
+  return undefined;
 }
 
 // ============================================

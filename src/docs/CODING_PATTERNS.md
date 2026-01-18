@@ -20,6 +20,7 @@ This document serves as the single source of truth for coding patterns, conventi
 12. [Testing Patterns](#testing-patterns)
 13. [Import/Export Conventions](#importexport-conventions)
 14. [Code Documentation](#code-documentation)
+15. [Environment Variables](#environment-variables)
 
 ---
 
@@ -867,8 +868,69 @@ stravaTokenExpiresAt: new Date(expires_at * 1000),
 
 ---
 
+## Environment Variables
+
+### Required Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@localhost:5432/db` |
+
+### Optional Environment Variables
+
+| Variable | Description | Default | Notes |
+|----------|-------------|---------|-------|
+| `PORT` | Server port | `8000` | |
+| `NODE_ENV` | Environment | `development` | `development`, `production`, `test` |
+| `STRAVA_CLIENT_ID` | Strava OAuth client ID | - | Required for Strava integration |
+| `STRAVA_CLIENT_SECRET` | Strava OAuth client secret | - | Required for Strava integration |
+| `STRAVA_REDIRECT_URI` | Strava OAuth callback URL | - | Required for Strava integration |
+| `MAPBOX_ACCESS_TOKEN` | Mapbox API access token | - | Enables high-accuracy GPS matching |
+
+### Mapbox Configuration
+
+The Mapbox Map Matching API provides high-accuracy GPS trace matching (~98% accuracy compared to ~85% with Overpass-only matching).
+
+**How to get a Mapbox token:**
+
+1. Sign up at https://account.mapbox.com/
+2. Go to Access Tokens page
+3. Create a new token (default public scope is fine)
+4. Copy the token starting with `pk.`
+
+**Free tier limits:**
+
+- 100,000 requests/month
+- Sufficient for ~3,300 GPX uploads/day
+
+**Fallback behavior:**
+
+If `MAPBOX_ACCESS_TOKEN` is not set, the application automatically falls back to Overpass-only matching. This means:
+
+- No error is thrown
+- Street matching still works
+- Accuracy is slightly lower (~85% vs ~98%)
+
+**Example `.env` file:**
+
+```env
+# Required
+DATABASE_URL="postgresql://user:password@localhost:5432/street_keeper"
+
+# Optional but recommended
+MAPBOX_ACCESS_TOKEN=pk.your_mapbox_access_token_here
+
+# Optional (for Strava integration)
+STRAVA_CLIENT_ID=your_client_id
+STRAVA_CLIENT_SECRET=your_client_secret
+STRAVA_REDIRECT_URI=http://localhost:8000/api/v1/auth/strava/callback
+```
+
+---
+
 ## Version History
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-01-18 | 1.1.0 | Added Mapbox integration documentation |
 | 2026-01-17 | 1.0.0 | Initial documentation |

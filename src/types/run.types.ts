@@ -131,9 +131,10 @@ export interface OverpassResponse {
  *   normalizedName: "main street",
  *   highwayType: "residential",
  *   totalLengthMeters: 450,
- *   totalDistanceCoveredMeters: 425,
- *   coverageRatio: 0.944,        // Clamped to max 1.0
- *   rawCoverageRatio: 0.944,     // Unclamped (for debugging)
+ *   totalDistanceCoveredMeters: 425,    // Clamped to street length
+ *   totalDistanceRunMeters: 850,        // Actual distance run (if ran back & forth)
+ *   coverageRatio: 0.944,               // Clamped to max 1.0
+ *   rawCoverageRatio: 1.889,            // Unclamped (850/450 = 1.889)
  *   completionStatus: "FULL",
  *   segmentCount: 3,
  *   segmentOsmIds: ["way/123", "way/456", "way/789"]
@@ -144,7 +145,8 @@ export interface AggregatedStreet {
   normalizedName: string;
   highwayType: string;
   totalLengthMeters: number;
-  totalDistanceCoveredMeters: number;
+  totalDistanceCoveredMeters: number; // Clamped to street length (for coverage)
+  totalDistanceRunMeters: number; // Actual distance run on street (unclamped, for stats)
   coverageRatio: number; // Clamped to max 1.0 for UX
   rawCoverageRatio: number; // Unclamped for debugging
   completionStatus: CompletionStatus;
@@ -177,7 +179,8 @@ export interface UnnamedRoadBucket {
   highwayType: string;
   displayName: string; // e.g., "Footpath (Unnamed)"
   totalLengthMeters: number;
-  totalDistanceCoveredMeters: number;
+  totalDistanceCoveredMeters: number; // Clamped to total length (for coverage)
+  totalDistanceRunMeters: number; // Actual distance run (unclamped, for stats)
   coverageRatio: number;
   segmentCount: number;
   fullCount: number;

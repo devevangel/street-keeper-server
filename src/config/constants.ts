@@ -56,6 +56,7 @@ export const ERROR_CODES = {
   GPX_FILE_REQUIRED: "GPX_FILE_REQUIRED",
   OVERPASS_API_ERROR: "OVERPASS_API_ERROR",
   STREET_MATCHING_FAILED: "STREET_MATCHING_FAILED",
+  MAPBOX_API_ERROR: "MAPBOX_API_ERROR",
 } as const;
 
 // ============================================
@@ -154,5 +155,39 @@ export const STREET_AGGREGATION = {
   // Clamp coverage ratios to max 1.0 for UX (display purposes)
   // Raw ratios are kept unclamped for debugging
   MAX_DISPLAY_COVERAGE_RATIO: 1.0,
+} as const;
+
+// ============================================
+// Mapbox Map Matching Constants
+// ============================================
+
+export const MAPBOX = {
+  // Mapbox Map Matching API endpoint
+  // Profile "walking" is best for running (uses pedestrian paths)
+  API_URL: "https://api.mapbox.com/matching/v5/mapbox/walking",
+
+  // Map matching parameters
+  // See: https://docs.mapbox.com/api/navigation/map-matching/
+  GEOMETRIES: "geojson", // Return GeoJSON geometry (easier to work with)
+  OVERVIEW: "full", // Full route geometry (not simplified)
+  ANNOTATIONS: "distance", // Include distance annotations per leg
+  TIDY: true, // Clean up noisy traces (removes redundant points)
+  STEPS: true, // Include turn-by-turn steps (gives us street names)
+
+  // Radiuses: How far from the road network to search (meters)
+  // Higher = more lenient matching, lower = stricter
+  // Matches existing STREET_MATCHING.MAX_DISTANCE_METERS for consistency
+  DEFAULT_RADIUS: 25,
+
+  // Maximum coordinates per request (Mapbox API limit)
+  // Larger traces must be chunked into multiple requests
+  MAX_COORDINATES: 100,
+
+  // Request timeout (milliseconds)
+  TIMEOUT_MS: 30000,
+
+  // Minimum confidence threshold for accepting a match
+  // Mapbox returns confidence 0-1; below this threshold, match is rejected
+  MIN_CONFIDENCE: 0.5,
 } as const;
 

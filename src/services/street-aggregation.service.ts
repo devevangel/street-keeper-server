@@ -81,6 +81,144 @@ export function normalizeStreetName(name: string): string {
 }
 
 /**
+ * Normalize street name for cross-source matching (Mapbox ↔ OSM)
+ *
+ * More aggressive normalization than normalizeStreetName() to handle
+ * differences between Mapbox and OpenStreetMap street naming conventions.
+ *
+ * Handles:
+ * - Case differences: "Main Street" vs "MAIN STREET"
+ * - Abbreviations: "St" → "saint", "Rd" → "road", "Ave" → "avenue"
+ * - Punctuation: "St. Alban's" → "saint albans"
+ * - Special characters: Apostrophes, periods, hyphens
+ * - Whitespace variations
+ *
+ * @param name - Street name from Mapbox or OSM
+ * @returns Normalized name suitable for fuzzy matching
+ *
+ * @example
+ * normalizeStreetNameForMatching("St. Alban's Street")  // "saint albans street"
+ * normalizeStreetNameForMatching("Saint Alban's Street")  // "saint albans street"
+ * normalizeStreetNameForMatching("MAIN RD")  // "main road"
+ * normalizeStreetNameForMatching("High St.")  // "high street"
+ */
+export function normalizeStreetNameForMatching(name: string): string {
+  if (!name) return "";
+
+  return (
+    name
+      .toLowerCase()
+      // Expand common abbreviations (order matters: do before removing punctuation)
+      // "St." or "St " at word boundary → "saint"
+      .replace(/\bst\.?\s/gi, "saint ")
+      // "Rd." or "Rd " at word boundary → "road"
+      .replace(/\brd\.?\b/gi, "road")
+      // "Ave." or "Ave " → "avenue"
+      .replace(/\bave\.?\b/gi, "avenue")
+      // "Ln." or "Ln " → "lane"
+      .replace(/\bln\.?\b/gi, "lane")
+      // "Dr." or "Dr " → "drive"
+      .replace(/\bdr\.?\b/gi, "drive")
+      // "Ct." or "Ct " → "court"
+      .replace(/\bct\.?\b/gi, "court")
+      // "Blvd." or "Blvd " → "boulevard"
+      .replace(/\bblvd\.?\b/gi, "boulevard")
+      // "Hwy." or "Hwy " → "highway"
+      .replace(/\bhwy\.?\b/gi, "highway")
+      // "Pl." or "Pl " → "place"
+      .replace(/\bpl\.?\b/gi, "place")
+      // "Sq." or "Sq " → "square"
+      .replace(/\bsq\.?\b/gi, "square")
+      // "N." or "N " → "north"
+      .replace(/\bn\.?\s/gi, "north ")
+      // "S." or "S " → "south"
+      .replace(/\bs\.?\s/gi, "south ")
+      // "E." or "E " → "east"
+      .replace(/\be\.?\s/gi, "east ")
+      // "W." or "W " → "west"
+      .replace(/\bw\.?\s/gi, "west ")
+      // Remove apostrophes and quotes
+      .replace(/[''"`]/g, "")
+      // Remove periods
+      .replace(/\./g, "")
+      // Replace hyphens with spaces
+      .replace(/-/g, " ")
+      // Collapse multiple spaces
+      .replace(/\s+/g, " ")
+      // Trim
+      .trim()
+  );
+}
+
+/**
+ * Calculate similarity score between two normalized street names
+ *
+ * Uses a simple similarity algorithm based on matching words.
+ * Returns a score from 0 (no match) to 1 (exact match).
+ *
+ * @param name1 - First normalized street name
+ * @param name2 - Second normalized street name
+ * @returns Similarity score (0-1)
+ *
+ * @example
+ * calculateStreetNameSimilarity("peascod street", "peascod street")  // 1.0
+ * calculateStreetNameSimilarity("main street", "main st")  // 0.5 (after normalization: 1.0)
+ * calculateStreetNameSimilarity("oak avenue", "pine avenue")  // 0.5
+ */
+export function calculateStreetNameSimilarity(
+  name1: string,
+  name2: string
+): number {
+  // Exact match
+  if (name1 === name2) return 1.0;
+
+  // Split into words
+  const words1 = name1.split(" ").filter((w) => w.length > 0);
+  const words2 = name2.split(" ").filter((w) => w.length > 0);
+
+  if (words1.length === 0 || words2.length === 0) return 0;
+
+  // Count matching words
+  const matchingWords = words1.filter((w) => words2.includes(w)).length;
+
+  // Calculate Jaccard-like similarity
+  const totalUniqueWords = new Set([...words1, ...words2]).size;
+  return matchingWords / totalUniqueWords;
+}
+
+/**
+ * Check if two street names match (with fuzzy matching)
+ *
+ * Combines normalization and similarity scoring to determine
+ * if two street names refer to the same street.
+ *
+ * @param name1 - First street name (from Mapbox or OSM)
+ * @param name2 - Second street name (from Mapbox or OSM)
+ * @param threshold - Minimum similarity score for a match (default: 0.8)
+ * @returns true if names match, false otherwise
+ *
+ * @example
+ * streetNamesMatch("St. Alban's Street", "Saint Alban's Street")  // true
+ * streetNamesMatch("Main Road", "Main Rd")  // true
+ * streetNamesMatch("Oak Avenue", "Pine Avenue")  // false
+ */
+export function streetNamesMatch(
+  name1: string,
+  name2: string,
+  threshold: number = 0.8
+): boolean {
+  const normalized1 = normalizeStreetNameForMatching(name1);
+  const normalized2 = normalizeStreetNameForMatching(name2);
+
+  // Exact match after normalization
+  if (normalized1 === normalized2) return true;
+
+  // Fuzzy match if above threshold
+  const similarity = calculateStreetNameSimilarity(normalized1, normalized2);
+  return similarity >= threshold;
+}
+
+/**
  * Check if a street is unnamed
  *
  * Determines if a street should be treated as "unnamed" for bucketing.
@@ -234,6 +372,11 @@ function aggregateNamedStreets(
       STREET_AGGREGATION.MAX_DISPLAY_COVERAGE_RATIO
     );
 
+    // Clamp distance covered to total length for UX
+    // You can't "cover" more than 100% of a street's unique length
+    // (raw distance is preserved in rawCoverageRatio for debugging)
+    const clampedDistanceCovered = Math.min(totalDistanceCovered, totalLength);
+
     // Determine completion status based on geometry ratio if available
     // Otherwise use regular coverage ratio
     const effectiveCoverageRatio = rawCoverageRatio;
@@ -248,7 +391,8 @@ function aggregateNamedStreets(
       normalizedName,
       highwayType,
       totalLengthMeters: Math.round(totalLength * 100) / 100,
-      totalDistanceCoveredMeters: Math.round(totalDistanceCovered * 100) / 100,
+      totalDistanceCoveredMeters: Math.round(clampedDistanceCovered * 100) / 100,
+      totalDistanceRunMeters: Math.round(totalDistanceCovered * 100) / 100, // Actual distance run (unclamped)
       coverageRatio: Math.round(coverageRatio * 1000) / 1000,
       rawCoverageRatio: Math.round(rawCoverageRatio * 1000) / 1000,
       completionStatus,
@@ -257,10 +401,16 @@ function aggregateNamedStreets(
     });
   }
 
-  // Sort by distance covered (most covered first)
-  return aggregatedStreets.sort(
-    (a, b) => b.totalDistanceCoveredMeters - a.totalDistanceCoveredMeters
-  );
+  // Sort by coverage ratio (most complete first), then by length
+  // This puts fully completed streets at the top
+  return aggregatedStreets.sort((a, b) => {
+    // First sort by coverage ratio (descending)
+    if (b.coverageRatio !== a.coverageRatio) {
+      return b.coverageRatio - a.coverageRatio;
+    }
+    // Then by total length (descending) for streets with same coverage
+    return b.totalLengthMeters - a.totalLengthMeters;
+  });
 }
 
 // ============================================
@@ -320,8 +470,11 @@ function bucketUnnamedRoads(
       0
     );
 
+    // Clamp distance covered to total length for consistency
+    const clampedDistanceCovered = Math.min(totalDistanceCovered, totalLength);
+
     const coverageRatio =
-      totalLength > 0 ? totalDistanceCovered / totalLength : 0;
+      totalLength > 0 ? clampedDistanceCovered / totalLength : 0;
 
     // Count full vs partial completions
     const fullCount = groupSegments.filter(
@@ -336,7 +489,8 @@ function bucketUnnamedRoads(
       highwayType,
       displayName,
       totalLengthMeters: Math.round(totalLength * 100) / 100,
-      totalDistanceCoveredMeters: Math.round(totalDistanceCovered * 100) / 100,
+      totalDistanceCoveredMeters: Math.round(clampedDistanceCovered * 100) / 100,
+      totalDistanceRunMeters: Math.round(totalDistanceCovered * 100) / 100, // Actual distance run (unclamped)
       coverageRatio: Math.round(coverageRatio * 1000) / 1000,
       segmentCount: groupSegments.length,
       fullCount,
@@ -344,10 +498,13 @@ function bucketUnnamedRoads(
     });
   }
 
-  // Sort by distance covered (most covered first)
-  return buckets.sort(
-    (a, b) => b.totalDistanceCoveredMeters - a.totalDistanceCoveredMeters
-  );
+  // Sort by coverage ratio (most complete first), then by length
+  return buckets.sort((a, b) => {
+    if (b.coverageRatio !== a.coverageRatio) {
+      return b.coverageRatio - a.coverageRatio;
+    }
+    return b.totalLengthMeters - a.totalLengthMeters;
+  });
 }
 
 /**
