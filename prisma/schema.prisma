@@ -28,4 +28,126 @@ model User {
   
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+
+  // Relations
+  routes        Route[]
+  activities    Activity[]
+}
+
+// ============================================
+// Route Model
+// ============================================
+
+model Route {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name            String
+  centerLat       Float
+  centerLng       Float
+  radiusMeters    Int       // Allowed: 500, 1000, 2000, 5000, 10000
+  
+  // Street snapshot stored as JSON
+  // Structure: { streets: SnapshotStreet[], snapshotDate: string }
+  streetsSnapshot Json
+  snapshotDate    DateTime
+  
+  // Cached statistics (avoid recalculating on every view)
+  totalStreets      Int
+  totalLengthMeters Float
+  completedStreets  Int       @default(0)
+  progress          Float     @default(0)  // 0-100 percentage
+  
+  deadline        DateTime?
+  isArchived      Boolean   @default(false)
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  activities      RouteActivity[]
+
+  @@index([userId])
+  @@index([userId, isArchived])
+}
+
+// ============================================
+// Activity Model
+// ============================================
+
+model Activity {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  stravaId        String    @unique
+  name            String
+  distanceMeters  Float
+  durationSeconds Int
+  startDate       DateTime
+  activityType    String    @default("Run")
+  
+  // GPS coordinates from Strava streams
+  // Structure: GpxPoint[] (lat, lng, elevation?, timestamp?)
+  coordinates     Json
+  
+  // Processing status
+  isProcessed     Boolean   @default(false)
+  processedAt     DateTime?
+  
+  createdAt       DateTime  @default(now())
+  
+  // Relations
+  routes          RouteActivity[]
+
+  @@index([userId])
+  @@index([stravaId])
+  @@index([userId, startDate])
+}
+
+// ============================================
+// RouteActivity Junction Model
+// ============================================
+
+model RouteActivity {
+  id              String    @id @default(uuid())
+  routeId         String
+  activityId      String
+  route           Route     @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  activity        Activity  @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  
+  // Impact of this activity on the route
+  streetsCompleted  Int
+  streetsImproved   Int
+  
+  // Detailed impact breakdown (optional)
+  // Structure: { completed: string[], improved: {osmId, from, to}[] }
+  impactDetails     Json?
+  
+  createdAt       DateTime  @default(now())
+
+  @@unique([routeId, activityId])
+  @@index([routeId])
+  @@index([activityId])
+}
+
+// ============================================
+// Geometry Cache Model
+// ============================================
+
+model GeometryCache {
+  id            String    @id @default(uuid())
+  
+  // Cache key format: "radius:{lat}:{lng}:{meters}" or "bbox:{s}:{w}:{n}:{e}"
+  cacheKey      String    @unique
+  
+  // Cached street geometries (OsmStreet[] with full geometry)
+  geometries    Json
+  
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+
+  @@index([cacheKey])
+  @@index([expiresAt])
 }

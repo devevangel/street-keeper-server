@@ -42,6 +42,7 @@ export const ERROR_CODES = {
   AUTH_INVALID_CODE: "AUTH_INVALID_CODE",
   AUTH_TOKEN_EXPIRED: "AUTH_TOKEN_EXPIRED",
   AUTH_CONFIG_ERROR: "AUTH_CONFIG_ERROR",
+  AUTH_REQUIRED: "AUTH_REQUIRED",
 
   // General errors
   INTERNAL_ERROR: "INTERNAL_ERROR",
@@ -57,6 +58,25 @@ export const ERROR_CODES = {
   OVERPASS_API_ERROR: "OVERPASS_API_ERROR",
   STREET_MATCHING_FAILED: "STREET_MATCHING_FAILED",
   MAPBOX_API_ERROR: "MAPBOX_API_ERROR",
+
+  // Route errors
+  ROUTE_NOT_FOUND: "ROUTE_NOT_FOUND",
+  ROUTE_INVALID_RADIUS: "ROUTE_INVALID_RADIUS",
+  ROUTE_NO_STREETS: "ROUTE_NO_STREETS",
+  ROUTE_ACCESS_DENIED: "ROUTE_ACCESS_DENIED",
+
+  // Activity errors
+  ACTIVITY_NOT_FOUND: "ACTIVITY_NOT_FOUND",
+  ACTIVITY_ALREADY_EXISTS: "ACTIVITY_ALREADY_EXISTS",
+  ACTIVITY_PROCESSING_FAILED: "ACTIVITY_PROCESSING_FAILED",
+
+  // Webhook errors
+  WEBHOOK_INVALID_SIGNATURE: "WEBHOOK_INVALID_SIGNATURE",
+  WEBHOOK_VERIFICATION_FAILED: "WEBHOOK_VERIFICATION_FAILED",
+
+  // Strava API errors
+  STRAVA_API_ERROR: "STRAVA_API_ERROR",
+  STRAVA_TOKEN_REFRESH_FAILED: "STRAVA_TOKEN_REFRESH_FAILED",
 } as const;
 
 // ============================================
@@ -189,5 +209,187 @@ export const MAPBOX = {
   // Minimum confidence threshold for accepting a match
   // Mapbox returns confidence 0-1; below this threshold, match is rejected
   MIN_CONFIDENCE: 0.5,
+} as const;
+
+// ============================================
+// Routes Configuration
+// ============================================
+
+/**
+ * Route creation and management constants
+ * 
+ * Routes define geographic areas (circles) where users track street completion.
+ * Users select a center point and radius to create a route, then the system
+ * tracks which streets they've run.
+ */
+export const ROUTES = {
+  /**
+   * Allowed radius values in meters
+   * Limited set prevents excessively large or small routes
+   * - 500m: Small neighborhood
+   * - 1000m: Large neighborhood
+   * - 2000m: Small town area (default)
+   * - 5000m: Town/city district
+   * - 10000m: Large city area
+   */
+  ALLOWED_RADII: [500, 1000, 2000, 5000, 10000] as const,
+
+  /**
+   * Days before route snapshot is considered stale
+   * When user views route, if snapshot is older than this, refresh from OSM
+   * 30 days balances freshness with API usage
+   */
+  SNAPSHOT_REFRESH_DAYS: 30,
+
+  /**
+   * Street count threshold for warning
+   * If route contains more streets than this, show warning to user
+   * Large routes may be overwhelming to complete
+   */
+  MAX_STREETS_WARNING: 500,
+
+  /**
+   * Highway types that are typically not runnable
+   * Used to generate warnings during route preview
+   */
+  NON_RUNNABLE_HIGHWAYS: ["motorway", "trunk", "motorway_link", "trunk_link"],
+} as const;
+
+// ============================================
+// Activities Configuration
+// ============================================
+
+/**
+ * Activity types and processing constants
+ * 
+ * Activities are synced from Strava via webhook.
+ * Only certain activity types are processed for street tracking.
+ */
+export const ACTIVITIES = {
+  /**
+   * Strava activity types that count for street completion
+   * Only these types will be processed when received via webhook
+   */
+  ALLOWED_TYPES: ["Run", "Walk", "Hike", "Trail Run"] as const,
+
+  /**
+   * Minimum distance in meters for activity to be processed
+   * Very short activities are likely GPS errors or false starts
+   */
+  MIN_DISTANCE_METERS: 100,
+
+  /**
+   * Maximum age of activity to process (in days)
+   * Prevents processing very old backlog if webhook was delayed
+   */
+  MAX_AGE_DAYS: 30,
+} as const;
+
+// ============================================
+// Geometry Cache Configuration
+// ============================================
+
+/**
+ * Caching configuration for street geometries
+ * 
+ * Geometry cache reduces Overpass API calls by storing street data
+ * in the database. Used for:
+ * - Route preview (before creation)
+ * - Map view (street geometries)
+ * - Activity processing (matching streets)
+ */
+export const GEOMETRY_CACHE = {
+  /**
+   * Cache time-to-live in hours
+   * Street geometries don't change often, 24h is reasonable
+   */
+  TTL_HOURS: 24,
+
+  /**
+   * Prefix for cache keys
+   * Keys are formatted as: "geo:radius:{lat}:{lng}:{meters}"
+   */
+  KEY_PREFIX: "geo:",
+
+  /**
+   * Number of decimal places for coordinate rounding in cache keys
+   * 4 decimal places = ~11m accuracy (sufficient for caching)
+   */
+  COORD_PRECISION: 4,
+} as const;
+
+// ============================================
+// Job Queue Configuration (BullMQ)
+// ============================================
+
+/**
+ * BullMQ job queue configuration
+ * 
+ * Activity processing is handled asynchronously via BullMQ.
+ * Webhook receives activity notification, saves to DB, then enqueues
+ * a processing job. Worker picks up job and processes in background.
+ */
+export const QUEUE = {
+  /**
+   * Queue name for activity processing jobs
+   */
+  ACTIVITY_PROCESSING: "activity-processing",
+
+  /**
+   * Redis connection URL
+   * Defaults to local Redis if not specified
+   */
+  REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
+
+  /**
+   * Number of concurrent jobs to process
+   * Higher = faster processing, but more load on external APIs
+   */
+  CONCURRENCY: 5,
+
+  /**
+   * Job retry configuration
+   * Failed jobs are retried with exponential backoff
+   */
+  RETRY: {
+    MAX_ATTEMPTS: 3,
+    BACKOFF_TYPE: "exponential" as const,
+    BACKOFF_DELAY_MS: 5000, // 5s, 10s, 20s
+  },
+
+  /**
+   * Job timeout in milliseconds
+   * Jobs taking longer than this are considered failed
+   */
+  JOB_TIMEOUT_MS: 120000, // 2 minutes (allows for slow Overpass)
+} as const;
+
+// ============================================
+// Strava Webhook Configuration
+// ============================================
+
+/**
+ * Strava webhook constants
+ * 
+ * Strava sends webhook events when users create/update/delete activities.
+ * We must respond within 2 seconds, so actual processing is queued.
+ * 
+ * @see https://developers.strava.com/docs/webhooks/
+ */
+export const STRAVA_WEBHOOK = {
+  /**
+   * Maximum response time for webhook (Strava requirement)
+   * Must respond within this time or Strava considers delivery failed
+   */
+  MAX_RESPONSE_TIME_MS: 2000,
+
+  /**
+   * Event types we care about
+   * We only process activity creates (not updates or deletes)
+   */
+  SUPPORTED_EVENTS: {
+    OBJECT_TYPE: "activity",
+    ASPECT_TYPE: "create",
+  },
 } as const;
 
