@@ -337,6 +337,48 @@ All routes are mounted under `/api/v1` via the server:
 app.use(API.PREFIX, routes); // API.PREFIX = "/api/v1"
 ```
 
+### Authentication Middleware
+
+Protected routes use the `requireAuth` middleware from `middleware/auth.middleware.ts`:
+
+```typescript
+import { requireAuth } from "../middleware/auth.middleware.js";
+
+const router = Router();
+
+// Apply to all routes in this router
+router.use(requireAuth);
+
+// Or apply to specific routes
+router.get("/protected", requireAuth, async (req, res) => {
+  // req.user is guaranteed to exist
+  const userId = req.user!.id;
+});
+```
+
+**Middleware exports:**
+- `requireAuth` - Requires authentication, returns 401 if not authenticated
+- `optionalAuth` - Attaches user if authenticated, continues regardless
+- `isAuthenticated(req)` - Type guard to check if request is authenticated
+
+**Request augmentation:**
+After `requireAuth`, `req.user` contains:
+```typescript
+interface AuthenticatedUser {
+  id: string;        // User UUID
+  name: string;      // Display name
+  email: string | null;
+  stravaId: string | null;
+  profilePic: string | null;
+}
+```
+
+**Development mode:**
+Use `x-user-id` header for testing without full auth flow:
+```bash
+curl -H "x-user-id: abc-123" http://localhost:8000/api/v1/routes
+```
+
 ---
 
 ## Service Layer Patterns
@@ -794,53 +836,236 @@ import { buildAuthorizationUrl } from "../services/strava.service.ts";
 
 ## Code Documentation
 
+**Philosophy**: Code should be self-documenting where possible, but complex logic, algorithms, and service functions require comprehensive documentation. The goal is for any developer (or AI assistant) to understand the code's purpose, behavior, and edge cases without needing to trace through the implementation.
+
 ### File Headers
 
-Every file starts with a JSDoc comment explaining its purpose:
+Every file starts with a detailed JSDoc comment explaining:
+1. **Purpose**: What this file/module does
+2. **Context**: How it fits into the larger system
+3. **Key concepts**: Important algorithms or patterns used
+4. **Example usage**: How to use the main exports
 
 ```typescript
 /**
- * Authentication Routes
- * Handles OAuth flows for Strava (and later Garmin)
+ * Geometry Cache Service
+ * Caches street geometries to reduce Overpass API calls
+ * 
+ * This service provides a caching layer for street geometry data retrieved
+ * from OpenStreetMap via Overpass API. Key features:
+ * 
+ * 1. **24-hour TTL**: Cached data expires after 24 hours
+ * 2. **Smart key generation**: Cache keys include coordinates and radius
+ * 3. **Larger radius filtering**: Can filter cached larger-radius results for smaller requests
+ * 
+ * Cache is stored in PostgreSQL (GeometryCache table) rather than Redis
+ * to simplify deployment and because street data is relatively static.
+ * 
+ * @example
+ * // Check cache before querying Overpass
+ * const cacheKey = generateRadiusCacheKey(50.788, -1.089, 2000);
+ * let streets = await getCachedGeometries(cacheKey);
+ * 
+ * if (!streets) {
+ *   streets = await queryStreetsInRadius(50.788, -1.089, 2000);
+ *   await setCachedGeometries(cacheKey, streets);
+ * }
  */
 ```
 
 ### Function Documentation
 
-Use JSDoc for exported functions:
+**All exported functions must have comprehensive JSDoc** that includes:
+
+1. **Description**: What the function does and WHY (not just WHAT)
+2. **@param tags**: Each parameter with type and meaning
+3. **@returns tag**: What is returned and when
+4. **@throws tag**: Errors that can be thrown
+5. **@example**: Usage example for complex functions
 
 ```typescript
 /**
- * Exchange authorization code for access and refresh tokens
- * Called after user authorizes on Strava
+ * Query streets within a radius from a center point
+ * 
+ * Used for creating Routes - queries all streets within a circular area
+ * around a center point. This is more appropriate for Routes than bounding
+ * box queries because Routes are defined by center + radius.
+ * 
+ * Features:
+ * - Queries by radius (circular area) instead of bounding box
+ * - Only returns named streets (filters out unnamed roads)
+ * - Same retry/fallback logic as bounding box query
+ * 
+ * @param centerLat - Center latitude of the search area
+ * @param centerLng - Center longitude of the search area
+ * @param radiusMeters - Radius in meters (e.g., 2000 for 2km)
+ * @returns Array of OsmStreet objects with name, length, and geometry
+ * @throws OverpassError if all API requests fail after retries
+ * 
+ * @example
+ * // Query streets within 2km of a point
+ * const streets = await queryStreetsInRadius(50.788, -1.089, 2000);
+ * // Returns: [
+ * //   { osmId: "way/123", name: "High Street", lengthMeters: 450, ... },
+ * //   { osmId: "way/456", name: "Park Lane", lengthMeters: 320, ... },
+ * // ]
  */
-export async function exchangeCodeForTokens(code: string): Promise<StravaTokenResponse> {
-  // ...
+export async function queryStreetsInRadius(
+  centerLat: number,
+  centerLng: number,
+  radiusMeters: number
+): Promise<OsmStreet[]> {
+  // Implementation...
 }
+```
+
+### Section Comments
+
+Use visual separators to organize code into logical sections:
+
+```typescript
+// ============================================
+// Cache Read/Write Operations
+// ============================================
 
 /**
- * Check if a token is expired or will expire soon
- * @param expiresAt - Unix timestamp (seconds) when token expires
- * @returns true if token is expired or will expire within buffer period
+ * Get cached geometries by cache key
+ * ...
  */
-export function isTokenExpired(expiresAt: number | Date): boolean {
-  // ...
-}
+export async function getCachedGeometries(...) { }
+
+/**
+ * Store geometries in cache
+ * ...
+ */
+export async function setCachedGeometries(...) { }
+
+// ============================================
+// Smart Caching (Larger Radius Filtering)
+// ============================================
+
+/**
+ * Find a larger cached radius...
+ */
+export async function findLargerCachedRadius(...) { }
 ```
 
 ### Inline Comments
 
-Use sparingly for non-obvious logic:
+Use inline comments to explain:
+1. **WHY** something is done (not what - the code shows what)
+2. **Non-obvious logic** or algorithms
+3. **Edge cases** being handled
+4. **Magic numbers** or constants
+5. **Workarounds** or temporary solutions
 
 ```typescript
-// Token expired, refresh it
-try {
-  const refreshData = await refreshAccessToken(user.stravaRefreshToken);
-  // ...
+// Use MAX percentage - never decrease progress even if re-running
+// a route that was previously done better
+if (update.percentage > street.percentage) {
+  street.percentage = update.percentage;
 }
 
-// Convert Unix timestamp to Date
-stravaTokenExpiresAt: new Date(expires_at * 1000),
+// Exponential backoff: 1s, 2s, 4s (max 5s)
+// Prevents overwhelming the server during temporary issues
+const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+
+// Round coordinates to 4 decimal places (~11m accuracy)
+// This improves cache hit rates for nearby queries
+const precision = GEOMETRY_CACHE.COORD_PRECISION;
+```
+
+### Algorithm Documentation
+
+For complex algorithms, include a high-level explanation:
+
+```typescript
+/**
+ * Two-phase overlap detection for activity-to-route matching
+ * 
+ * ALGORITHM:
+ * ---------
+ * Phase 1: Bounding Box Check (Fast Filter)
+ *   - Calculate activity bounding box (min/max lat/lng)
+ *   - Calculate route circular bounds
+ *   - If boxes don't overlap → skip route (no match possible)
+ *   - This eliminates most routes in O(1) time
+ * 
+ * Phase 2: Point-in-Circle Check (Precise)
+ *   - Only for routes that passed Phase 1
+ *   - Check if ANY activity point falls within route radius
+ *   - Uses Haversine distance for accuracy on Earth's surface
+ * 
+ * PERFORMANCE:
+ *   - Without bbox: O(n * m) where n=routes, m=points
+ *   - With bbox: O(n) for most cases, O(n * m) worst case
+ *   - Typically 10-100x faster for users with many routes
+ */
+function detectOverlappingRoutes(activity: Activity, routes: Route[]): Route[] {
+  // Implementation...
+}
+```
+
+### Type Documentation
+
+Document interfaces with field-level comments:
+
+```typescript
+/**
+ * Snapshot of a street's progress within a route
+ * 
+ * Stored in Route.streetsSnapshot JSON field.
+ * Progress is tracked as percentage (0-100) of street length covered.
+ */
+export interface SnapshotStreet {
+  /** OSM way ID in format "way/123456789" */
+  osmId: string;
+  
+  /** Street name from OSM, or "Unnamed Road" */
+  name: string;
+  
+  /** Total length of this street segment in meters */
+  lengthMeters: number;
+  
+  /** OSM highway type (residential, footway, etc.) */
+  highwayType: string;
+  
+  /** True if percentage >= 90% (completion threshold) */
+  completed: boolean;
+  
+  /** Percentage of street length covered (0-100) */
+  percentage: number;
+  
+  /** ISO date string of last run on this street, or null */
+  lastRunDate: string | null;
+  
+  /** True if this street was added in a recent refresh */
+  isNew?: boolean;
+}
+```
+
+### Error Class Documentation
+
+```typescript
+/**
+ * Error thrown when route is not found
+ * 
+ * This error indicates:
+ * - Route ID doesn't exist in database
+ * - Route was deleted
+ * 
+ * HTTP Status: 404
+ * Error Code: ROUTE_NOT_FOUND
+ */
+export class RouteNotFoundError extends Error {
+  public routeId: string;
+
+  constructor(routeId: string) {
+    super(`Route not found: ${routeId}`);
+    this.name = "RouteNotFoundError";
+    this.routeId = routeId;
+  }
+}
 ```
 
 ---
@@ -886,6 +1111,9 @@ stravaTokenExpiresAt: new Date(expires_at * 1000),
 | `STRAVA_CLIENT_SECRET` | Strava OAuth client secret | - | Required for Strava integration |
 | `STRAVA_REDIRECT_URI` | Strava OAuth callback URL | - | Required for Strava integration |
 | `MAPBOX_ACCESS_TOKEN` | Mapbox API access token | - | Enables high-accuracy GPS matching |
+| `DISABLE_QUEUE` | Disable job queue | `false` | Set to `true` to run without job processing |
+| `STRAVA_WEBHOOK_VERIFY_TOKEN` | Webhook verification token | `street-keeper-verify-token` | Set when creating Strava subscription |
+| `BASE_URL` | Public base URL of the server | `http://localhost:8000` | Used for webhook callback URL |
 
 ### Mapbox Configuration
 
@@ -924,7 +1152,30 @@ MAPBOX_ACCESS_TOKEN=pk.your_mapbox_access_token_here
 STRAVA_CLIENT_ID=your_client_id
 STRAVA_CLIENT_SECRET=your_client_secret
 STRAVA_REDIRECT_URI=http://localhost:8000/api/v1/auth/strava/callback
+
+# Optional (for webhook integration)
+STRAVA_WEBHOOK_VERIFY_TOKEN=street-keeper-verify-token
+BASE_URL=http://localhost:8000
 ```
+
+### Job Queue Configuration (pg-boss)
+
+Activity processing uses pg-boss for asynchronous job queuing. pg-boss stores jobs in PostgreSQL, so **no additional infrastructure is needed** - it uses the same database as Prisma.
+
+**How it works:**
+
+1. When Strava sends a webhook notification, we queue a job immediately
+2. The webhook returns within 2 seconds (Strava requirement)
+3. The worker picks up the job and processes it in the background
+4. pg-boss handles retries, deduplication, and job cleanup
+
+**Schema creation:**
+
+pg-boss automatically creates a `pgboss` schema in your database on first run. This is separate from your app's tables and doesn't interfere with Prisma migrations.
+
+**Disabling the queue:**
+
+Set `DISABLE_QUEUE=true` to run without job processing (useful for testing routes without webhook functionality).
 
 ---
 
@@ -932,5 +1183,8 @@ STRAVA_REDIRECT_URI=http://localhost:8000/api/v1/auth/strava/callback
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-01-20 | 1.4.0 | Replaced BullMQ/Redis with pg-boss (PostgreSQL-based queue) |
+| 2026-01-20 | 1.3.0 | Added Redis/BullMQ configuration documentation |
+| 2026-01-19 | 1.2.0 | Expanded Code Documentation section with comprehensive JSDoc guidelines |
 | 2026-01-18 | 1.1.0 | Added Mapbox integration documentation |
 | 2026-01-17 | 1.0.0 | Initial documentation |

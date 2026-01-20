@@ -4,6 +4,7 @@ import "dotenv/config";
 import express, { Application, Request, Response } from "express";
 import cors from "cors";
 import routes from "./routes/index.js";
+import docsRoutes from "./routes/docs.routes.js";
 import { API } from "./config/constants.js";
 
 // Initialize Express app
@@ -14,6 +15,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Documentation Routes (mounted before API for /docs prefix)
+app.use("/docs", docsRoutes);
 
 // API Routes
 app.use(API.PREFIX, routes);
@@ -33,8 +37,11 @@ app.get("/", (req: Request, res: Response) => {
   res.json({
     message: "Welcome to Street Keeper API",
     version: "1.0.0",
+    documentation: "/docs",
     endpoints: {
       health: "/health",
+      docs: "/docs",
+      api: "/docs/api",
       auth: {
         strava: "/api/v1/auth/strava",
         stravaCallback: "/api/v1/auth/strava/callback",

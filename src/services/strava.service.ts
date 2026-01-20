@@ -134,3 +134,204 @@ export function isTokenExpired(expiresAt: number | Date): boolean {
   const nowSeconds = Math.floor(Date.now() / 1000);
   return expiresAtSeconds - nowSeconds <= STRAVA.TOKEN_REFRESH_BUFFER_SECONDS;
 }
+
+// ============================================
+// Activity Fetching (for Webhook Processing)
+// ============================================
+
+import type {
+  StravaActivity,
+  StravaStream,
+} from "../types/activity.types.js";
+import type { GpxPoint } from "../types/run.types.js";
+
+/**
+ * Fetch a single activity from Strava API
+ * 
+ * Called when webhook notifies us of a new activity.
+ * Returns activity metadata (name, distance, duration, etc.)
+ * 
+ * @param accessToken - Valid Strava access token
+ * @param activityId - Strava activity ID (from webhook)
+ * @returns Activity metadata
+ * @throws Error if API call fails
+ * 
+ * @example
+ * const activity = await fetchActivity(token, "12345678");
+ * console.log(activity.name); // "Morning Run"
+ * console.log(activity.distance); // 5234.2 (meters)
+ */
+export async function fetchActivity(
+  accessToken: string,
+  activityId: string
+): Promise<StravaActivity> {
+  try {
+    const response = await axios.get<StravaActivity>(
+      `${STRAVA.API_BASE_URL}/activities/${activityId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 30000, // 30 second timeout
+      }
+    );
+
+    return response.data;
+  } catch (error) {
+    if (error instanceof AxiosError) {
+      if (error.response?.status === 404) {
+        throw new StravaApiError(
+          `Activity ${activityId} not found`,
+          "ACTIVITY_NOT_FOUND"
+        );
+      }
+      if (error.response?.status === 401) {
+        throw new StravaApiError(
+          "Strava access token is invalid or expired",
+          "TOKEN_INVALID"
+        );
+      }
+      throw new StravaApiError(
+        `Failed to fetch activity: ${error.response?.data?.message || error.message}`,
+        "API_ERROR"
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Fetch GPS streams (detailed coordinates) for an activity
+ * 
+ * Strava streams provide detailed GPS data (~1 point per second).
+ * This is much more accurate than the simplified polyline.
+ * 
+ * Streams available:
+ * - latlng: GPS coordinates [lat, lng]
+ * - time: Seconds from start
+ * - distance: Meters from start
+ * - altitude: Elevation in meters
+ * 
+ * @param accessToken - Valid Strava access token
+ * @param activityId - Strava activity ID
+ * @returns Stream data with coordinates and timestamps
+ * @throws Error if API call fails
+ * 
+ * @example
+ * const streams = await fetchActivityStreams(token, "12345678");
+ * console.log(streams.latlng.data.length); // ~1800 points for 30min run
+ */
+export async function fetchActivityStreams(
+  accessToken: string,
+  activityId: string
+): Promise<StravaStream> {
+  try {
+    const response = await axios.get<StravaStream>(
+      `${STRAVA.API_BASE_URL}/activities/${activityId}/streams`,
+      {
+        params: {
+          // Request these stream types
+          keys: "latlng,time,distance,altitude",
+          // Return as object keyed by type (easier to work with)
+          key_by_type: true,
+        },
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 30000,
+      }
+    );
+
+    return response.data;
+  } catch (error) {
+    if (error instanceof AxiosError) {
+      if (error.response?.status === 404) {
+        throw new StravaApiError(
+          `Streams not found for activity ${activityId}`,
+          "STREAMS_NOT_FOUND"
+        );
+      }
+      if (error.response?.status === 401) {
+        throw new StravaApiError(
+          "Strava access token is invalid or expired",
+          "TOKEN_INVALID"
+        );
+      }
+      throw new StravaApiError(
+        `Failed to fetch streams: ${error.response?.data?.message || error.message}`,
+        "API_ERROR"
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Convert Strava streams to GpxPoint array
+ * 
+ * Transforms Strava's stream format into our internal GpxPoint format
+ * that's compatible with the existing street matching services.
+ * 
+ * @param streams - Strava stream data (from fetchActivityStreams)
+ * @param startDate - Activity start time (for calculating timestamps)
+ * @returns Array of GpxPoint objects ready for street matching
+ * 
+ * @example
+ * const streams = await fetchActivityStreams(token, activityId);
+ * const points = streamsToGpxPoints(streams, new Date(activity.start_date));
+ * const matched = await matchPointsToStreetsHybrid(points, streets);
+ */
+export function streamsToGpxPoints(
+  streams: StravaStream,
+  startDate: Date
+): GpxPoint[] {
+  // Need at least latlng data
+  if (!streams.latlng?.data || streams.latlng.data.length === 0) {
+    return [];
+  }
+
+  const points: GpxPoint[] = [];
+  const latlngData = streams.latlng.data;
+  const timeData = streams.time?.data;
+  const altitudeData = streams.altitude?.data;
+
+  for (let i = 0; i < latlngData.length; i++) {
+    const [lat, lng] = latlngData[i];
+
+    const point: GpxPoint = {
+      lat,
+      lng,
+    };
+
+    // Add elevation if available
+    if (altitudeData && altitudeData[i] !== undefined) {
+      point.elevation = altitudeData[i];
+    }
+
+    // Add timestamp if time data available
+    if (timeData && timeData[i] !== undefined) {
+      // timeData[i] is seconds from start
+      point.timestamp = new Date(startDate.getTime() + timeData[i] * 1000);
+    }
+
+    points.push(point);
+  }
+
+  return points;
+}
+
+// ============================================
+// Custom Error Class for Strava API
+// ============================================
+
+/**
+ * Custom error class for Strava API errors
+ * 
+ * Provides structured error information for handling different
+ * failure scenarios (auth issues, rate limits, etc.)
+ */
+export class StravaApiError extends Error {
+  public code: string;
+
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "StravaApiError";
+    this.code = code;
+  }
+}

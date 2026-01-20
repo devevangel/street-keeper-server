@@ -26,8 +26,12 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
+    "marked": "^17.0.1",
     "multer": "^2.0.2",
-    "pg": "^8.17.1"
+    "pg": "^8.17.1",
+    "pg-boss": "^12.5.4",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
@@ -37,6 +41,8 @@
     "@types/node": "^25.0.9",
     "@types/pg": "^8.16.0",
     "@types/supertest": "^6.0.3",
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
     "eslint": "^9.39.2",
     "nodemon": "^3.1.11",
     "prisma": "^7.2.0",

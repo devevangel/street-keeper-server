@@ -307,6 +307,160 @@ function parseOverpassResponse(data: OverpassResponse): OsmStreet[] {
 }
 
 // ============================================
+// Radius Query Function (for Routes)
+// ============================================
+
+/**
+ * Query streets within a radius from a center point
+ * 
+ * Used for creating Routes - queries all streets within a circular area
+ * around a center point. This is more appropriate for Routes than bounding
+ * box queries because Routes are defined by center + radius.
+ * 
+ * Features:
+ * - Queries by radius (circular area) instead of bounding box
+ * - Only returns named streets (filters out unnamed roads)
+ * - Same retry/fallback logic as bounding box query
+ * 
+ * @param centerLat - Center latitude of the search area
+ * @param centerLng - Center longitude of the search area
+ * @param radiusMeters - Radius in meters (e.g., 2000 for 2km)
+ * @returns Array of OsmStreet objects with name, length, and geometry
+ * @throws OverpassError if all API requests fail after retries
+ * 
+ * @example
+ * // Query streets within 2km of a point
+ * const streets = await queryStreetsInRadius(50.788, -1.089, 2000);
+ * // Returns: [
+ * //   { osmId: "way/123", name: "High Street", lengthMeters: 450, ... },
+ * //   { osmId: "way/456", name: "Park Lane", lengthMeters: 320, ... },
+ * // ]
+ */
+export async function queryStreetsInRadius(
+  centerLat: number,
+  centerLng: number,
+  radiusMeters: number
+): Promise<OsmStreet[]> {
+  // Build the highway type filter (residential|primary|secondary|...)
+  const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
+
+  // Construct Overpass QL query using "around" filter
+  // The "around" filter selects ways within a radius of a point
+  // Note: We include ["name"] to only get named streets
+  const query = `
+    [out:json][timeout:${OVERPASS.QUERY_TIMEOUT_SECONDS}];
+    way["highway"~"^(${highwayFilter})$"]["name"]
+      (around:${radiusMeters}, ${centerLat}, ${centerLng});
+    out body geom;
+  `;
+
+  // Use the same server list and retry logic
+  return executeOverpassQuery(query);
+}
+
+/**
+ * Query ALL streets (including unnamed) within a radius
+ * 
+ * Similar to queryStreetsInRadius but includes unnamed roads.
+ * Used when we need complete street coverage (e.g., for accurate map display).
+ * 
+ * @param centerLat - Center latitude of the search area
+ * @param centerLng - Center longitude of the search area
+ * @param radiusMeters - Radius in meters
+ * @returns Array of OsmStreet objects (includes unnamed roads)
+ */
+export async function queryAllStreetsInRadius(
+  centerLat: number,
+  centerLng: number,
+  radiusMeters: number
+): Promise<OsmStreet[]> {
+  const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
+
+  // Same query but without ["name"] filter
+  const query = `
+    [out:json][timeout:${OVERPASS.QUERY_TIMEOUT_SECONDS}];
+    way["highway"~"^(${highwayFilter})$"]
+      (around:${radiusMeters}, ${centerLat}, ${centerLng});
+    out body geom;
+  `;
+
+  return executeOverpassQuery(query);
+}
+
+/**
+ * Execute an Overpass query with retry and fallback logic
+ * 
+ * Internal helper that handles the actual API request with:
+ * - Multiple server fallbacks
+ * - Exponential backoff retries
+ * - Error classification and handling
+ * 
+ * @param query - Overpass QL query string
+ * @returns Parsed OsmStreet array
+ * @throws OverpassError if all attempts fail
+ */
+async function executeOverpassQuery(query: string): Promise<OsmStreet[]> {
+  const servers = [OVERPASS.API_URL, ...OVERPASS.FALLBACK_URLS];
+  const errors: string[] = [];
+
+  for (let serverIndex = 0; serverIndex < servers.length; serverIndex++) {
+    const serverUrl = servers[serverIndex];
+    const isLastServer = serverIndex === servers.length - 1;
+
+    for (let attempt = 0; attempt < OVERPASS.MAX_RETRIES; attempt++) {
+      try {
+        // Exponential backoff (except first attempt)
+        if (attempt > 0) {
+          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+
+        const response = await axios.post<OverpassResponse>(
+          serverUrl,
+          query,
+          {
+            headers: { "Content-Type": "text/plain" },
+            timeout: OVERPASS.TIMEOUT_MS,
+          }
+        );
+
+        console.log(
+          `[Overpass] Successfully queried ${serverUrl} (attempt ${attempt + 1})`
+        );
+        return parseOverpassResponse(response.data);
+      } catch (error) {
+        const errorMessage = getErrorMessage(error, serverUrl, attempt);
+        errors.push(errorMessage);
+
+        if (!isRetryableError(error)) {
+          throw new OverpassError(errorMessage);
+        }
+
+        if (attempt === OVERPASS.MAX_RETRIES - 1 && isLastServer) {
+          throw new OverpassError(
+            `All Overpass API servers failed after ${OVERPASS.MAX_RETRIES} attempts each. Last error: ${errorMessage}`
+          );
+        }
+
+        console.warn(
+          `[Overpass] ${serverUrl} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${errorMessage}`
+        );
+      }
+    }
+
+    if (!isLastServer) {
+      console.log(
+        `[Overpass] Switching to fallback server after ${OVERPASS.MAX_RETRIES} failed attempts`
+      );
+    }
+  }
+
+  throw new OverpassError(
+    `All Overpass API servers failed. Errors: ${errors.join("; ")}`
+  );
+}
+
+// ============================================
 // Custom Error Class
 // ============================================
 

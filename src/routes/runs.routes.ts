@@ -51,41 +51,77 @@ const router = Router();
 // ============================================
 
 /**
- * Upload and analyze a GPX file to identify all streets covered
- *
- * Phase 5 Implementation: Enhanced Analysis with Aggregation
- *
- * This endpoint accepts a GPX file upload and returns a comprehensive
- * analysis including:
- *
- * Basic Analysis:
- * - Run statistics (distance, duration, point count)
- * - Start/end times
- *
- * Phase 3 Enhancements:
- * - Moving vs stopped time breakdown
- * - Track quality metrics (point spacing, GPS jumps)
- *
- * Phase 4 Enhancements:
- * - Aggregated logical streets (groups OSM segments)
- * - Unnamed road bucketing (groups by highway type)
- * - Raw segment-level data (for debugging)
- *
- * Request:
- * - Method: POST
- * - Content-Type: multipart/form-data
- * - Body: gpx file in field named "gpx"
- *
- * Success Response (200): EnhancedAnalyzeGpxResponse
- * - analysis: EnhancedAnalysis with Phase 3 & 4 metrics
- * - segments: Raw segment-level data (MatchedStreet[])
- * - streets: Aggregated logical streets (AggregatedStreet[])
- * - unnamedRoads: Bucketed unnamed roads by highway type
- *
- * Error Responses:
- * - 400: Missing file, invalid format, parse error
- * - 502: OpenStreetMap API error
- * - 500: Internal server error
+ * @openapi
+ * /runs/analyze-gpx:
+ *   post:
+ *     summary: Upload and analyze a GPX file
+ *     description: |
+ *       Upload a GPX file and receive detailed street coverage analysis.
+ *       
+ *       **Features:**
+ *       - Run statistics (distance, duration, point count)
+ *       - Moving vs stopped time breakdown
+ *       - Track quality metrics (GPS jump detection)
+ *       - Aggregated logical streets (combines OSM segments)
+ *       - Unnamed roads grouped by highway type
+ *       
+ *       **Accuracy:**
+ *       - With Mapbox configured: ~98% accuracy
+ *       - Without Mapbox (fallback): ~85% accuracy
+ *       
+ *       **Note:** This endpoint does NOT require authentication.
+ *     tags: [GPX]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - gpx
+ *             properties:
+ *               gpx:
+ *                 type: string
+ *                 format: binary
+ *                 description: GPX file (max 10MB)
+ *     responses:
+ *       200:
+ *         description: GPX analysis complete
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GpxAnalysisResponse'
+ *       400:
+ *         description: Missing file, invalid format, or parse error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *             examples:
+ *               missingFile:
+ *                 summary: No file uploaded
+ *                 value:
+ *                   success: false
+ *                   error: "No GPX file provided. Upload a file in the 'gpx' field."
+ *                   code: "GPX_FILE_REQUIRED"
+ *               parseError:
+ *                 summary: Invalid GPX format
+ *                 value:
+ *                   success: false
+ *                   error: "Invalid GPX file format"
+ *                   code: "GPX_PARSE_ERROR"
+ *       502:
+ *         description: External API error (Overpass or Mapbox)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 router.post(
   "/analyze-gpx",

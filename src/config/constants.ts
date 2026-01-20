@@ -319,13 +319,16 @@ export const GEOMETRY_CACHE = {
 } as const;
 
 // ============================================
-// Job Queue Configuration (BullMQ)
+// Job Queue Configuration (pg-boss)
 // ============================================
 
 /**
- * BullMQ job queue configuration
+ * pg-boss job queue configuration
  * 
- * Activity processing is handled asynchronously via BullMQ.
+ * Activity processing is handled asynchronously via pg-boss.
+ * pg-boss uses PostgreSQL (same as Prisma) for job storage,
+ * eliminating the need for Redis.
+ * 
  * Webhook receives activity notification, saves to DB, then enqueues
  * a processing job. Worker picks up job and processes in background.
  */
@@ -334,12 +337,6 @@ export const QUEUE = {
    * Queue name for activity processing jobs
    */
   ACTIVITY_PROCESSING: "activity-processing",
-
-  /**
-   * Redis connection URL
-   * Defaults to local Redis if not specified
-   */
-  REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
 
   /**
    * Number of concurrent jobs to process
@@ -353,8 +350,7 @@ export const QUEUE = {
    */
   RETRY: {
     MAX_ATTEMPTS: 3,
-    BACKOFF_TYPE: "exponential" as const,
-    BACKOFF_DELAY_MS: 5000, // 5s, 10s, 20s
+    BACKOFF_DELAY_MS: 5000, // 5s, 10s, 20s (pg-boss uses seconds)
   },
 
   /**

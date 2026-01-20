@@ -120,10 +120,22 @@ export interface StravaWebhookVerifyResponse {
 
 /**
  * Job data for BullMQ activity processing queue
+ * 
+ * Contains the information needed to fetch and process a Strava activity.
+ * The worker uses this to:
+ * 1. Look up the user by stravaAthleteId (ownerId)
+ * 2. Fetch the activity details from Strava using stravaActivityId
+ * 3. Process the activity against the user's routes
  */
 export interface ProcessActivityJob {
-  activityId: string;        // Our internal activity ID
+  /** Strava activity ID (to fetch from Strava API) */
+  stravaActivityId: string;
+  /** Strava athlete ID (owner_id from webhook) */
+  ownerId: number;
+  /** Our internal user ID (looked up from ownerId) */
   userId: string;
+  /** Unix timestamp when event was received */
+  eventTime: number;
 }
 
 /**
