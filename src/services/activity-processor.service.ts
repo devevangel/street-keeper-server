@@ -1,7 +1,7 @@
 /**
  * Activity Processor Service
  * Orchestrates the complete pipeline for processing an activity against routes
- * 
+ *
  * OVERVIEW:
  * ---------
  * When a user completes a run, this service determines:
@@ -9,10 +9,10 @@
  * 2. Which streets were covered on each route (street matching)
  * 3. How much of each street was covered (coverage calculation)
  * 4. Update route progress (snapshot updates)
- * 
+ *
  * PROCESSING PIPELINE:
  * --------------------
- * 
+ *
  * ```
  * Activity GPS Points
  *        │
@@ -58,27 +58,27 @@
  * │                     │    Includes impact details
  * └─────────────────────┘
  * ```
- * 
+ *
  * KEY DESIGN DECISIONS:
  * ---------------------
- * 
+ *
  * 1. **MAX Progress Rule**: Street percentage never decreases.
  *    If a user runs 80% of a street, then 60% on next run, progress stays at 80%.
  *    This prevents "losing" progress due to GPS variations or different routes.
- * 
+ *
  * 2. **Completion Threshold (90%)**: Streets are "completed" at 90% coverage.
  *    This accounts for GPS drift at street ends and corner cutting.
- * 
+ *
  * 3. **Hybrid Matching**: Uses Mapbox when available for ~98% accuracy,
  *    falls back to Overpass-only (~85% accuracy) if Mapbox fails.
- * 
+ *
  * 4. **Geometry Caching**: Caches Overpass responses to avoid redundant API calls.
  *    Cache is checked before querying Overpass for street geometries.
- * 
+ *
  * @example
  * // Process an activity
  * const result = await processActivity("activity-123", "user-456");
- * 
+ *
  * console.log(result.routesProcessed);
  * // [
  * //   { routeId: "route-1", streetsCovered: 15, streetsCompleted: 3 },
@@ -86,12 +86,24 @@
  * // ]
  */
 
-import { getActivityCoordinates, markActivityProcessed, saveRouteActivity } from "./activity.service.js";
-import { detectOverlappingRoutes, type OverlapResult } from "./overlap-detection.service.js";
+import {
+  getActivityCoordinates,
+  markActivityProcessed,
+  saveRouteActivity,
+} from "./activity.service.js";
+import {
+  detectOverlappingRoutes,
+  type OverlapResult,
+} from "./overlap-detection.service.js";
 import { updateRouteProgress } from "./route.service.js";
+import { upsertStreetProgress } from "./user-street-progress.service.js";
 import { queryStreetsInRadius } from "./overpass.service.js";
 import { matchPointsToStreetsHybrid } from "./street-matching.service.js";
-import { aggregateSegmentsIntoLogicalStreets, normalizeStreetNameForMatching, streetNamesMatch } from "./street-aggregation.service.js";
+import {
+  aggregateSegmentsIntoLogicalStreets,
+  normalizeStreetNameForMatching,
+  streetNamesMatch,
+} from "./street-aggregation.service.js";
 import {
   generateRadiusCacheKey,
   getCachedGeometries,
@@ -108,7 +120,7 @@ import type { ActivityImpact } from "../types/activity.types.js";
 
 /**
  * Result of processing a single route
- * 
+ *
  * Contains details about which streets were affected and how.
  */
 export interface RouteProcessingResult {
@@ -164,17 +176,17 @@ interface StreetCoverage {
 
 /**
  * Process an activity against all user routes
- * 
+ *
  * This is the main entry point for activity processing. It:
  * 1. Gets the activity's GPS coordinates
  * 2. Detects which routes overlap with the activity
  * 3. For each overlapping route, calculates street coverage
  * 4. Updates route progress and saves relationships
- * 
+ *
  * @param activityId - Internal activity ID
  * @param userId - User ID (for fetching routes)
  * @returns Processing result with details for each affected route
- * 
+ *
  * @example
  * const result = await processActivity("activity-123", "user-456");
  * if (result.success) {
@@ -211,8 +223,13 @@ export async function processActivity(
     console.log(`[Processor] Activity has ${coordinates.length} GPS points`);
 
     // Step 2: Detect overlapping routes
-    const overlappingRoutes = await detectOverlappingRoutes(userId, coordinates);
-    console.log(`[Processor] Found ${overlappingRoutes.length} overlapping routes`);
+    const overlappingRoutes = await detectOverlappingRoutes(
+      userId,
+      coordinates
+    );
+    console.log(
+      `[Processor] Found ${overlappingRoutes.length} overlapping routes`
+    );
 
     if (overlappingRoutes.length === 0) {
       // No routes affected - still mark as processed
@@ -229,7 +246,12 @@ export async function processActivity(
     // Step 3: Process each overlapping route
     for (const overlap of overlappingRoutes) {
       try {
-        const result = await processRouteOverlap(activityId, overlap, coordinates);
+        const result = await processRouteOverlap(
+          activityId,
+          userId,
+          overlap,
+          coordinates
+        );
         routeResults.push(result);
       } catch (error) {
         // Log error but continue processing other routes
@@ -246,7 +268,10 @@ export async function processActivity(
     const processingTimeMs = Date.now() - startTime;
     console.log(
       `[Processor] Completed processing activity ${activityId} in ${processingTimeMs}ms. ` +
-      `Routes: ${routeResults.length}, Total completed: ${routeResults.reduce((sum, r) => sum + r.streetsCompleted, 0)}`
+        `Routes: ${routeResults.length}, Total completed: ${routeResults.reduce(
+          (sum, r) => sum + r.streetsCompleted,
+          0
+        )}`
     );
 
     return {
@@ -257,8 +282,12 @@ export async function processActivity(
       processingTimeMs,
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    console.error(`[Processor] Failed to process activity ${activityId}:`, errorMessage);
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
+    console.error(
+      `[Processor] Failed to process activity ${activityId}:`,
+      errorMessage
+    );
 
     return {
       activityId,
@@ -277,22 +306,25 @@ export async function processActivity(
 
 /**
  * Process a single route overlap
- * 
+ *
  * For a route that overlaps with the activity:
  * 1. Gets the route's current snapshot
  * 2. Queries street geometries (from cache or Overpass)
  * 3. Matches GPS points to streets
  * 4. Calculates coverage for each street
  * 5. Updates route progress
- * 6. Saves the route-activity relationship
- * 
+ * 6. Updates user-level street progress (for map feature)
+ * 7. Saves the route-activity relationship
+ *
  * @param activityId - Activity ID
+ * @param userId - User ID (for user street progress)
  * @param overlap - Overlap detection result
  * @param coordinates - GPS coordinates from activity
  * @returns Processing result for this route
  */
 async function processRouteOverlap(
   activityId: string,
+  userId: string,
   overlap: OverlapResult,
   coordinates: GpxPoint[]
 ): Promise<RouteProcessingResult> {
@@ -326,14 +358,23 @@ async function processRouteOverlap(
 
   // Step 3: Match GPS points to streets
   // Use hybrid matching for best accuracy
-  const matchedStreets = await matchPointsToStreetsHybrid(coordinates, geometries);
-  console.log(`[Processor] Matched ${matchedStreets.length} streets for route "${route.name}"`);
+  const matchedStreets = await matchPointsToStreetsHybrid(
+    coordinates,
+    geometries
+  );
+  console.log(
+    `[Processor] Matched ${matchedStreets.length} streets for route "${route.name}"`
+  );
 
   // Step 4: Aggregate matched streets (combine segments)
   const aggregated = aggregateSegmentsIntoLogicalStreets(matchedStreets);
 
   // Step 5: Calculate coverage and impact
-  const { coverages, impact } = calculateRouteImpact(snapshot, aggregated.streets, matchedStreets);
+  const { coverages, impact } = calculateRouteImpact(
+    snapshot,
+    aggregated.streets,
+    matchedStreets
+  );
 
   // Step 6: Update route progress
   if (coverages.length > 0) {
@@ -344,7 +385,27 @@ async function processRouteOverlap(
     }));
 
     await updateRouteProgress(route.id, streetUpdates);
-    console.log(`[Processor] Updated ${streetUpdates.length} streets in route "${route.name}"`);
+    console.log(
+      `[Processor] Updated ${streetUpdates.length} streets in route "${route.name}"`
+    );
+
+    // Step 6b: Update user-level street progress (for map feature)
+    const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
+    const streetProgressInput = coverages
+      .map((c) => {
+        const snap = snapshotByOsmId.get(c.osmId);
+        if (!snap) return null;
+        return {
+          osmId: c.osmId,
+          name: snap.name,
+          highwayType: snap.highwayType,
+          lengthMeters: snap.lengthMeters,
+          percentage: c.percentage,
+          isComplete: c.isComplete,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+    await upsertStreetProgress(userId, streetProgressInput);
   }
 
   // Step 7: Save route-activity relationship
@@ -367,10 +428,10 @@ async function processRouteOverlap(
 
 /**
  * Get street geometries for a route area
- * 
+ *
  * Checks cache first, then queries Overpass if needed.
  * Caches the result for future use.
- * 
+ *
  * @param centerLat - Route center latitude
  * @param centerLng - Route center longitude
  * @param radiusMeters - Route radius
@@ -386,13 +447,19 @@ async function getStreetGeometries(
   const cached = await getCachedGeometries(cacheKey);
 
   if (cached) {
-    console.log(`[Processor] Using cached geometries for ${radiusMeters}m radius`);
+    console.log(
+      `[Processor] Using cached geometries for ${radiusMeters}m radius`
+    );
     return cached;
   }
 
   // Query Overpass
   console.log(`[Processor] Querying Overpass for ${radiusMeters}m radius`);
-  const geometries = await queryStreetsInRadius(centerLat, centerLng, radiusMeters);
+  const geometries = await queryStreetsInRadius(
+    centerLat,
+    centerLng,
+    radiusMeters
+  );
 
   // Cache for future use
   await setCachedGeometries(cacheKey, geometries);
@@ -406,24 +473,24 @@ async function getStreetGeometries(
 
 /**
  * Calculate impact of activity on route streets
- * 
+ *
  * Compares matched streets from the activity with the route's snapshot
  * to determine which streets were affected and how.
- * 
+ *
  * MATCHING ALGORITHM:
  * -------------------
  * For each matched street from the activity, we find the corresponding
  * street in the route snapshot by:
  * 1. Exact OSM ID match (preferred)
  * 2. Normalized name match (for cross-source matching)
- * 
+ *
  * COVERAGE CALCULATION:
  * ---------------------
  * Coverage percentage = (distance covered / total length) × 100
  * - Uses geometry-based coverage when available (more accurate)
  * - Clamps to 100% maximum
  * - 90%+ is considered "completed"
- * 
+ *
  * @param snapshot - Route's current street snapshot
  * @param aggregatedStreets - Aggregated matched streets
  * @param rawMatchedStreets - Raw matched streets (for OSM ID lookup)
@@ -446,7 +513,7 @@ function calculateRouteImpact(
   // Build lookup maps for efficient matching
   // Map: osmId -> MatchedStreet (for raw matches)
   const rawByOsmId = new Map(rawMatchedStreets.map((s) => [s.osmId, s]));
-  
+
   // Map: normalizedName -> aggregated street
   const aggregatedByName = new Map(
     aggregatedStreets.map((s) => [s.normalizedName, s])
@@ -508,12 +575,12 @@ function calculateRouteImpact(
 
 /**
  * Find matching coverage from activity for a snapshot street
- * 
+ *
  * Tries multiple matching strategies:
  * 1. Direct OSM ID match in raw matched streets
  * 2. Normalized name match in aggregated streets
  * 3. Fuzzy name match against all matched streets
- * 
+ *
  * @param snapshotStreet - Street from route snapshot
  * @param rawByOsmId - Map of OSM ID -> MatchedStreet
  * @param aggregatedByName - Map of normalized name -> aggregated street
@@ -523,7 +590,10 @@ function calculateRouteImpact(
 function findMatchingCoverage(
   snapshotStreet: SnapshotStreet,
   rawByOsmId: Map<string, MatchedStreet>,
-  aggregatedByName: Map<string, { coverageRatio: number; segmentOsmIds: string[] }>,
+  aggregatedByName: Map<
+    string,
+    { coverageRatio: number; segmentOsmIds: string[] }
+  >,
   rawMatchedStreets: MatchedStreet[]
 ): { ratio: number } | null {
   // Strategy 1: Direct OSM ID match
@@ -559,10 +629,10 @@ function findMatchingCoverage(
 
 /**
  * Process multiple activities (batch processing)
- * 
+ *
  * Useful for backfilling when user creates a new route
  * and wants to apply historical activities.
- * 
+ *
  * @param activityIds - Array of activity IDs to process
  * @param userId - User ID
  * @returns Array of processing results
@@ -598,10 +668,10 @@ export async function processActivitiesBatch(
 
 /**
  * Reprocess all activities for a specific route
- * 
+ *
  * Called when a route is refreshed and we need to recalculate
  * progress based on all historical activities.
- * 
+ *
  * @param routeId - Route ID to reprocess
  * @param userId - User ID (for verification)
  * @returns Number of activities reprocessed
@@ -680,7 +750,12 @@ export async function reprocessRouteActivities(
       };
 
       try {
-        await processRouteOverlap(activity.id, mockOverlap, coordinates);
+        await processRouteOverlap(
+          activity.id,
+          userId,
+          mockOverlap,
+          coordinates
+        );
         processed++;
       } catch (error) {
         console.error(
@@ -700,7 +775,7 @@ export async function reprocessRouteActivities(
 
 /**
  * Reset route progress to 0 for all streets
- * 
+ *
  * Used before reprocessing all activities for a route.
  */
 async function resetRouteProgress(routeId: string): Promise<void> {
@@ -738,7 +813,7 @@ async function resetRouteProgress(routeId: string): Promise<void> {
 
 /**
  * Quick check if an activity overlaps with a route
- * 
+ *
  * Simplified version of overlap detection for reprocessing.
  * Checks if any GPS point is within the route radius.
  */
@@ -751,7 +826,12 @@ function checkActivityOverlapsRoute(
   // Check every 10th point for efficiency
   for (let i = 0; i < coordinates.length; i += 10) {
     const point = coordinates[i];
-    const distance = haversineDistance(centerLat, centerLng, point.lat, point.lng);
+    const distance = haversineDistance(
+      centerLat,
+      centerLng,
+      point.lat,
+      point.lng
+    );
 
     if (distance <= radiusMeters) {
       return true;

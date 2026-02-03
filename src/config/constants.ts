@@ -70,6 +70,10 @@ export const ERROR_CODES = {
   ACTIVITY_ALREADY_EXISTS: "ACTIVITY_ALREADY_EXISTS",
   ACTIVITY_PROCESSING_FAILED: "ACTIVITY_PROCESSING_FAILED",
 
+  // Map errors
+  MAP_INVALID_COORDINATES: "MAP_INVALID_COORDINATES",
+  MAP_RADIUS_TOO_LARGE: "MAP_RADIUS_TOO_LARGE",
+
   // Webhook errors
   WEBHOOK_INVALID_SIGNATURE: "WEBHOOK_INVALID_SIGNATURE",
   WEBHOOK_VERIFICATION_FAILED: "WEBHOOK_VERIFICATION_FAILED",
@@ -101,37 +105,44 @@ export function getEnvVarOptional(name: string, defaultValue: string): string {
   return process.env[name] ?? defaultValue;
 }
 
-
 export const OVERPASS = {
   // Primary API endpoint
   API_URL: "https://overpass-api.de/api/interpreter",
-  
+
   // Fallback servers (tried in order if primary fails)
   FALLBACK_URLS: [
     "https://overpass.private.coffee/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   ],
-  
+
   // Client timeout (axios timeout)
   TIMEOUT_MS: 60000, // Increased from 30s to 60s
-  
+
   // Query timeout (Overpass QL timeout parameter)
   QUERY_TIMEOUT_SECONDS: 60, // Increased from 25s to 60s
-  
+
   // Maximum retry attempts (including fallback servers)
   MAX_RETRIES: 3,
-  
+
   HIGHWAY_TYPES: [
-    "residential", "primary", "secondary", "tertiary",
-    "unclassified", "living_street", "pedestrian",
-    "footway", "path", "cycleway", "track",
+    "residential",
+    "primary",
+    "secondary",
+    "tertiary",
+    "unclassified",
+    "living_street",
+    "pedestrian",
+    "footway",
+    "path",
+    "cycleway",
+    "track",
   ],
 } as const;
 
 export const STREET_MATCHING = {
   MAX_DISTANCE_METERS: 25,
   BBOX_BUFFER_METERS: 100,
-  COMPLETION_THRESHOLD: 0.90,
+  COMPLETION_THRESHOLD: 0.9,
   MIN_POINTS_PER_STREET: 3,
 } as const;
 
@@ -217,7 +228,7 @@ export const MAPBOX = {
 
 /**
  * Route creation and management constants
- * 
+ *
  * Routes define geographic areas (circles) where users track street completion.
  * Users select a center point and radius to create a route, then the system
  * tracks which streets they've run.
@@ -256,12 +267,28 @@ export const ROUTES = {
 } as const;
 
 // ============================================
+// Map Feature Configuration
+// ============================================
+
+/**
+ * Map endpoint (home page map view) configuration
+ */
+export const MAP = {
+  /** Default radius in meters when not specified */
+  DEFAULT_RADIUS_METERS: 2000,
+  /** Maximum allowed radius in meters */
+  MAX_RADIUS_METERS: 10000,
+  /** Minimum allowed radius in meters */
+  MIN_RADIUS_METERS: 100,
+} as const;
+
+// ============================================
 // Activities Configuration
 // ============================================
 
 /**
  * Activity types and processing constants
- * 
+ *
  * Activities are synced from Strava via webhook.
  * Only certain activity types are processed for street tracking.
  */
@@ -291,7 +318,7 @@ export const ACTIVITIES = {
 
 /**
  * Caching configuration for street geometries
- * 
+ *
  * Geometry cache reduces Overpass API calls by storing street data
  * in the database. Used for:
  * - Route preview (before creation)
@@ -324,11 +351,11 @@ export const GEOMETRY_CACHE = {
 
 /**
  * pg-boss job queue configuration
- * 
+ *
  * Activity processing is handled asynchronously via pg-boss.
  * pg-boss uses PostgreSQL (same as Prisma) for job storage,
  * eliminating the need for Redis.
- * 
+ *
  * Webhook receives activity notification, saves to DB, then enqueues
  * a processing job. Worker picks up job and processes in background.
  */
@@ -366,10 +393,10 @@ export const QUEUE = {
 
 /**
  * Strava webhook constants
- * 
+ *
  * Strava sends webhook events when users create/update/delete activities.
  * We must respond within 2 seconds, so actual processing is queued.
- * 
+ *
  * @see https://developers.strava.com/docs/webhooks/
  */
 export const STRAVA_WEBHOOK = {
@@ -388,4 +415,3 @@ export const STRAVA_WEBHOOK = {
     ASPECT_TYPE: "create",
   },
 } as const;
-

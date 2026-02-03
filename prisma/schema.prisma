@@ -30,8 +30,9 @@ model User {
   updatedAt     DateTime  @updatedAt
 
   // Relations
-  routes        Route[]
-  activities    Activity[]
+  routes           Route[]
+  activities       Activity[]
+  streetProgress   UserStreetProgress[]
 }
 
 // ============================================
@@ -150,4 +151,41 @@ model GeometryCache {
 
   @@index([cacheKey])
   @@index([expiresAt])
+}
+
+// ============================================
+// User Street Progress Model
+// ============================================
+// Tracks user-level street progress across all routes.
+// One row per user per street (osmId). Synced when activities are processed.
+// Used by the map feature for efficient "all streets I've run" queries.
+
+model UserStreetProgress {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Street identity (from OpenStreetMap)
+  osmId         String    // OSM way ID
+  name          String    // Street name (denormalized for display)
+  highwayType   String    // e.g. residential, footway
+  lengthMeters  Float     // Street length (denormalized)
+
+  // Progress tracking
+  percentage    Float     @default(0)   // 0-100, MAX rule applies
+  everCompleted Boolean   @default(false) // Once true, always true
+
+  // Stats for map info icon
+  runCount        Int      @default(0)   // Times user ran on this street
+  completionCount Int      @default(0)   // Times user achieved >= 90%
+
+  // Timestamps
+  firstRunDate  DateTime?
+  lastRunDate   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([userId, osmId])
+  @@index([userId])
+  @@index([userId, percentage])
 }

@@ -1,7 +1,7 @@
 /**
  * Route Aggregator
  * Combines all route modules and mounts them under /api/v1
- * 
+ *
  * ROUTE MODULES:
  * --------------
  * | Module     | Path        | Description                          |
@@ -11,6 +11,7 @@
  * | webhooks   | /webhooks   | Strava webhook handlers              |
  * | routes     | /routes     | Route CRUD and street tracking       |
  * | activities | /activities | Activity listing and management      |
+ * | map       | /map        | Map view (streets with progress)     |
  */
 
 import { Router } from "express";
@@ -19,6 +20,7 @@ import runsRoutes from "./runs.routes.js";
 import webhooksRoutes from "./webhooks.routes.js";
 import routesRoutes from "./routes.routes.js";
 import activitiesRoutes from "./activities.routes.js";
+import mapRoutes from "./map.routes.js";
 
 const router = Router();
 
@@ -28,5 +30,6 @@ router.use("/runs", runsRoutes);
 router.use("/webhooks", webhooksRoutes);
 router.use("/routes", routesRoutes);
 router.use("/activities", activitiesRoutes);
+router.use("/map", mapRoutes);
 
 export default router;

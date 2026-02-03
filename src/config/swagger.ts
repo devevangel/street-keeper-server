@@ -1,7 +1,7 @@
 /**
  * OpenAPI/Swagger Configuration
  * Defines the API specification and all reusable schemas
- * 
+ *
  * This configuration is used by swagger-jsdoc to generate the OpenAPI spec
  * and swagger-ui-express to serve the interactive API documentation.
  */
@@ -57,6 +57,10 @@ In production, authentication is handled via Strava OAuth.
       { name: "Activities", description: "Activity listing and management" },
       { name: "GPX", description: "GPX file upload and analysis" },
       { name: "Webhooks", description: "Strava webhook handlers" },
+      {
+        name: "Map",
+        description: "Map view (streets with progress and geometry)",
+      },
     ],
     components: {
       securitySchemes: {
@@ -71,14 +75,20 @@ In production, authentication is handled via Strava OAuth.
         // ============================================
         // Common Schemas
         // ============================================
-        
+
         ApiErrorResponse: {
           type: "object",
           required: ["success", "error"],
           properties: {
             success: { type: "boolean", enum: [false] },
-            error: { type: "string", description: "Human-readable error message" },
-            code: { type: "string", description: "Machine-readable error code" },
+            error: {
+              type: "string",
+              description: "Human-readable error message",
+            },
+            code: {
+              type: "string",
+              description: "Machine-readable error code",
+            },
           },
           example: {
             success: false,
@@ -98,8 +108,16 @@ In production, authentication is handled via Strava OAuth.
             id: { type: "string", format: "uuid", description: "User UUID" },
             name: { type: "string", description: "Display name" },
             email: { type: "string", format: "email", nullable: true },
-            stravaId: { type: "string", nullable: true, description: "Strava athlete ID" },
-            garminId: { type: "string", nullable: true, description: "Garmin user ID" },
+            stravaId: {
+              type: "string",
+              nullable: true,
+              description: "Strava athlete ID",
+            },
+            garminId: {
+              type: "string",
+              nullable: true,
+              description: "Garmin user ID",
+            },
             profilePic: { type: "string", format: "uri", nullable: true },
           },
           example: {
@@ -107,7 +125,8 @@ In production, authentication is handled via Strava OAuth.
             name: "John Runner",
             email: "john@example.com",
             stravaId: "12345678",
-            profilePic: "https://dgalywyr863hv.cloudfront.net/pictures/athletes/12345678/large.jpg",
+            profilePic:
+              "https://dgalywyr863hv.cloudfront.net/pictures/athletes/12345678/large.jpg",
           },
         },
 
@@ -127,16 +146,47 @@ In production, authentication is handled via Strava OAuth.
 
         SnapshotStreet: {
           type: "object",
-          required: ["osmId", "name", "lengthMeters", "highwayType", "completed", "percentage"],
+          required: [
+            "osmId",
+            "name",
+            "lengthMeters",
+            "highwayType",
+            "completed",
+            "percentage",
+          ],
           properties: {
-            osmId: { type: "string", description: "OSM way ID (e.g., 'way/123456789')" },
+            osmId: {
+              type: "string",
+              description: "OSM way ID (e.g., 'way/123456789')",
+            },
             name: { type: "string", description: "Street name from OSM" },
-            lengthMeters: { type: "number", description: "Total street length in meters" },
-            highwayType: { type: "string", description: "OSM highway type (residential, footway, etc.)" },
-            completed: { type: "boolean", description: "True if percentage >= 90%" },
-            percentage: { type: "number", minimum: 0, maximum: 100, description: "Coverage percentage (0-100)" },
-            lastRunDate: { type: "string", format: "date-time", nullable: true },
-            isNew: { type: "boolean", description: "True if added during recent refresh" },
+            lengthMeters: {
+              type: "number",
+              description: "Total street length in meters",
+            },
+            highwayType: {
+              type: "string",
+              description: "OSM highway type (residential, footway, etc.)",
+            },
+            completed: {
+              type: "boolean",
+              description: "True if percentage >= 90%",
+            },
+            percentage: {
+              type: "number",
+              minimum: 0,
+              maximum: 100,
+              description: "Coverage percentage (0-100)",
+            },
+            lastRunDate: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+            },
+            isNew: {
+              type: "boolean",
+              description: "True if added during recent refresh",
+            },
           },
           example: {
             osmId: "way/123456789",
@@ -151,14 +201,31 @@ In production, authentication is handled via Strava OAuth.
 
         RouteListItem: {
           type: "object",
-          required: ["id", "name", "centerLat", "centerLng", "radiusMeters", "progress", "totalStreets", "completedStreets"],
+          required: [
+            "id",
+            "name",
+            "centerLat",
+            "centerLng",
+            "radiusMeters",
+            "progress",
+            "totalStreets",
+            "completedStreets",
+          ],
           properties: {
             id: { type: "string", format: "uuid" },
             name: { type: "string" },
             centerLat: { type: "number", minimum: -90, maximum: 90 },
             centerLng: { type: "number", minimum: -180, maximum: 180 },
-            radiusMeters: { type: "integer", enum: [500, 1000, 2000, 5000, 10000] },
-            progress: { type: "number", minimum: 0, maximum: 100, description: "Overall progress percentage" },
+            radiusMeters: {
+              type: "integer",
+              enum: [500, 1000, 2000, 5000, 10000],
+            },
+            progress: {
+              type: "number",
+              minimum: 0,
+              maximum: 100,
+              description: "Overall progress percentage",
+            },
             totalStreets: { type: "integer" },
             completedStreets: { type: "integer" },
             totalLengthMeters: { type: "number" },
@@ -181,8 +248,14 @@ In production, authentication is handled via Strava OAuth.
                   items: { $ref: "#/components/schemas/SnapshotStreet" },
                 },
                 snapshotDate: { type: "string", format: "date-time" },
-                inProgressCount: { type: "integer", description: "Streets with 1-89% coverage" },
-                notStartedCount: { type: "integer", description: "Streets with 0% coverage" },
+                inProgressCount: {
+                  type: "integer",
+                  description: "Streets with 1-89% coverage",
+                },
+                notStartedCount: {
+                  type: "integer",
+                  description: "Streets with 0% coverage",
+                },
                 refreshNeeded: { type: "boolean" },
                 daysSinceRefresh: { type: "integer" },
               },
@@ -192,13 +265,26 @@ In production, authentication is handled via Strava OAuth.
 
         RoutePreview: {
           type: "object",
-          required: ["centerLat", "centerLng", "radiusMeters", "totalStreets", "totalLengthMeters", "cacheKey"],
+          required: [
+            "centerLat",
+            "centerLng",
+            "radiusMeters",
+            "totalStreets",
+            "totalLengthMeters",
+            "cacheKey",
+          ],
           properties: {
             centerLat: { type: "number" },
             centerLng: { type: "number" },
             radiusMeters: { type: "integer" },
-            cachedRadiusMeters: { type: "integer", description: "Actual radius in cache (may be larger)" },
-            cacheKey: { type: "string", description: "Pass to create endpoint to skip re-query" },
+            cachedRadiusMeters: {
+              type: "integer",
+              description: "Actual radius in cache (may be larger)",
+            },
+            cacheKey: {
+              type: "string",
+              description: "Pass to create endpoint to skip re-query",
+            },
             totalStreets: { type: "integer" },
             totalLengthMeters: { type: "number" },
             streetsByType: {
@@ -220,9 +306,15 @@ In production, authentication is handled via Strava OAuth.
             name: { type: "string", minLength: 1, maxLength: 100 },
             centerLat: { type: "number", minimum: -90, maximum: 90 },
             centerLng: { type: "number", minimum: -180, maximum: 180 },
-            radiusMeters: { type: "integer", enum: [500, 1000, 2000, 5000, 10000] },
+            radiusMeters: {
+              type: "integer",
+              enum: [500, 1000, 2000, 5000, 10000],
+            },
             deadline: { type: "string", format: "date-time" },
-            cacheKey: { type: "string", description: "Optional cache key from preview" },
+            cacheKey: {
+              type: "string",
+              description: "Optional cache key from preview",
+            },
           },
           example: {
             name: "Southsea Explorer",
@@ -251,7 +343,10 @@ In production, authentication is handled via Strava OAuth.
           properties: {
             success: { type: "boolean", enum: [true] },
             route: { $ref: "#/components/schemas/RouteDetail" },
-            warning: { type: "string", description: "Optional warning message" },
+            warning: {
+              type: "string",
+              description: "Optional warning message",
+            },
           },
         },
 
@@ -270,7 +365,16 @@ In production, authentication is handled via Strava OAuth.
 
         ActivityListItem: {
           type: "object",
-          required: ["id", "stravaId", "name", "distanceMeters", "durationSeconds", "startDate", "activityType", "isProcessed"],
+          required: [
+            "id",
+            "stravaId",
+            "name",
+            "distanceMeters",
+            "durationSeconds",
+            "startDate",
+            "activityType",
+            "isProcessed",
+          ],
           properties: {
             id: { type: "string", format: "uuid" },
             stravaId: { type: "string" },
@@ -278,7 +382,10 @@ In production, authentication is handled via Strava OAuth.
             distanceMeters: { type: "number" },
             durationSeconds: { type: "integer" },
             startDate: { type: "string", format: "date-time" },
-            activityType: { type: "string", enum: ["Run", "Walk", "Hike", "Trail Run"] },
+            activityType: {
+              type: "string",
+              enum: ["Run", "Walk", "Hike", "Trail Run"],
+            },
             isProcessed: { type: "boolean" },
             createdAt: { type: "string", format: "date-time" },
             routesAffected: { type: "integer" },
@@ -327,7 +434,11 @@ In production, authentication is handled via Strava OAuth.
                     },
                   },
                 },
-                processedAt: { type: "string", format: "date-time", nullable: true },
+                processedAt: {
+                  type: "string",
+                  format: "date-time",
+                  nullable: true,
+                },
                 routeImpacts: {
                   type: "array",
                   items: {
@@ -337,7 +448,9 @@ In production, authentication is handled via Strava OAuth.
                       routeName: { type: "string" },
                       streetsCompleted: { type: "integer" },
                       streetsImproved: { type: "integer" },
-                      impactDetails: { $ref: "#/components/schemas/ActivityImpact" },
+                      impactDetails: {
+                        $ref: "#/components/schemas/ActivityImpact",
+                      },
                     },
                   },
                 },
@@ -376,7 +489,15 @@ In production, authentication is handled via Strava OAuth.
 
         MatchedStreet: {
           type: "object",
-          required: ["osmId", "name", "highwayType", "lengthMeters", "distanceCoveredMeters", "coverageRatio", "completionStatus"],
+          required: [
+            "osmId",
+            "name",
+            "highwayType",
+            "lengthMeters",
+            "distanceCoveredMeters",
+            "coverageRatio",
+            "completionStatus",
+          ],
           properties: {
             osmId: { type: "string" },
             name: { type: "string" },
@@ -391,16 +512,32 @@ In production, authentication is handled via Strava OAuth.
 
         AggregatedStreet: {
           type: "object",
-          required: ["name", "normalizedName", "highwayType", "totalLengthMeters", "coverageRatio", "completionStatus"],
+          required: [
+            "name",
+            "normalizedName",
+            "highwayType",
+            "totalLengthMeters",
+            "coverageRatio",
+            "completionStatus",
+          ],
           properties: {
             name: { type: "string" },
             normalizedName: { type: "string" },
             highwayType: { type: "string" },
             totalLengthMeters: { type: "number" },
-            totalDistanceCoveredMeters: { type: "number", description: "Clamped to street length" },
-            totalDistanceRunMeters: { type: "number", description: "Actual distance (unclamped)" },
+            totalDistanceCoveredMeters: {
+              type: "number",
+              description: "Clamped to street length",
+            },
+            totalDistanceRunMeters: {
+              type: "number",
+              description: "Actual distance (unclamped)",
+            },
             coverageRatio: { type: "number", minimum: 0, maximum: 1 },
-            rawCoverageRatio: { type: "number", description: "Unclamped ratio for debugging" },
+            rawCoverageRatio: {
+              type: "number",
+              description: "Unclamped ratio for debugging",
+            },
             completionStatus: { type: "string", enum: ["FULL", "PARTIAL"] },
             segmentCount: { type: "integer" },
             segmentOsmIds: {
@@ -414,7 +551,10 @@ In production, authentication is handled via Strava OAuth.
           type: "object",
           properties: {
             highwayType: { type: "string" },
-            displayName: { type: "string", description: "e.g., 'Footpath (Unnamed)'" },
+            displayName: {
+              type: "string",
+              description: "e.g., 'Footpath (Unnamed)'",
+            },
             totalLengthMeters: { type: "number" },
             totalDistanceCoveredMeters: { type: "number" },
             totalDistanceRunMeters: { type: "number" },
@@ -427,7 +567,13 @@ In production, authentication is handled via Strava OAuth.
 
         GpxAnalysisResponse: {
           type: "object",
-          required: ["success", "analysis", "segments", "streets", "unnamedRoads"],
+          required: [
+            "success",
+            "analysis",
+            "segments",
+            "streets",
+            "unnamedRoads",
+          ],
           properties: {
             success: { type: "boolean", enum: [true] },
             analysis: {
@@ -488,17 +634,182 @@ In production, authentication is handled via Strava OAuth.
         },
 
         // ============================================
+        // Map Schemas
+        // ============================================
+
+        MapStreetStats: {
+          type: "object",
+          required: [
+            "runCount",
+            "completionCount",
+            "currentPercentage",
+            "everCompleted",
+          ],
+          properties: {
+            runCount: {
+              type: "integer",
+              description: "Times the user has run on this street",
+            },
+            completionCount: {
+              type: "integer",
+              description: "Times the user achieved >= 90% coverage",
+            },
+            firstRunDate: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+            },
+            lastRunDate: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+            },
+            totalLengthMeters: {
+              type: "number",
+              description: "Street length in meters",
+            },
+            currentPercentage: {
+              type: "number",
+              minimum: 0,
+              maximum: 100,
+              description: "Current coverage (0-100)",
+            },
+            everCompleted: {
+              type: "boolean",
+              description:
+                "True if user has ever completed this street (>= 90%)",
+            },
+          },
+        },
+
+        MapStreet: {
+          type: "object",
+          required: [
+            "osmId",
+            "name",
+            "highwayType",
+            "lengthMeters",
+            "percentage",
+            "status",
+            "geometry",
+            "stats",
+          ],
+          properties: {
+            osmId: { type: "string", description: "OpenStreetMap way ID" },
+            name: { type: "string", description: "Street name" },
+            highwayType: {
+              type: "string",
+              description: "e.g. residential, footway",
+            },
+            lengthMeters: {
+              type: "number",
+              description: "Street length in meters",
+            },
+            percentage: {
+              type: "number",
+              minimum: 0,
+              maximum: 100,
+              description: "Current coverage (0-100)",
+            },
+            status: {
+              type: "string",
+              enum: ["completed", "partial"],
+              description: "completed = green, partial = yellow",
+            },
+            geometry: {
+              type: "object",
+              required: ["type", "coordinates"],
+              properties: {
+                type: { type: "string", enum: ["LineString"] },
+                coordinates: {
+                  type: "array",
+                  items: {
+                    type: "array",
+                    items: { type: "number" },
+                    minItems: 2,
+                    maxItems: 2,
+                    description: "[lng, lat] pairs",
+                  },
+                },
+              },
+            },
+            stats: { $ref: "#/components/schemas/MapStreetStats" },
+          },
+        },
+
+        MapStreetsResponse: {
+          type: "object",
+          required: [
+            "success",
+            "streets",
+            "center",
+            "radiusMeters",
+            "totalStreets",
+            "completedCount",
+            "partialCount",
+          ],
+          properties: {
+            success: { type: "boolean", enum: [true] },
+            streets: {
+              type: "array",
+              items: { $ref: "#/components/schemas/MapStreet" },
+              description: "Streets the user has run on in the requested area",
+            },
+            center: {
+              type: "object",
+              required: ["lat", "lng"],
+              properties: {
+                lat: { type: "number", minimum: -90, maximum: 90 },
+                lng: { type: "number", minimum: -180, maximum: 180 },
+              },
+            },
+            radiusMeters: {
+              type: "integer",
+              description: "Request radius in meters",
+            },
+            totalStreets: {
+              type: "integer",
+              description: "Number of streets returned",
+            },
+            completedCount: {
+              type: "integer",
+              description: "Streets with status completed (green)",
+            },
+            partialCount: {
+              type: "integer",
+              description: "Streets with status partial (yellow)",
+            },
+          },
+        },
+
+        // ============================================
         // Webhook Schemas
         // ============================================
 
         StravaWebhookPayload: {
           type: "object",
-          required: ["object_type", "object_id", "aspect_type", "owner_id", "subscription_id", "event_time"],
+          required: [
+            "object_type",
+            "object_id",
+            "aspect_type",
+            "owner_id",
+            "subscription_id",
+            "event_time",
+          ],
           properties: {
             object_type: { type: "string", enum: ["activity", "athlete"] },
-            object_id: { type: "integer", description: "Strava activity or athlete ID" },
-            aspect_type: { type: "string", enum: ["create", "update", "delete"] },
-            owner_id: { type: "integer", description: "Strava athlete ID (owner)" },
+            object_id: {
+              type: "integer",
+              description: "Strava activity or athlete ID",
+            },
+            aspect_type: {
+              type: "string",
+              enum: ["create", "update", "delete"],
+            },
+            owner_id: {
+              type: "integer",
+              description: "Strava athlete ID (owner)",
+            },
             subscription_id: { type: "integer" },
             event_time: { type: "integer", description: "Unix timestamp" },
             updates: { type: "object", additionalProperties: true },

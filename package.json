@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "backfill:street-progress": "tsx src/scripts/backfill-user-street-progress.ts"
   },
   "keywords": [],
   "author": "",
