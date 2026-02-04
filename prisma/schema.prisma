@@ -30,16 +30,16 @@ model User {
   updatedAt     DateTime  @updatedAt
 
   // Relations
-  routes           Route[]
-  activities       Activity[]
-  streetProgress   UserStreetProgress[]
+  projects        Project[]
+  activities      Activity[]
+  streetProgress  UserStreetProgress[]
 }
 
 // ============================================
-// Route Model
+// Project Model
 // ============================================
 
-model Route {
+model Project {
   id              String    @id @default(uuid())
   userId          String
   user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -67,7 +67,7 @@ model Route {
   updatedAt       DateTime  @updatedAt
   
   // Relations
-  activities      RouteActivity[]
+  activities      ProjectActivity[]
 
   @@index([userId])
   @@index([userId, isArchived])
@@ -100,7 +100,7 @@ model Activity {
   createdAt       DateTime  @default(now())
   
   // Relations
-  routes          RouteActivity[]
+  projects        ProjectActivity[]
 
   @@index([userId])
   @@index([stravaId])
@@ -108,17 +108,17 @@ model Activity {
 }
 
 // ============================================
-// RouteActivity Junction Model
+// ProjectActivity Junction Model
 // ============================================
 
-model RouteActivity {
+model ProjectActivity {
   id              String    @id @default(uuid())
-  routeId         String
+  projectId       String
   activityId      String
-  route           Route     @relation(fields: [routeId], references: [id], onDelete: Cascade)
-  activity        Activity  @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  project         Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  activity        Activity   @relation(fields: [activityId], references: [id], onDelete: Cascade)
   
-  // Impact of this activity on the route
+  // Impact of this activity on the project
   streetsCompleted  Int
   streetsImproved   Int
   
@@ -128,8 +128,8 @@ model RouteActivity {
   
   createdAt       DateTime  @default(now())
 
-  @@unique([routeId, activityId])
-  @@index([routeId])
+  @@unique([projectId, activityId])
+  @@index([projectId])
   @@index([activityId])
 }
 

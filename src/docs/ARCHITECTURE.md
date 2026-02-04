@@ -17,7 +17,7 @@ This document explains the system architecture, design decisions, and data flows
 
 Street Keeper is a fitness tracking API that processes GPS data from Strava to track street coverage for runners. The system allows users to:
 
-1. **Create Routes** - Define geographic areas (circles) to track
+1. **Create Projects** - Define geographic areas (circles) to track
 2. **Sync Activities** - Automatically receive activities from Strava via webhooks
 3. **Track Progress** - See which streets they've run and their completion percentage
 4. **View Map** - See streets they've run with geometry and stats (completed/partial, run counts)
@@ -36,15 +36,15 @@ Street Keeper is a fitness tracking API that processes GPS data from Strava to t
 │        ▼                ▼                ▼                ▼                 │
 │   ┌────────────────────────────────────────────────────────────┐           │
 │   │                     Express Server                          │           │
-│   │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐    │           │
-│   │  │  Auth   │  │ Routes  │  │Activity │  │   Map   │  │  GPX    │    │           │
-│   │  │ Routes  │  │ Routes  │  │ Routes  │  │ Routes  │  │ Routes  │    │           │
-│   │  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘    │           │
-│   │       │            │            │            │            │          │           │
-│   │       ▼            ▼            ▼            ▼            ▼          │           │
+│   │  ┌─────────┐  ┌──────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐    │           │
+│   │  │  Auth   │  │ Projects │  │Activity │  │   Map   │  │  GPX    │    │           │
+│   │  │ Routes  │  │  Routes  │  │ Routes  │  │ Routes  │  │ Routes  │    │           │
+│   │  └────┬────┘  └────┬─────┘  └────┬────┘  └────┬────┘  └────┬────┘    │           │
+│   │       │            │             │            │            │          │           │
+│   │       ▼            ▼             ▼            ▼            ▼          │           │
 │   │  ┌──────────────────────────────────────────────────────────────┐   │           │
 │   │  │                      Services Layer                            │   │           │
-│   │  │  auth | route | activity | map | user-street-progress | ...  │   │           │
+│   │  │  auth | project | activity | map | user-street-progress | ... │   │           │
 │   │  └───────────────────────┬─────────────────────────┘       │           │
 │   └──────────────────────────┼──────────────────────────────────┘           │
 │                              │                                              │
@@ -73,7 +73,7 @@ The codebase follows a strict three-layer architecture:
 
 ### Routes Layer (Thin Controllers)
 
-- HTTP endpoint definitions
+- HTTP endpoint definitions (here "Routes" = URL routing, not the domain feature; the feature is **Projects**)
 - Request parsing and validation
 - Response formatting
 - **Delegates business logic to services**
@@ -159,7 +159,7 @@ The codebase follows a strict three-layer architecture:
 
 **Rationale:**
 
-- **Relational data model:** Routes → Activities → Streets have clear relationships
+- **Relational data model:** Projects → Activities → Streets have clear relationships
 - **JSON support:** PostgreSQL's JSONB handles street snapshots efficiently
 - **Prisma maturity:** Prisma ORM has excellent PostgreSQL support
 - **ACID compliance:** Important for progress calculations
@@ -208,20 +208,20 @@ The codebase follows a strict three-layer architecture:
 
 ---
 
-### 4. JSON Snapshots in Route Table
+### 4. JSON Snapshots in Project Table
 
-**Decision:** Store street progress as JSON in the Route table, not separate tables.
+**Decision:** Store street progress as JSON in the Project table, not separate tables.
 
 **Rationale:**
 
 - **Atomic updates:** Update all streets in one database operation
-- **No join overhead:** Single query gets route + all streets
-- **Simpler schema:** No Street, RouteStreet junction tables
+- **No join overhead:** Single query gets project + all streets
+- **Simpler schema:** No Street, ProjectStreet junction tables
 - **Good performance:** PostgreSQL JSONB is fast for this size
 
 **Trade-offs:**
 
-- Can't query individual streets across routes
+- Can't query individual streets across projects
 - Larger row sizes
 
 ---
@@ -262,9 +262,9 @@ The codebase follows a strict three-layer architecture:
 
 ---
 
-### 7. Radius-Based Routes (Not Polygons)
+### 7. Radius-Based Projects (Not Polygons)
 
-**Decision:** Routes are circular areas defined by center point + radius.
+**Decision:** Projects are circular areas defined by center point + radius.
 
 **Rationale:**
 
@@ -343,22 +343,22 @@ sequenceDiagram
     Queue->>Worker: Return job
     Worker->>Strava: GET /activities/{id}/streams
     Strava->>Worker: Return GPS coordinates
-    Worker->>DB: Find overlapping routes
+    Worker->>DB: Find overlapping projects
 
-    loop For each route
+    loop For each project
         Worker->>Mapbox: Match GPS to streets
         Mapbox->>Worker: Return matched streets
         Worker->>Overpass: Get street lengths
         Overpass->>Worker: Return street data
         Worker->>Worker: Calculate coverage
-        Worker->>DB: Update route progress (MAX rule)
+        Worker->>DB: Update project progress (MAX rule)
     end
 
     Worker->>DB: Mark activity processed
     Worker->>Queue: Complete job
 ```
 
-### Route Creation Flow
+### Project Creation Flow
 
 ```mermaid
 sequenceDiagram
@@ -369,7 +369,7 @@ sequenceDiagram
     participant Overpass
 
     User->>Frontend: Select location + radius
-    Frontend->>Backend: GET /routes/preview
+    Frontend->>Backend: GET /projects/preview
     Backend->>Cache: Check for cached data
 
     alt Cache hit
@@ -383,11 +383,11 @@ sequenceDiagram
     Backend->>Frontend: Return preview (street count, cacheKey)
     Frontend->>User: Show preview
     User->>Frontend: Confirm creation
-    Frontend->>Backend: POST /routes (with cacheKey)
+    Frontend->>Backend: POST /projects (with cacheKey)
     Backend->>Cache: Retrieve cached streets
     Backend->>Backend: Create snapshot with 0% progress
-    Backend->>Backend: Save route to DB
-    Backend->>Frontend: Return created route
+    Backend->>Backend: Save project to DB
+    Backend->>Frontend: Return created project
 ```
 
 ### GPX Analysis Flow
@@ -429,7 +429,7 @@ sequenceDiagram
 
 ```
 ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│      User       │       │      Route      │       │    Activity     │
+│      User       │       │     Project     │       │    Activity     │
 ├─────────────────┤       ├─────────────────┤       ├─────────────────┤
 │ id (PK)         │──┐    │ id (PK)         │──┐    │ id (PK)         │
 │ stravaId        │  │    │ userId (FK)     │◄─┘    │ userId (FK)     │◄─┐
@@ -445,10 +445,10 @@ sequenceDiagram
                      │            │                                      │
                      │            ▼                                      │
                      │    ┌─────────────────┐                            │
-                     │    │  RouteActivity  │                            │
+                     │    │ ProjectActivity │                            │
                      │    ├─────────────────┤                            │
                      │    │ id (PK)         │                            │
-                     └────│ routeId (FK)    │                            │
+                     └────│ projectId (FK)  │                            │
                           │ activityId (FK) │────────────────────────────┘
                           │ streetsCompleted│
                           │ streetsImproved │
@@ -460,30 +460,30 @@ sequenceDiagram
 
 **User:** Stores user profile and Strava OAuth tokens.
 
-**Route:** Defines a geographic area with street snapshot stored as JSON. The `streetsSnapshot` field contains an array of `SnapshotStreet` objects with progress data.
+**Project:** Defines a geographic area with street snapshot stored as JSON. The `streetsSnapshot` field contains an array of `SnapshotStreet` objects with progress data.
 
-**Activity:** Stores activity metadata and GPS coordinates. Linked to routes via `RouteActivity` junction table.
+**Activity:** Stores activity metadata and GPS coordinates. Linked to projects via `ProjectActivity` junction table.
 
-**RouteActivity:** Junction table tracking how each activity impacted each route's progress.
+**ProjectActivity:** Junction table tracking how each activity impacted each project's progress.
 
-**UserStreetProgress:** User-level street progress for the map feature. One row per user per street (osmId). Synced when activities are processed. Enables efficient "all streets I've run" queries without aggregating routes. See [MAP_FEATURE.md](MAP_FEATURE.md).
+**UserStreetProgress:** User-level street progress for the map feature. One row per user per street (osmId). Synced when activities are processed. Enables efficient "all streets I've run" queries without aggregating projects. See [MAP_FEATURE.md](MAP_FEATURE.md).
 
 **GeometryCache:** Caches Overpass API responses to reduce external calls. Uses 24-hour TTL.
 
 ### Indexing Strategy
 
-| Table              | Index                  | Purpose                  |
-| ------------------ | ---------------------- | ------------------------ |
-| User               | stravaId               | Webhook user lookup      |
-| Route              | userId                 | List user's routes       |
-| Route              | userId, isArchived     | Filter archived routes   |
-| Activity           | userId                 | List user's activities   |
-| Activity           | stravaId               | Prevent duplicates       |
-| Activity           | userId, startDate      | Sort by date             |
-| RouteActivity      | routeId                | Get activities for route |
-| RouteActivity      | activityId             | Get routes for activity  |
-| UserStreetProgress | userId                 | Map: list user's streets |
-| UserStreetProgress | userId, percentage     | Filter by progress       |
-| UserStreetProgress | userId, osmId (unique) | Upsert by user + street  |
-| GeometryCache      | cacheKey               | Cache lookup             |
-| GeometryCache      | expiresAt              | TTL cleanup              |
+| Table              | Index                  | Purpose                    |
+| ------------------ | ---------------------- | -------------------------- |
+| User               | stravaId               | Webhook user lookup        |
+| Project            | userId                 | List user's projects       |
+| Project            | userId, isArchived     | Filter archived projects   |
+| Activity           | userId                 | List user's activities     |
+| Activity           | stravaId               | Prevent duplicates         |
+| Activity           | userId, startDate      | Sort by date               |
+| ProjectActivity    | projectId              | Get activities for project |
+| ProjectActivity    | activityId             | Get projects for activity  |
+| UserStreetProgress | userId                 | Map: list user's streets   |
+| UserStreetProgress | userId, percentage     | Filter by progress         |
+| UserStreetProgress | userId, osmId (unique) | Upsert by user + street    |
+| GeometryCache      | cacheKey               | Cache lookup               |
+| GeometryCache      | expiresAt              | TTL cleanup                |

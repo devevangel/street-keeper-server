@@ -169,16 +169,16 @@ export interface ActivityImpact {
 }
 
 /**
- * Summary of activity's impact across all routes
+ * Summary of activity's impact across all projects
  */
 export interface ActivityProcessingResult {
   activityId: string;
-  routesAffected: number;
+  projectsAffected: number;
   totalStreetsCompleted: number;
   totalStreetsImproved: number;
-  routeImpacts: Array<{
-    routeId: string;
-    routeName: string;
+  projectImpacts: Array<{
+    projectId: string;
+    projectName: string;
     impact: ActivityImpact;
   }>;
 }
@@ -202,7 +202,7 @@ export interface ActivityListItem {
   createdAt: string;
 
   // Impact summary (if processed)
-  routesAffected?: number;
+  projectsAffected?: number;
   streetsCompleted?: number;
   streetsImproved?: number;
 }
@@ -214,10 +214,10 @@ export interface ActivityDetail extends ActivityListItem {
   coordinates: GpxPoint[];
   processedAt: string | null;
 
-  // Impact on each route
-  routeImpacts: Array<{
-    routeId: string;
-    routeName: string;
+  // Impact on each project
+  projectImpacts: Array<{
+    projectId: string;
+    projectName: string;
     streetsCompleted: number;
     streetsImproved: number;
     impactDetails: ActivityImpact | null;
@@ -225,9 +225,9 @@ export interface ActivityDetail extends ActivityListItem {
 }
 
 /**
- * Activity for route view (filtered to specific route)
+ * Activity for project view (filtered to specific project)
  */
-export interface RouteActivityItem {
+export interface ProjectActivityItem {
   id: string;
   activityId: string;
   activityName: string;
@@ -263,11 +263,11 @@ export interface ActivityDetailResponse {
 }
 
 /**
- * Response for route activities endpoint
+ * Response for project activities endpoint
  */
-export interface RouteActivitiesResponse {
+export interface ProjectActivitiesResponse {
   success: true;
-  activities: RouteActivityItem[];
+  activities: ProjectActivityItem[];
   total: number;
 }
 
@@ -277,5 +277,5 @@ export interface RouteActivitiesResponse {
 export interface ActivityDeleteResponse {
   success: true;
   message: string;
-  routesRecalculated: number;
+  projectsRecalculated: number;
 }

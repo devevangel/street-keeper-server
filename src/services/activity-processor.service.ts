@@ -89,13 +89,13 @@
 import {
   getActivityCoordinates,
   markActivityProcessed,
-  saveRouteActivity,
+  saveProjectActivity,
 } from "./activity.service.js";
 import {
-  detectOverlappingRoutes,
+  detectOverlappingProjects,
   type OverlapResult,
 } from "./overlap-detection.service.js";
-import { updateRouteProgress } from "./route.service.js";
+import { updateProjectProgress } from "./project.service.js";
 import { upsertStreetProgress } from "./user-street-progress.service.js";
 import {
   queryStreetsInRadius,
@@ -116,7 +116,7 @@ import {
 import { STREET_MATCHING } from "../config/constants.js";
 import prisma from "../lib/prisma.js";
 import type { GpxPoint, OsmStreet, MatchedStreet } from "../types/run.types.js";
-import type { StreetSnapshot, SnapshotStreet } from "../types/route.types.js";
+import type { StreetSnapshot, SnapshotStreet } from "../types/project.types.js";
 import type { ActivityImpact } from "../types/activity.types.js";
 
 // ============================================
@@ -124,17 +124,17 @@ import type { ActivityImpact } from "../types/activity.types.js";
 // ============================================
 
 /**
- * Result of processing a single route
+ * Result of processing a single project
  *
  * Contains details about which streets were affected and how.
  */
-export interface RouteProcessingResult {
-  /** Route ID */
-  routeId: string;
-  /** Route name (for logging) */
-  routeName: string;
-  /** Number of GPS points that fell within the route */
-  pointsInRoute: number;
+export interface ProjectProcessingResult {
+  /** Project ID */
+  projectId: string;
+  /** Project name (for logging) */
+  projectName: string;
+  /** Number of GPS points that fell within the project */
+  pointsInProject: number;
   /** Total streets that had any coverage from this activity */
   streetsCovered: number;
   /** Streets that reached 90%+ completion (newly or still) */
@@ -153,17 +153,17 @@ export interface ActivityProcessingResult {
   activityId: string;
   /** Whether processing completed successfully */
   success: boolean;
-  /** Total routes that were affected */
-  routesProcessed: number;
-  /** Details for each route */
-  routes: RouteProcessingResult[];
+  /** Total projects that were affected */
+  projectsProcessed: number;
+  /** Details for each project */
+  projects: ProjectProcessingResult[];
   /** Total time taken in milliseconds */
   processingTimeMs: number;
   /** Error message if failed */
   error?: string;
-  /** When no routes overlap: streets updated for map (standalone processing) */
+  /** When no projects overlap: streets updated for map (standalone processing) */
   standaloneStreetsCovered?: number;
-  /** When no routes overlap: streets completed (>= 90%) in standalone processing */
+  /** When no projects overlap: streets completed (>= 90%) in standalone processing */
   standaloneStreetsCompleted?: number;
 }
 
@@ -339,7 +339,7 @@ export async function processActivity(
   userId: string
 ): Promise<ActivityProcessingResult> {
   const startTime = Date.now();
-  const routeResults: RouteProcessingResult[] = [];
+  const projectResults: ProjectProcessingResult[] = [];
 
   try {
     // Step 1: Get activity coordinates
@@ -352,25 +352,25 @@ export async function processActivity(
       return {
         activityId,
         success: true,
-        routesProcessed: 0,
-        routes: [],
+        projectsProcessed: 0,
+        projects: [],
         processingTimeMs: Date.now() - startTime,
       };
     }
 
     console.log(`[Processor] Activity has ${coordinates.length} GPS points`);
 
-    // Step 2: Detect overlapping routes
-    const overlappingRoutes = await detectOverlappingRoutes(
+    // Step 2: Detect overlapping projects
+    const overlappingProjects = await detectOverlappingProjects(
       userId,
       coordinates
     );
     console.log(
-      `[Processor] Found ${overlappingRoutes.length} overlapping routes`
+      `[Processor] Found ${overlappingProjects.length} overlapping projects`
     );
 
-    if (overlappingRoutes.length === 0) {
-      // No routes: still process for user-level street progress (map feature)
+    if (overlappingProjects.length === 0) {
+      // No projects: still process for user-level street progress (map feature)
       const standalone = await processStandaloneActivity(
         activityId,
         userId,
@@ -380,28 +380,28 @@ export async function processActivity(
       return {
         activityId,
         success: true,
-        routesProcessed: 0,
-        routes: [],
+        projectsProcessed: 0,
+        projects: [],
         standaloneStreetsCovered: standalone.streetsCovered,
         standaloneStreetsCompleted: standalone.streetsCompleted,
         processingTimeMs: Date.now() - startTime,
       };
     }
 
-    // Step 3: Process each overlapping route
-    for (const overlap of overlappingRoutes) {
+    // Step 3: Process each overlapping project
+    for (const overlap of overlappingProjects) {
       try {
-        const result = await processRouteOverlap(
+        const result = await processProjectOverlap(
           activityId,
           userId,
           overlap,
           coordinates
         );
-        routeResults.push(result);
+        projectResults.push(result);
       } catch (error) {
-        // Log error but continue processing other routes
+        // Log error but continue processing other projects
         console.error(
-          `[Processor] Error processing route ${overlap.route.id}:`,
+          `[Processor] Error processing project ${overlap.project.id}:`,
           error instanceof Error ? error.message : error
         );
       }
@@ -413,7 +413,9 @@ export async function processActivity(
     const processingTimeMs = Date.now() - startTime;
     console.log(
       `[Processor] Completed processing activity ${activityId} in ${processingTimeMs}ms. ` +
-        `Routes: ${routeResults.length}, Total completed: ${routeResults.reduce(
+        `Projects: ${
+          projectResults.length
+        }, Total completed: ${projectResults.reduce(
           (sum, r) => sum + r.streetsCompleted,
           0
         )}`
@@ -422,8 +424,8 @@ export async function processActivity(
     return {
       activityId,
       success: true,
-      routesProcessed: routeResults.length,
-      routes: routeResults,
+      projectsProcessed: projectResults.length,
+      projects: projectResults,
       processingTimeMs,
     };
   } catch (error) {
@@ -437,8 +439,8 @@ export async function processActivity(
     return {
       activityId,
       success: false,
-      routesProcessed: 0,
-      routes: [],
+      projectsProcessed: 0,
+      projects: [],
       processingTimeMs: Date.now() - startTime,
       error: errorMessage,
     };
@@ -446,39 +448,35 @@ export async function processActivity(
 }
 
 // ============================================
-// Route Processing
+// Project Processing
 // ============================================
 
 /**
- * Process a single route overlap
+ * Process a single project overlap
  *
- * For a route that overlaps with the activity:
- * 1. Gets the route's current snapshot
+ * For a project that overlaps with the activity:
+ * 1. Gets the project's current snapshot
  * 2. Queries street geometries (from cache or Overpass)
  * 3. Matches GPS points to streets
  * 4. Calculates coverage for each street
- * 5. Updates route progress
+ * 5. Updates project progress
  * 6. Updates user-level street progress (for map feature)
- * 7. Saves the route-activity relationship
- *
- * @param activityId - Activity ID
- * @param userId - User ID (for user street progress)
- * @param overlap - Overlap detection result
- * @param coordinates - GPS coordinates from activity
- * @returns Processing result for this route
+ * 7. Saves the project-activity relationship
  */
-async function processRouteOverlap(
+async function processProjectOverlap(
   activityId: string,
   userId: string,
   overlap: OverlapResult,
   coordinates: GpxPoint[]
-): Promise<RouteProcessingResult> {
-  const { route } = overlap;
-  console.log(`[Processor] Processing route "${route.name}" (${route.id})`);
+): Promise<ProjectProcessingResult> {
+  const { project } = overlap;
+  console.log(
+    `[Processor] Processing project "${project.name}" (${project.id})`
+  );
 
-  // Step 1: Get the route's current snapshot
-  const routeData = await prisma.route.findUnique({
-    where: { id: route.id },
+  // Step 1: Get the project's current snapshot
+  const projectData = await prisma.project.findUnique({
+    where: { id: project.id },
     select: {
       streetsSnapshot: true,
       centerLat: true,
@@ -487,28 +485,26 @@ async function processRouteOverlap(
     },
   });
 
-  if (!routeData) {
-    throw new Error(`Route ${route.id} not found`);
+  if (!projectData) {
+    throw new Error(`Project ${project.id} not found`);
   }
 
-  const snapshot = routeData.streetsSnapshot as StreetSnapshot;
+  const snapshot = projectData.streetsSnapshot as StreetSnapshot;
 
   // Step 2: Get street geometries (for matching)
-  // Try cache first, then Overpass
   const geometries = await getStreetGeometries(
-    routeData.centerLat,
-    routeData.centerLng,
-    routeData.radiusMeters
+    projectData.centerLat,
+    projectData.centerLng,
+    projectData.radiusMeters
   );
 
   // Step 3: Match GPS points to streets
-  // Use hybrid matching for best accuracy
   const matchedStreets = await matchPointsToStreetsHybrid(
     coordinates,
     geometries
   );
   console.log(
-    `[Processor] Matched ${matchedStreets.length} streets for route "${route.name}"`
+    `[Processor] Matched ${matchedStreets.length} streets for project "${project.name}"`
   );
 
   // Step 4: Aggregate matched streets (combine segments)
@@ -521,7 +517,7 @@ async function processRouteOverlap(
     matchedStreets
   );
 
-  // Step 6: Update route progress
+  // Step 6: Update project progress
   if (coverages.length > 0) {
     const streetUpdates = coverages.map((c) => ({
       osmId: c.osmId,
@@ -529,9 +525,9 @@ async function processRouteOverlap(
       lastRunDate: new Date().toISOString(),
     }));
 
-    await updateRouteProgress(route.id, streetUpdates);
+    await updateProjectProgress(project.id, streetUpdates);
     console.log(
-      `[Processor] Updated ${streetUpdates.length} streets in route "${route.name}"`
+      `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}"`
     );
 
     // Step 6b: Update user-level street progress (for map feature)
@@ -553,13 +549,13 @@ async function processRouteOverlap(
     await upsertStreetProgress(userId, streetProgressInput);
   }
 
-  // Step 7: Save route-activity relationship
-  await saveRouteActivity(route.id, activityId, impact);
+  // Step 7: Save project-activity relationship
+  await saveProjectActivity(project.id, activityId, impact);
 
   return {
-    routeId: route.id,
-    routeName: route.name,
-    pointsInRoute: overlap.pointsInsideCount,
+    projectId: project.id,
+    projectName: project.name,
+    pointsInProject: overlap.pointsInsideCount,
     streetsCovered: coverages.length,
     streetsCompleted: impact.completed.length,
     streetsImproved: impact.improved.length,
@@ -800,8 +796,8 @@ export async function processActivitiesBatch(
       results.push({
         activityId,
         success: false,
-        routesProcessed: 0,
-        routes: [],
+        projectsProcessed: 0,
+        projects: [],
         processingTimeMs: 0,
         error: error instanceof Error ? error.message : "Unknown error",
       });
@@ -812,20 +808,19 @@ export async function processActivitiesBatch(
 }
 
 /**
- * Reprocess all activities for a specific route
+ * Reprocess all activities for a specific project
  *
- * Called when a route is refreshed and we need to recalculate
+ * Called when a project is refreshed and we need to recalculate
  * progress based on all historical activities.
  *
- * @param routeId - Route ID to reprocess
+ * @param projectId - Project ID to reprocess
  * @param userId - User ID (for verification)
  * @returns Number of activities reprocessed
  */
-export async function reprocessRouteActivities(
-  routeId: string,
+export async function reprocessProjectActivities(
+  projectId: string,
   userId: string
 ): Promise<{ activitiesProcessed: number }> {
-  // Get all activities for this user that are processed
   const activities = await prisma.activity.findMany({
     where: {
       userId,
@@ -836,17 +831,16 @@ export async function reprocessRouteActivities(
       coordinates: true,
     },
     orderBy: {
-      startDate: "asc", // Process in chronological order
+      startDate: "asc",
     },
   });
 
   console.log(
-    `[Processor] Reprocessing ${activities.length} activities for route ${routeId}`
+    `[Processor] Reprocessing ${activities.length} activities for project ${projectId}`
   );
 
-  // Get route data
-  const route = await prisma.route.findUnique({
-    where: { id: routeId },
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
     select: {
       centerLat: true,
       centerLng: true,
@@ -855,14 +849,12 @@ export async function reprocessRouteActivities(
     },
   });
 
-  if (!route) {
-    throw new Error(`Route ${routeId} not found`);
+  if (!project) {
+    throw new Error(`Project ${projectId} not found`);
   }
 
-  // Reset route progress first
-  await resetRouteProgress(routeId);
+  await resetProjectProgress(projectId);
 
-  // Process each activity against this route
   let processed = 0;
 
   for (const activity of activities) {
@@ -872,30 +864,28 @@ export async function reprocessRouteActivities(
       continue;
     }
 
-    // Check if activity overlaps with route (simplified check)
-    const overlaps = checkActivityOverlapsRoute(
+    const overlaps = checkActivityOverlapsProject(
       coordinates,
-      route.centerLat,
-      route.centerLng,
-      route.radiusMeters
+      project.centerLat,
+      project.centerLng,
+      project.radiusMeters
     );
 
     if (overlaps) {
-      // Create a mock overlap result for processing
       const mockOverlap: OverlapResult = {
-        route: {
-          id: routeId,
-          name: route.name,
-          centerLat: route.centerLat,
-          centerLng: route.centerLng,
-          radiusMeters: route.radiusMeters,
+        project: {
+          id: projectId,
+          name: project.name,
+          centerLat: project.centerLat,
+          centerLng: project.centerLng,
+          radiusMeters: project.radiusMeters,
         },
         samplePointsInside: [],
-        pointsInsideCount: 1, // Just needs to be > 0
+        pointsInsideCount: 1,
       };
 
       try {
-        await processRouteOverlap(
+        await processProjectOverlap(
           activity.id,
           userId,
           mockOverlap,
@@ -912,37 +902,35 @@ export async function reprocessRouteActivities(
   }
 
   console.log(
-    `[Processor] Reprocessed ${processed} activities for route "${route.name}"`
+    `[Processor] Reprocessed ${processed} activities for project "${project.name}"`
   );
 
   return { activitiesProcessed: processed };
 }
 
 /**
- * Reset route progress to 0 for all streets
+ * Reset project progress to 0 for all streets
  *
- * Used before reprocessing all activities for a route.
+ * Used before reprocessing all activities for a project.
  */
-async function resetRouteProgress(routeId: string): Promise<void> {
-  const route = await prisma.route.findUnique({
-    where: { id: routeId },
+async function resetProjectProgress(projectId: string): Promise<void> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
     select: { streetsSnapshot: true },
   });
 
-  if (!route) return;
+  if (!project) return;
 
-  const snapshot = route.streetsSnapshot as StreetSnapshot;
+  const snapshot = project.streetsSnapshot as StreetSnapshot;
 
-  // Reset all streets to 0%
   for (const street of snapshot.streets) {
     street.completed = false;
     street.percentage = 0;
     street.lastRunDate = null;
   }
 
-  // Update route
-  await prisma.route.update({
-    where: { id: routeId },
+  await prisma.project.update({
+    where: { id: projectId },
     data: {
       streetsSnapshot: snapshot as object,
       completedStreets: 0,
@@ -950,19 +938,17 @@ async function resetRouteProgress(routeId: string): Promise<void> {
     },
   });
 
-  // Delete existing RouteActivity records
-  await prisma.routeActivity.deleteMany({
-    where: { routeId },
+  await prisma.projectActivity.deleteMany({
+    where: { projectId },
   });
 }
 
 /**
- * Quick check if an activity overlaps with a route
+ * Quick check if an activity overlaps with a project
  *
  * Simplified version of overlap detection for reprocessing.
- * Checks if any GPS point is within the route radius.
  */
-function checkActivityOverlapsRoute(
+function checkActivityOverlapsProject(
   coordinates: GpxPoint[],
   centerLat: number,
   centerLng: number,

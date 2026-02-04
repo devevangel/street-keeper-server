@@ -1,22 +1,22 @@
 /**
  * Geometry Cache Service
  * Caches street geometries to reduce Overpass API calls
- * 
+ *
  * This service provides a caching layer for street geometry data retrieved
  * from OpenStreetMap via Overpass API. Key features:
- * 
+ *
  * 1. **24-hour TTL**: Cached data expires after 24 hours
  * 2. **Smart key generation**: Cache keys include coordinates and radius
  * 3. **Larger radius filtering**: Can filter cached larger-radius results for smaller requests
- * 
+ *
  * Cache is stored in PostgreSQL (GeometryCache table) rather than Redis
  * to simplify deployment and because street data is relatively static.
- * 
+ *
  * @example
  * // Check cache before querying Overpass
  * const cacheKey = generateRadiusCacheKey(50.788, -1.089, 2000);
  * let streets = await getCachedGeometries(cacheKey);
- * 
+ *
  * if (!streets) {
  *   streets = await queryStreetsInRadius(50.788, -1.089, 2000);
  *   await setCachedGeometries(cacheKey, streets);
@@ -24,7 +24,7 @@
  */
 
 import prisma from "../lib/prisma.js";
-import { GEOMETRY_CACHE, ROUTES } from "../config/constants.js";
+import { GEOMETRY_CACHE, PROJECTS } from "../config/constants.js";
 import type { OsmStreet } from "../types/run.types.js";
 
 // ============================================
@@ -33,16 +33,16 @@ import type { OsmStreet } from "../types/run.types.js";
 
 /**
  * Generate a cache key for radius-based queries
- * 
+ *
  * Key format: "geo:radius:{lat}:{lng}:{meters}"
  * Coordinates are rounded to 4 decimal places (~11m accuracy)
  * to improve cache hit rates for nearby queries.
- * 
+ *
  * @param centerLat - Center latitude
  * @param centerLng - Center longitude
  * @param radiusMeters - Search radius in meters
  * @returns Cache key string
- * 
+ *
  * @example
  * const key = generateRadiusCacheKey(50.78812, -1.08934, 2000);
  * // Returns: "geo:radius:50.7881:-1.0893:2000"
@@ -62,7 +62,7 @@ export function generateRadiusCacheKey(
 
 /**
  * Parse a cache key to extract its components
- * 
+ *
  * @param cacheKey - Cache key string
  * @returns Parsed components or null if invalid
  */
@@ -90,14 +90,14 @@ export function parseCacheKey(
 
 /**
  * Get cached geometries by cache key
- * 
+ *
  * Retrieves street geometries from cache if:
  * 1. Cache entry exists
  * 2. Cache entry has not expired
- * 
+ *
  * @param cacheKey - Cache key (from generateRadiusCacheKey)
  * @returns Array of OsmStreet objects, or null if not cached/expired
- * 
+ *
  * @example
  * const streets = await getCachedGeometries("geo:radius:50.788:-1.089:2000");
  * if (streets) {
@@ -138,13 +138,13 @@ export async function getCachedGeometries(
 
 /**
  * Store geometries in cache
- * 
+ *
  * Stores street geometries with a 24-hour TTL.
  * Uses upsert to handle both new entries and updates.
- * 
+ *
  * @param cacheKey - Cache key
  * @param geometries - Array of OsmStreet objects to cache
- * 
+ *
  * @example
  * const streets = await queryStreetsInRadius(50.788, -1.089, 2000);
  * await setCachedGeometries("geo:radius:50.788:-1.089:2000", streets);
@@ -187,16 +187,16 @@ export async function setCachedGeometries(
 
 /**
  * Find a larger cached radius that contains the requested area
- * 
+ *
  * If a user requests 2km radius but we have 5km cached for the same
  * center point, we can filter the 5km results instead of making
  * a new API call.
- * 
+ *
  * @param centerLat - Center latitude
  * @param centerLng - Center longitude
  * @param radiusMeters - Requested radius
  * @returns Cached data from larger radius, or null if none found
- * 
+ *
  * @example
  * // User requests 2km, but we have 5km cached
  * const larger = await findLargerCachedRadius(50.788, -1.089, 2000);
@@ -208,9 +208,13 @@ export async function findLargerCachedRadius(
   centerLat: number,
   centerLng: number,
   radiusMeters: number
-): Promise<{ streets: OsmStreet[]; cacheKey: string; cachedRadius: number } | null> {
+): Promise<{
+  streets: OsmStreet[];
+  cacheKey: string;
+  cachedRadius: number;
+} | null> {
   // Check each larger allowed radius
-  const largerRadii = ROUTES.ALLOWED_RADII.filter((r) => r > radiusMeters);
+  const largerRadii = PROJECTS.ALLOWED_RADII.filter((r) => r > radiusMeters);
 
   for (const largerRadius of largerRadii) {
     const cacheKey = generateRadiusCacheKey(centerLat, centerLng, largerRadius);
@@ -233,13 +237,13 @@ export async function findLargerCachedRadius(
 
 /**
  * Filter streets to only those within a radius
- * 
+ *
  * When we have cached data for a larger radius, filter it down
  * to the requested smaller radius by checking each street's
  * distance from the center point.
- * 
+ *
  * A street is included if its centroid (midpoint) is within the radius.
- * 
+ *
  * @param streets - Array of streets to filter
  * @param centerLat - Center latitude
  * @param centerLng - Center longitude
@@ -279,10 +283,10 @@ export function filterStreetsToRadius(
 
 /**
  * Delete expired cache entries
- * 
+ *
  * Call this periodically (e.g., daily cron job) to clean up
  * expired cache entries and keep the database tidy.
- * 
+ *
  * @returns Number of entries deleted
  */
 export async function cleanExpiredCache(): Promise<number> {
@@ -308,7 +312,7 @@ export async function cleanExpiredCache(): Promise<number> {
 
 /**
  * Get cache statistics
- * 
+ *
  * Returns stats about the geometry cache for monitoring.
  */
 export async function getCacheStats(): Promise<{
@@ -337,7 +341,7 @@ export async function getCacheStats(): Promise<{
 
 /**
  * Calculate distance between two points using Haversine formula
- * 
+ *
  * @param lat1 - Latitude of first point
  * @param lng1 - Longitude of first point
  * @param lat2 - Latitude of second point

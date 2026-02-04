@@ -1,21 +1,21 @@
 /**
  * Activity Service
  * Handles activity storage, retrieval, and management
- * 
+ *
  * Activities represent user runs/walks synced from Strava.
  * This service handles:
  * - Saving activities from Strava webhook
  * - Retrieving activity lists and details
  * - Managing activity-route relationships (impact tracking)
  * - Activity deletion with route recalculation
- * 
+ *
  * Note: Activity PROCESSING (matching to routes) is handled by
  * activity-processor.service.ts, not this service.
- * 
+ *
  * @example
  * // Save activity from Strava
  * const activity = await saveActivity(userId, stravaActivity, coordinates);
- * 
+ *
  * // List user's activities
  * const activities = await listActivities(userId, { page: 1, pageSize: 20 });
  */
@@ -28,7 +28,7 @@ import type {
   ActivityListItem,
   ActivityDetail,
   ActivityImpact,
-  RouteActivityItem,
+  ProjectActivityItem,
 } from "../types/activity.types.js";
 
 // ============================================
@@ -37,16 +37,16 @@ import type {
 
 /**
  * Save a new activity from Strava
- * 
+ *
  * Creates an activity record with GPS coordinates.
  * Called by webhook handler after fetching activity data from Strava.
- * 
+ *
  * @param userId - Internal user ID
  * @param stravaActivity - Activity data from Strava API
  * @param coordinates - GPS coordinates from Strava streams
  * @returns Created activity record
  * @throws Error if activity already exists (duplicate stravaId)
- * 
+ *
  * @example
  * const activity = await saveActivity(
  *   "user-123",
@@ -96,7 +96,7 @@ export async function saveActivity(
 
 /**
  * Check if activity type is supported for processing
- * 
+ *
  * @param activityType - Strava activity type (e.g., "Run", "Ride")
  * @returns True if activity should be processed
  */
@@ -108,7 +108,7 @@ export function isSupportedActivityType(activityType: string): boolean {
 
 /**
  * Check if activity is too old to process
- * 
+ *
  * @param startDate - Activity start date
  * @returns True if activity is too old
  */
@@ -126,10 +126,10 @@ export function isActivityTooOld(startDate: Date): boolean {
 
 /**
  * Get activity by ID
- * 
+ *
  * @param activityId - Activity ID
  * @param userId - User ID (for authorization)
- * @returns Activity with coordinates and route impacts
+ * @returns Activity with coordinates and project impacts
  * @throws ActivityNotFoundError if not found or access denied
  */
 export async function getActivityById(
@@ -139,9 +139,9 @@ export async function getActivityById(
   const activity = await prisma.activity.findUnique({
     where: { id: activityId },
     include: {
-      routes: {
+      projects: {
         include: {
-          route: {
+          project: {
             select: { id: true, name: true },
           },
         },
@@ -157,10 +157,10 @@ export async function getActivityById(
     throw new ActivityNotFoundError(activityId); // Don't reveal existence
   }
 
-  // Map route impacts
-  const routeImpacts = activity.routes.map((ra) => ({
-    routeId: ra.route.id,
-    routeName: ra.route.name,
+  // Map project impacts
+  const projectImpacts = activity.projects.map((ra) => ({
+    projectId: ra.project.id,
+    projectName: ra.project.name,
     streetsCompleted: ra.streetsCompleted,
     streetsImproved: ra.streetsImproved,
     impactDetails: ra.impactDetails as ActivityImpact | null,
@@ -178,19 +178,25 @@ export async function getActivityById(
     createdAt: activity.createdAt.toISOString(),
     coordinates: activity.coordinates as GpxPoint[],
     processedAt: activity.processedAt?.toISOString() ?? null,
-    routeImpacts,
-    routesAffected: routeImpacts.length,
-    streetsCompleted: routeImpacts.reduce((sum, r) => sum + r.streetsCompleted, 0),
-    streetsImproved: routeImpacts.reduce((sum, r) => sum + r.streetsImproved, 0),
+    projectImpacts,
+    projectsAffected: projectImpacts.length,
+    streetsCompleted: projectImpacts.reduce(
+      (sum, r) => sum + r.streetsCompleted,
+      0
+    ),
+    streetsImproved: projectImpacts.reduce(
+      (sum, r) => sum + r.streetsImproved,
+      0
+    ),
   };
 }
 
 /**
  * List activities for a user
- * 
+ *
  * Returns paginated list of activities with summary info.
  * Most recent activities first.
- * 
+ *
  * @param userId - User ID
  * @param options - Pagination options
  * @returns Paginated activity list
@@ -198,7 +204,12 @@ export async function getActivityById(
 export async function listActivities(
   userId: string,
   options: { page?: number; pageSize?: number } = {}
-): Promise<{ activities: ActivityListItem[]; total: number; page: number; pageSize: number }> {
+): Promise<{
+  activities: ActivityListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+}> {
   const page = options.page ?? 1;
   const pageSize = options.pageSize ?? 20;
   const skip = (page - 1) * pageSize;
@@ -210,7 +221,7 @@ export async function listActivities(
       skip,
       take: pageSize,
       include: {
-        routes: {
+        projects: {
           select: {
             streetsCompleted: true,
             streetsImproved: true,
@@ -231,37 +242,40 @@ export async function listActivities(
     activityType: a.activityType,
     isProcessed: a.isProcessed,
     createdAt: a.createdAt.toISOString(),
-    routesAffected: a.routes.length,
-    streetsCompleted: a.routes.reduce((sum, r) => sum + r.streetsCompleted, 0),
-    streetsImproved: a.routes.reduce((sum, r) => sum + r.streetsImproved, 0),
+    projectsAffected: a.projects.length,
+    streetsCompleted: a.projects.reduce(
+      (sum, r) => sum + r.streetsCompleted,
+      0
+    ),
+    streetsImproved: a.projects.reduce((sum, r) => sum + r.streetsImproved, 0),
   }));
 
   return { activities: activityList, total, page, pageSize };
 }
 
 /**
- * List activities that affected a specific route
- * 
- * @param routeId - Route ID
+ * List activities that affected a specific project
+ *
+ * @param projectId - Project ID
  * @param userId - User ID (for authorization)
- * @returns List of activities with their impact on this route
+ * @returns List of activities with their impact on this project
  */
-export async function listActivitiesForRoute(
-  routeId: string,
+export async function listActivitiesForProject(
+  projectId: string,
   userId: string
-): Promise<RouteActivityItem[]> {
-  // Verify route exists and user has access
-  const route = await prisma.route.findUnique({
-    where: { id: routeId },
+): Promise<ProjectActivityItem[]> {
+  // Verify project exists and user has access
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
   });
 
-  if (!route || route.userId !== userId) {
-    throw new Error("Route not found or access denied");
+  if (!project || project.userId !== userId) {
+    throw new Error("Project not found or access denied");
   }
 
-  // Get route activities
-  const routeActivities = await prisma.routeActivity.findMany({
-    where: { routeId },
+  // Get project activities
+  const projectActivities = await prisma.projectActivity.findMany({
+    where: { projectId },
     orderBy: { createdAt: "desc" },
     include: {
       activity: {
@@ -276,7 +290,7 @@ export async function listActivitiesForRoute(
     },
   });
 
-  return routeActivities.map((ra) => ({
+  return projectActivities.map((ra) => ({
     id: ra.id,
     activityId: ra.activity.id,
     activityName: ra.activity.name,
@@ -295,9 +309,9 @@ export async function listActivitiesForRoute(
 
 /**
  * Mark activity as processed
- * 
+ *
  * Called after activity-processor completes.
- * 
+ *
  * @param activityId - Activity ID
  */
 export async function markActivityProcessed(activityId: string): Promise<void> {
@@ -313,26 +327,26 @@ export async function markActivityProcessed(activityId: string): Promise<void> {
 }
 
 /**
- * Save route-activity relationship with impact
- * 
- * Records how an activity affected a route.
+ * Save project-activity relationship with impact
+ *
+ * Records how an activity affected a project.
  * Called by activity-processor after matching.
- * 
- * @param routeId - Route ID
+ *
+ * @param projectId - Project ID
  * @param activityId - Activity ID
  * @param impact - Impact details (streets completed/improved)
  */
-export async function saveRouteActivity(
-  routeId: string,
+export async function saveProjectActivity(
+  projectId: string,
   activityId: string,
   impact: ActivityImpact
 ): Promise<void> {
-  await prisma.routeActivity.upsert({
+  await prisma.projectActivity.upsert({
     where: {
-      routeId_activityId: { routeId, activityId },
+      projectId_activityId: { projectId, activityId },
     },
     create: {
-      routeId,
+      projectId,
       activityId,
       streetsCompleted: impact.completed.length,
       streetsImproved: impact.improved.length,
@@ -346,7 +360,7 @@ export async function saveRouteActivity(
   });
 
   console.log(
-    `[Activity] Saved RouteActivity: route=${routeId}, activity=${activityId}, ` +
+    `[Activity] Saved ProjectActivity: project=${projectId}, activity=${activityId}, ` +
       `completed=${impact.completed.length}, improved=${impact.improved.length}`
   );
 }
@@ -357,23 +371,23 @@ export async function saveRouteActivity(
 
 /**
  * Delete an activity
- * 
- * Deletes activity and recalculates affected routes.
+ *
+ * Deletes activity and recalculates affected projects.
  * This is expensive because we need to replay all remaining activities.
- * 
+ *
  * @param activityId - Activity ID
  * @param userId - User ID (for authorization)
- * @returns Number of routes that need recalculation
+ * @returns Number of projects that need recalculation
  */
 export async function deleteActivity(
   activityId: string,
   userId: string
-): Promise<{ routesAffected: number }> {
+): Promise<{ projectsAffected: number }> {
   const activity = await prisma.activity.findUnique({
     where: { id: activityId },
     include: {
-      routes: {
-        select: { routeId: true },
+      projects: {
+        select: { projectId: true },
       },
     },
   });
@@ -386,28 +400,28 @@ export async function deleteActivity(
     throw new ActivityNotFoundError(activityId);
   }
 
-  const affectedRouteIds = activity.routes.map((r) => r.routeId);
+  const affectedProjectIds = activity.projects.map((r) => r.projectId);
 
-  // Delete activity (cascades to RouteActivity)
+  // Delete activity (cascades to ProjectActivity)
   await prisma.activity.delete({
     where: { id: activityId },
   });
 
   console.log(
-    `[Activity] Deleted activity ${activityId}, affects ${affectedRouteIds.length} routes`
+    `[Activity] Deleted activity ${activityId}, affects ${affectedProjectIds.length} projects`
   );
 
-  // Note: Route recalculation should be done by caller
+  // Note: Project recalculation should be done by caller
   // This is a heavy operation that may need to be queued
 
-  return { routesAffected: affectedRouteIds.length };
+  return { projectsAffected: affectedProjectIds.length };
 }
 
 /**
  * Get activity by Strava ID
- * 
+ *
  * Used to check if activity already exists when processing webhook.
- * 
+ *
  * @param stravaId - Strava activity ID
  * @returns Activity if exists, null otherwise
  */
@@ -424,9 +438,9 @@ export async function getActivityByStravaId(
 
 /**
  * Get coordinates for an activity
- * 
+ *
  * Used by activity processor to get GPS data for matching.
- * 
+ *
  * @param activityId - Activity ID
  * @returns GPS coordinates
  */

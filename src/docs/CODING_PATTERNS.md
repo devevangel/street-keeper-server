@@ -108,7 +108,7 @@ backend/
 
 | Layer      | Pattern              | Example                                |
 | ---------- | -------------------- | -------------------------------------- |
-| Routes     | `*.routes.ts`        | `auth.routes.ts`, `runs.routes.ts`     |
+| Routes     | `*.routes.ts`        | `auth.routes.ts`, `projects.routes.ts` |
 | Services   | `*.service.ts`       | `auth.service.ts`, `strava.service.ts` |
 | Types      | `*.types.ts`         | `auth.types.ts`, `run.types.ts`        |
 | Tests      | `*.test.ts`          | `auth.test.ts`, `strava.test.ts`       |
@@ -323,7 +323,7 @@ const router = Router();
 
 // Mount route modules under their prefix
 router.use("/auth", authRoutes);
-// router.use("/runs", runRoutes);
+router.use("/projects", projectsRoutes);
 // router.use("/goals", goalRoutes);
 
 export default router;
@@ -380,7 +380,7 @@ interface AuthenticatedUser {
 Use `x-user-id` header for testing without full auth flow:
 
 ```bash
-curl -H "x-user-id: abc-123" http://localhost:8000/api/v1/routes
+curl -H "x-user-id: abc-123" http://localhost:8000/api/v1/projects
 ```
 
 ---
@@ -907,9 +907,9 @@ Every file starts with a detailed JSDoc comment explaining:
 /**
  * Query streets within a radius from a center point
  *
- * Used for creating Routes - queries all streets within a circular area
- * around a center point. This is more appropriate for Routes than bounding
- * box queries because Routes are defined by center + radius.
+ * Used for creating Projects - queries all streets within a circular area
+ * around a center point. This is more appropriate for Projects than bounding
+ * box queries because Projects are defined by center + radius.
  *
  * Features:
  * - Queries by radius (circular area) instead of bounding box
@@ -1002,27 +1002,30 @@ For complex algorithms, include a high-level explanation:
 
 ```typescript
 /**
- * Two-phase overlap detection for activity-to-route matching
+ * Two-phase overlap detection for activity-to-project matching
  *
  * ALGORITHM:
  * ---------
  * Phase 1: Bounding Box Check (Fast Filter)
  *   - Calculate activity bounding box (min/max lat/lng)
- *   - Calculate route circular bounds
- *   - If boxes don't overlap → skip route (no match possible)
- *   - This eliminates most routes in O(1) time
+ *   - Calculate project circular bounds
+ *   - If boxes don't overlap → skip project (no match possible)
+ *   - This eliminates most projects in O(1) time
  *
  * Phase 2: Point-in-Circle Check (Precise)
- *   - Only for routes that passed Phase 1
- *   - Check if ANY activity point falls within route radius
+ *   - Only for projects that passed Phase 1
+ *   - Check if ANY activity point falls within project radius
  *   - Uses Haversine distance for accuracy on Earth's surface
  *
  * PERFORMANCE:
- *   - Without bbox: O(n * m) where n=routes, m=points
+ *   - Without bbox: O(n * m) where n=projects, m=points
  *   - With bbox: O(n) for most cases, O(n * m) worst case
- *   - Typically 10-100x faster for users with many routes
+ *   - Typically 10-100x faster for users with many projects
  */
-function detectOverlappingRoutes(activity: Activity, routes: Route[]): Route[] {
+function detectOverlappingProjects(
+  activity: Activity,
+  projects: Project[]
+): Project[] {
   // Implementation...
 }
 ```
@@ -1033,9 +1036,9 @@ Document interfaces with field-level comments:
 
 ```typescript
 /**
- * Snapshot of a street's progress within a route
+ * Snapshot of a street's progress within a project
  *
- * Stored in Route.streetsSnapshot JSON field.
+ * Stored in Project.streetsSnapshot JSON field.
  * Progress is tracked as percentage (0-100) of street length covered.
  */
 export interface SnapshotStreet {
@@ -1069,22 +1072,22 @@ export interface SnapshotStreet {
 
 ```typescript
 /**
- * Error thrown when route is not found
+ * Error thrown when project is not found
  *
  * This error indicates:
- * - Route ID doesn't exist in database
- * - Route was deleted
+ * - Project ID doesn't exist in database
+ * - Project was deleted
  *
  * HTTP Status: 404
- * Error Code: ROUTE_NOT_FOUND
+ * Error Code: PROJECT_NOT_FOUND
  */
-export class RouteNotFoundError extends Error {
-  public routeId: string;
+export class ProjectNotFoundError extends Error {
+  public projectId: string;
 
-  constructor(routeId: string) {
-    super(`Route not found: ${routeId}`);
-    this.name = "RouteNotFoundError";
-    this.routeId = routeId;
+  constructor(projectId: string) {
+    super(`Project not found: ${projectId}`);
+    this.name = "ProjectNotFoundError";
+    this.projectId = projectId;
   }
 }
 ```

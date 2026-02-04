@@ -1,10 +1,10 @@
 /**
  * Routes API Endpoints
  * CRUD operations for user routes (geographic areas for street tracking)
- * 
+ *
  * ENDPOINTS OVERVIEW:
  * -------------------
- * 
+ *
  * | Method | Path                    | Description                    | Auth |
  * |--------|-------------------------|--------------------------------|------|
  * | GET    | /routes/preview         | Preview streets before create  | Yes  |
@@ -14,25 +14,25 @@
  * | DELETE | /routes/:id             | Archive (soft delete) route    | Yes  |
  * | POST   | /routes/:id/refresh     | Refresh street snapshot        | Yes  |
  * | GET    | /routes/:id/activities  | Get activities for a route     | Yes  |
- * 
+ *
  * ROUTE LIFECYCLE:
  * ----------------
- * 
+ *
  * 1. **Preview** (optional): User previews area to see street count
  *    GET /routes/preview?lat=50.788&lng=-1.089&radius=2000
- * 
+ *
  * 2. **Create**: User creates route with name and location
  *    POST /routes { name, centerLat, centerLng, radiusMeters, cacheKey? }
- * 
+ *
  * 3. **View**: User views route detail with street progress
  *    GET /routes/:id
- * 
+ *
  * 4. **Refresh**: System suggests refresh after 30 days
  *    POST /routes/:id/refresh
- * 
+ *
  * 5. **Archive**: User removes route (soft delete)
  *    DELETE /routes/:id
- * 
+ *
  * AUTHENTICATION:
  * ---------------
  * All endpoints require authentication via the `requireAuth` middleware.
@@ -41,20 +41,21 @@
 
 import { Router, Request, Response } from "express";
 import {
-  previewRoute,
-  createRoute,
-  listRoutes,
-  getRouteById,
-  archiveRoute,
-  refreshRouteSnapshot,
-  RouteNotFoundError,
-  RouteAccessDeniedError,
-} from "../services/route.service.js";
-import { listActivitiesForRoute } from "../services/activity.service.js";
-import { ERROR_CODES, ROUTES } from "../config/constants.js";
+  previewProject,
+  createProject,
+  listProjects,
+  getProjectById,
+  getProjectMapData,
+  archiveProject,
+  refreshProjectSnapshot,
+  ProjectNotFoundError,
+  ProjectAccessDeniedError,
+} from "../services/project.service.js";
+import { listActivitiesForProject } from "../services/activity.service.js";
+import { ERROR_CODES, PROJECTS } from "../config/constants.js";
 import { OverpassError } from "../services/overpass.service.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
-import type { CreateRouteInput } from "../types/route.types.js";
+import type { CreateProjectInput } from "../types/project.types.js";
 
 const router = Router();
 
@@ -80,7 +81,7 @@ router.use(requireAuth);
  *     description: |
  *       Preview the streets in an area before committing to create a route.
  *       Returns street count, total length, and warnings about the area.
- *       
+ *
  *       Uses smart caching:
  *       - First request for an area queries Overpass and caches result
  *       - Subsequent requests (same or smaller radius) use cache
@@ -121,7 +122,7 @@ router.use(requireAuth);
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/RoutePreviewResponse'
+ *               $ref: '#/components/schemas/ProjectPreviewResponse'
  *       400:
  *         description: Invalid parameters
  *         content:
@@ -167,17 +168,24 @@ router.get("/preview", async (req: Request, res: Response) => {
   }
 
   // Validate radius
-  if (isNaN(radius) || !ROUTES.ALLOWED_RADII.includes(radius as typeof ROUTES.ALLOWED_RADII[number])) {
+  if (
+    isNaN(radius) ||
+    !PROJECTS.ALLOWED_RADII.includes(
+      radius as (typeof PROJECTS.ALLOWED_RADII)[number]
+    )
+  ) {
     res.status(400).json({
       success: false,
-      error: `Invalid radius. Must be one of: ${ROUTES.ALLOWED_RADII.join(", ")} meters.`,
-      code: ERROR_CODES.ROUTE_INVALID_RADIUS,
+      error: `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(
+        ", "
+      )} meters.`,
+      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
     });
     return;
   }
 
   try {
-    const preview = await previewRoute(lat, lng, radius);
+    const preview = await previewProject(lat, lng, radius);
 
     res.status(200).json({
       success: true,
@@ -193,7 +201,7 @@ router.get("/preview", async (req: Request, res: Response) => {
       return;
     }
 
-    console.error("[Routes] Preview error:", error);
+    console.error("[Projects] Preview error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -242,15 +250,15 @@ router.get("/", async (req: Request, res: Response) => {
   const includeArchived = req.query.includeArchived === "true";
 
   try {
-    const routes = await listRoutes(userId, includeArchived);
+    const projects = await listProjects(userId, includeArchived);
 
     res.status(200).json({
       success: true,
-      routes,
-      total: routes.length,
+      projects,
+      total: projects.length,
     });
   } catch (error) {
-    console.error("[Routes] List error:", error);
+    console.error("[Projects] List error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -271,7 +279,7 @@ router.get("/", async (req: Request, res: Response) => {
  *     description: |
  *       Create a new route for the authenticated user. Queries OpenStreetMap for streets
  *       in the specified area and creates a snapshot for progress tracking.
- *       
+ *
  *       **Tip:** Call `/routes/preview` first and pass the returned `cacheKey` to skip
  *       the Overpass query and speed up route creation.
  *     tags: [Routes]
@@ -282,7 +290,7 @@ router.get("/", async (req: Request, res: Response) => {
  *       content:
  *         application/json:
  *           schema:
- *             $ref: '#/components/schemas/CreateRouteRequest'
+ *             $ref: '#/components/schemas/CreateProjectRequest'
  *     responses:
  *       201:
  *         description: Route created successfully
@@ -295,7 +303,7 @@ router.get("/", async (req: Request, res: Response) => {
  *                   type: boolean
  *                   enum: [true]
  *                 route:
- *                   $ref: '#/components/schemas/RouteListItem'
+ *                   $ref: '#/components/schemas/ProjectListItem'
  *                 message:
  *                   type: string
  *       400:
@@ -321,12 +329,13 @@ router.post("/", async (req: Request, res: Response) => {
   const userId = req.user!.id;
 
   // Validate request body
-  const { name, centerLat, centerLng, radiusMeters, deadline, cacheKey } = req.body;
+  const { name, centerLat, centerLng, radiusMeters, deadline, cacheKey } =
+    req.body;
 
   if (!name || typeof name !== "string" || name.trim().length === 0) {
     res.status(400).json({
       success: false,
-      error: "Route name is required",
+      error: "Project name is required",
       code: ERROR_CODES.VALIDATION_ERROR,
     });
     return;
@@ -350,17 +359,23 @@ router.post("/", async (req: Request, res: Response) => {
     return;
   }
 
-  if (!ROUTES.ALLOWED_RADII.includes(radiusMeters)) {
+  if (
+    !PROJECTS.ALLOWED_RADII.includes(
+      radiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number]
+    )
+  ) {
     res.status(400).json({
       success: false,
-      error: `Invalid radius. Must be one of: ${ROUTES.ALLOWED_RADII.join(", ")} meters.`,
-      code: ERROR_CODES.ROUTE_INVALID_RADIUS,
+      error: `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(
+        ", "
+      )} meters.`,
+      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
     });
     return;
   }
 
   try {
-    const input: CreateRouteInput = {
+    const input: CreateProjectInput = {
       name: name.trim(),
       centerLat,
       centerLng,
@@ -368,12 +383,12 @@ router.post("/", async (req: Request, res: Response) => {
       deadline,
     };
 
-    const route = await createRoute(userId, input, cacheKey);
+    const project = await createProject(userId, input, cacheKey);
 
     res.status(201).json({
       success: true,
-      route,
-      message: `Route "${route.name}" created with ${route.totalStreets} streets`,
+      project,
+      message: `Project "${project.name}" created with ${project.totalStreets} streets`,
     });
   } catch (error) {
     if (error instanceof OverpassError) {
@@ -389,12 +404,12 @@ router.post("/", async (req: Request, res: Response) => {
       res.status(400).json({
         success: false,
         error: error.message,
-        code: ERROR_CODES.ROUTE_NO_STREETS,
+        code: ERROR_CODES.PROJECT_NO_STREETS,
       });
       return;
     }
 
-    console.error("[Routes] Create error:", error);
+    console.error("[Projects] Create error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -432,7 +447,7 @@ router.post("/", async (req: Request, res: Response) => {
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/RouteDetailResponse'
+ *               $ref: '#/components/schemas/ProjectDetailResponse'
  *       401:
  *         description: Not authenticated
  *         content:
@@ -454,36 +469,125 @@ router.post("/", async (req: Request, res: Response) => {
  */
 router.get("/:id", async (req: Request, res: Response) => {
   const userId = req.user!.id;
-  const routeId = req.params.id;
+  const projectId = req.params.id;
 
   try {
-    const { route, warning } = await getRouteById(routeId, userId);
+    const { project, warning } = await getProjectById(projectId, userId);
 
     res.status(200).json({
       success: true,
-      route,
+      project,
       ...(warning && { warning }),
     });
   } catch (error) {
-    if (error instanceof RouteNotFoundError) {
+    if (error instanceof ProjectNotFoundError) {
       res.status(404).json({
         success: false,
-        error: "Route not found",
-        code: ERROR_CODES.ROUTE_NOT_FOUND,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
       });
       return;
     }
 
-    if (error instanceof RouteAccessDeniedError) {
+    if (error instanceof ProjectAccessDeniedError) {
       res.status(403).json({
         success: false,
-        error: "Access denied to this route",
-        code: ERROR_CODES.ROUTE_ACCESS_DENIED,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
       });
       return;
     }
 
-    console.error("[Routes] Get detail error:", error);
+    console.error("[Projects] Get detail error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Get Project Map Data
+// ============================================
+
+/**
+ * @openapi
+ * /projects/{id}/map:
+ *   get:
+ *     summary: Get project map data
+ *     description: |
+ *       Returns streets for the project with geometry and completion status for map rendering.
+ *       Streets have status completed (green), partial (yellow), or not_started (grey).
+ *       Geometry is GeoJSON LineString. Use boundary to center and fit the map.
+ *     tags: [Projects]
+ *     security:
+ *       - DevAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Project ID
+ *     responses:
+ *       200:
+ *         description: Project map data with streets and geometry
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ProjectMapResponse'
+ *       401:
+ *         description: Not authenticated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       403:
+ *         description: Access denied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       404:
+ *         description: Project not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
+router.get("/:id/map", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    const mapData = await getProjectMapData(projectId, userId);
+
+    res.status(200).json({
+      success: true,
+      map: mapData,
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    console.error("[Projects] Map data error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -549,35 +653,35 @@ router.get("/:id", async (req: Request, res: Response) => {
  */
 router.delete("/:id", async (req: Request, res: Response) => {
   const userId = req.user!.id;
-  const routeId = req.params.id;
+  const projectId = req.params.id;
 
   try {
-    await archiveRoute(routeId, userId);
+    await archiveProject(projectId, userId);
 
     res.status(200).json({
       success: true,
-      message: "Route archived successfully",
+      message: "Project archived successfully",
     });
   } catch (error) {
-    if (error instanceof RouteNotFoundError) {
+    if (error instanceof ProjectNotFoundError) {
       res.status(404).json({
         success: false,
-        error: "Route not found",
-        code: ERROR_CODES.ROUTE_NOT_FOUND,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
       });
       return;
     }
 
-    if (error instanceof RouteAccessDeniedError) {
+    if (error instanceof ProjectAccessDeniedError) {
       res.status(403).json({
         success: false,
-        error: "Access denied to this route",
-        code: ERROR_CODES.ROUTE_ACCESS_DENIED,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
       });
       return;
     }
 
-    console.error("[Routes] Archive error:", error);
+    console.error("[Projects] Archive error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -599,7 +703,7 @@ router.delete("/:id", async (req: Request, res: Response) => {
  *       Re-query OpenStreetMap for current streets and merge with existing progress.
  *       Use this when streets have been added or removed in the area, or when the
  *       route warning indicates stale data.
- *       
+ *
  *       **Progress is preserved:** Existing street progress is maintained. New streets
  *       start at 0%, and removed streets are marked but not deleted immediately.
  *     tags: [Routes]
@@ -625,7 +729,7 @@ router.delete("/:id", async (req: Request, res: Response) => {
  *                   type: boolean
  *                   enum: [true]
  *                 route:
- *                   $ref: '#/components/schemas/RouteDetail'
+ *                   $ref: '#/components/schemas/ProjectDetail'
  *                 changes:
  *                   type: object
  *                   properties:
@@ -662,14 +766,17 @@ router.delete("/:id", async (req: Request, res: Response) => {
  */
 router.post("/:id/refresh", async (req: Request, res: Response) => {
   const userId = req.user!.id;
-  const routeId = req.params.id;
+  const projectId = req.params.id;
 
   try {
-    const { route, changes } = await refreshRouteSnapshot(routeId, userId);
+    const { project, changes } = await refreshProjectSnapshot(
+      projectId,
+      userId
+    );
 
     res.status(200).json({
       success: true,
-      route,
+      project,
       changes: {
         added: changes.added.length,
         removed: changes.removed.length,
@@ -677,20 +784,20 @@ router.post("/:id/refresh", async (req: Request, res: Response) => {
       message: `Refresh complete: ${changes.added.length} streets added, ${changes.removed.length} removed`,
     });
   } catch (error) {
-    if (error instanceof RouteNotFoundError) {
+    if (error instanceof ProjectNotFoundError) {
       res.status(404).json({
         success: false,
-        error: "Route not found",
-        code: ERROR_CODES.ROUTE_NOT_FOUND,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
       });
       return;
     }
 
-    if (error instanceof RouteAccessDeniedError) {
+    if (error instanceof ProjectAccessDeniedError) {
       res.status(403).json({
         success: false,
-        error: "Access denied to this route",
-        code: ERROR_CODES.ROUTE_ACCESS_DENIED,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
       });
       return;
     }
@@ -704,7 +811,7 @@ router.post("/:id/refresh", async (req: Request, res: Response) => {
       return;
     }
 
-    console.error("[Routes] Refresh error:", error);
+    console.error("[Projects] Refresh error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -782,10 +889,10 @@ router.post("/:id/refresh", async (req: Request, res: Response) => {
  */
 router.get("/:id/activities", async (req: Request, res: Response) => {
   const userId = req.user!.id;
-  const routeId = req.params.id;
+  const projectId = req.params.id;
 
   try {
-    const activities = await listActivitiesForRoute(routeId, userId);
+    const activities = await listActivitiesForProject(projectId, userId);
 
     res.status(200).json({
       success: true,
@@ -796,13 +903,13 @@ router.get("/:id/activities", async (req: Request, res: Response) => {
     if (error instanceof Error && error.message.includes("not found")) {
       res.status(404).json({
         success: false,
-        error: "Route not found",
-        code: ERROR_CODES.ROUTE_NOT_FOUND,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
       });
       return;
     }
 
-    console.error("[Routes] Get activities error:", error);
+    console.error("[Projects] Get activities error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

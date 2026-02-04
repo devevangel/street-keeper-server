@@ -65,11 +65,11 @@ export const ERROR_CODES = {
   STREET_MATCHING_FAILED: "STREET_MATCHING_FAILED",
   MAPBOX_API_ERROR: "MAPBOX_API_ERROR",
 
-  // Route errors
-  ROUTE_NOT_FOUND: "ROUTE_NOT_FOUND",
-  ROUTE_INVALID_RADIUS: "ROUTE_INVALID_RADIUS",
-  ROUTE_NO_STREETS: "ROUTE_NO_STREETS",
-  ROUTE_ACCESS_DENIED: "ROUTE_ACCESS_DENIED",
+  // Project errors
+  PROJECT_NOT_FOUND: "PROJECT_NOT_FOUND",
+  PROJECT_INVALID_RADIUS: "PROJECT_INVALID_RADIUS",
+  PROJECT_NO_STREETS: "PROJECT_NO_STREETS",
+  PROJECT_ACCESS_DENIED: "PROJECT_ACCESS_DENIED",
 
   // Activity errors
   ACTIVITY_NOT_FOUND: "ACTIVITY_NOT_FOUND",
@@ -244,20 +244,20 @@ export const MAPBOX = {
 } as const;
 
 // ============================================
-// Routes Configuration
+// Projects Configuration
 // ============================================
 
 /**
- * Route creation and management constants
+ * Project creation and management constants
  *
- * Routes define geographic areas (circles) where users track street completion.
- * Users select a center point and radius to create a route, then the system
+ * Projects define geographic areas (circles) where users track street completion.
+ * Users select a center point and radius to create a project, then the system
  * tracks which streets they've run.
  */
-export const ROUTES = {
+export const PROJECTS = {
   /**
    * Allowed radius values in meters
-   * Limited set prevents excessively large or small routes
+   * Limited set prevents excessively large or small projects
    * - 500m: Small neighborhood
    * - 1000m: Large neighborhood
    * - 2000m: Small town area (default)
@@ -267,22 +267,22 @@ export const ROUTES = {
   ALLOWED_RADII: [500, 1000, 2000, 5000, 10000] as const,
 
   /**
-   * Days before route snapshot is considered stale
-   * When user views route, if snapshot is older than this, refresh from OSM
+   * Days before project snapshot is considered stale
+   * When user views project, if snapshot is older than this, refresh from OSM
    * 30 days balances freshness with API usage
    */
   SNAPSHOT_REFRESH_DAYS: 30,
 
   /**
    * Street count threshold for warning
-   * If route contains more streets than this, show warning to user
-   * Large routes may be overwhelming to complete
+   * If project contains more streets than this, show warning to user
+   * Large projects may be overwhelming to complete
    */
   MAX_STREETS_WARNING: 500,
 
   /**
    * Highway types that are typically not runnable
-   * Used to generate warnings during route preview
+   * Used to generate warnings during project preview
    */
   NON_RUNNABLE_HIGHWAYS: ["motorway", "trunk", "motorway_link", "trunk_link"],
 } as const;

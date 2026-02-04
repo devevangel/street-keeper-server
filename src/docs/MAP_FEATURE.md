@@ -22,7 +22,7 @@ The map feature lets users see all streets they have run on in a given area on a
 - **Status** – **Completed** (green) or **Partial** (yellow)
 - **Stats** – Run count, completion count, first/last run dates, current percentage (for the info icon popup)
 
-Data is stored in **UserStreetProgress**: one row per user per street (osmId). This table is updated whenever an activity is processed, so the map can query it directly without aggregating across routes.
+Data is stored in **UserStreetProgress**: one row per user per street (osmId). This table is updated whenever an activity is processed, so the map can query it directly without aggregating across projects.
 
 ---
 
@@ -129,20 +129,20 @@ Constants live in `config/constants.ts`: `STREET_AGGREGATION.*` and `STREET_MATC
 
 When an activity is processed (see [ARCHITECTURE.md](ARCHITECTURE.md) – Activity Processing Pipeline):
 
-1. Overlap detection finds routes that the activity touches.
-2. For each route, street matching and coverage calculation produce a list of streets with updated percentages.
-3. **Route progress** is updated (Route.streetsSnapshot) as before.
+1. Overlap detection finds projects that the activity touches.
+2. For each project, street matching and coverage calculation produce a list of streets with updated percentages.
+3. **Project progress** is updated (Project.streetsSnapshot) as before.
 4. **User street progress** is updated: for each covered street, `upsertStreetProgress(userId, streetData[])` is called. This:
    - Creates a UserStreetProgress row if none exists.
    - Updates percentage (MAX rule), everCompleted, runCount, completionCount, lastRunDate; sets firstRunDate if null.
 
-So every processed activity keeps UserStreetProgress in sync. The map reads only from UserStreetProgress (and geometry cache/Overpass), not from route snapshots.
+So every processed activity keeps UserStreetProgress in sync. The map reads only from UserStreetProgress (and geometry cache/Overpass), not from project snapshots.
 
 ---
 
 ## Backfill
 
-Existing users may have route snapshots with progress but no UserStreetProgress rows. A one-time backfill script populates UserStreetProgress from route snapshots:
+Existing users may have project snapshots with progress but no UserStreetProgress rows. A one-time backfill script populates UserStreetProgress from project snapshots:
 
 **Script:** `backend/src/scripts/backfill-user-street-progress.ts`
 
@@ -154,8 +154,8 @@ npm run backfill:street-progress
 
 The script:
 
-1. For each user, loads all their routes and `streetsSnapshot`.
-2. For each street with percentage > 0, aggregates by osmId (MAX percentage, everCompleted if any route has it).
+1. For each user, loads all their projects and `streetsSnapshot`.
+2. For each street with percentage > 0, aggregates by osmId (MAX percentage, everCompleted if any project has it).
 3. Upserts into UserStreetProgress. New rows get runCount/completionCount 0; they accumulate on future activity processing.
 
 After backfill, the map shows all historically run streets; new runs continue to update UserStreetProgress via the activity processor.

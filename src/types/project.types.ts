@@ -1,6 +1,6 @@
 /**
- * Route Types
- * Types for route creation, management, and street snapshots
+ * Project Types
+ * Types for project creation, management, and street snapshots
  */
 
 // ============================================
@@ -8,7 +8,7 @@
 // ============================================
 
 /**
- * Individual street in a route snapshot
+ * Individual street in a project snapshot
  * Stores progress state for each street
  */
 export interface SnapshotStreet {
@@ -16,43 +16,43 @@ export interface SnapshotStreet {
   name: string;
   lengthMeters: number;
   highwayType: string;
-  
+
   // Progress tracking
   completed: boolean;
-  percentage: number;        // 0-100
+  percentage: number; // 0-100
   lastRunDate: string | null; // ISO date string
-  
+
   // Flags
-  isNew?: boolean;           // Added during refresh
+  isNew?: boolean; // Added during refresh
 }
 
 /**
- * Full street snapshot stored in Route.streetsSnapshot JSON field
+ * Full street snapshot stored in Project.streetsSnapshot JSON field
  */
 export interface StreetSnapshot {
   streets: SnapshotStreet[];
-  snapshotDate: string;      // ISO date string
+  snapshotDate: string; // ISO date string
 }
 
 // ============================================
-// Route Input/Output Types
+// Project Input/Output Types
 // ============================================
 
 /**
- * Input for creating a new route
+ * Input for creating a new project
  */
-export interface CreateRouteInput {
+export interface CreateProjectInput {
   name: string;
   centerLat: number;
   centerLng: number;
-  radiusMeters: number;      // Must be in ROUTES.ALLOWED_RADII
-  deadline?: string;         // ISO date string (optional)
+  radiusMeters: number; // Must be in PROJECTS.ALLOWED_RADII
+  deadline?: string; // ISO date string (optional)
 }
 
 /**
- * Route summary for list view (minimal data)
+ * Project summary for list view (minimal data)
  */
-export interface RouteListItem {
+export interface ProjectListItem {
   id: string;
   name: string;
   centerLat: number;
@@ -69,28 +69,28 @@ export interface RouteListItem {
 }
 
 /**
- * Full route detail with street data
+ * Full project detail with street data
  */
-export interface RouteDetail extends RouteListItem {
+export interface ProjectDetail extends ProjectListItem {
   streets: SnapshotStreet[];
   snapshotDate: string;
-  
+
   // Computed stats
-  inProgressCount: number;   // Streets with 1-89% coverage
-  notStartedCount: number;   // Streets with 0% coverage
-  
+  inProgressCount: number; // Streets with 1-89% coverage
+  notStartedCount: number; // Streets with 0% coverage
+
   // Refresh info
   refreshNeeded: boolean;
   daysSinceRefresh: number;
-  
+
   // Warnings
   newStreetsDetected?: number;
 }
 
 /**
- * Route data for map view (includes geometries)
+ * Project data for map view (includes geometries)
  */
-export interface RouteMapStreet {
+export interface ProjectMapStreet {
   osmId: string;
   name: string;
   highwayType: string;
@@ -103,16 +103,35 @@ export interface RouteMapStreet {
   };
 }
 
-export interface RouteMapData {
+/** Boundary for project map (circle) */
+export interface ProjectMapBoundary {
+  type: "circle";
+  center: { lat: number; lng: number };
+  radiusMeters: number;
+}
+
+/** Stats for project map view */
+export interface ProjectMapStats {
+  totalStreets: number;
+  completedStreets: number;
+  partialStreets: number;
+  notRunStreets: number;
+  completionPercentage: number;
+}
+
+export interface ProjectMapData {
   id: string;
   name: string;
   centerLat: number;
   centerLng: number;
   radiusMeters: number;
   progress: number;
-  streets: RouteMapStreet[];
-  
-  // Cache info
+  /** Circle boundary for map centering/fitting */
+  boundary: ProjectMapBoundary;
+  /** Street counts by status */
+  stats: ProjectMapStats;
+  streets: ProjectMapStreet[];
+  /** Whether geometry came from cache (vs fresh Overpass query) */
   geometryCacheHit: boolean;
 }
 
@@ -121,46 +140,46 @@ export interface RouteMapData {
 // ============================================
 
 /**
- * Response for route list endpoint
+ * Response for project list endpoint
  */
-export interface RouteListResponse {
+export interface ProjectListResponse {
   success: true;
-  routes: RouteListItem[];
+  projects: ProjectListItem[];
   total: number;
 }
 
 /**
- * Response for route detail endpoint
+ * Response for project detail endpoint
  */
-export interface RouteDetailResponse {
+export interface ProjectDetailResponse {
   success: true;
-  route: RouteDetail;
-  warning?: string;          // e.g., "Could not refresh streets"
+  project: ProjectDetail;
+  warning?: string; // e.g., "Could not refresh streets"
 }
 
 /**
- * Response for route creation
+ * Response for project creation
  */
-export interface CreateRouteResponse {
+export interface CreateProjectResponse {
   success: true;
-  route: RouteListItem;
+  project: ProjectListItem;
   message: string;
 }
 
 /**
- * Response for route map endpoint
+ * Response for project map endpoint
  */
-export interface RouteMapResponse {
+export interface ProjectMapResponse {
   success: true;
-  map: RouteMapData;
+  map: ProjectMapData;
 }
 
 /**
- * Response for route refresh
+ * Response for project refresh
  */
-export interface RouteRefreshResponse {
+export interface ProjectRefreshResponse {
   success: true;
-  route: RouteDetail;
+  project: ProjectDetail;
   changes: {
     added: number;
     removed: number;
@@ -168,20 +187,20 @@ export interface RouteRefreshResponse {
 }
 
 // ============================================
-// Route Preview Types
+// Project Preview Types
 // ============================================
 
 /**
- * Route preview response (before creating route)
- * 
+ * Project preview response (before creating project)
+ *
  * Allows users to see street count and total length before committing
- * to creating a route. Uses smart caching to avoid redundant API calls:
+ * to creating a project. Uses smart caching to avoid redundant API calls:
  * - Radius decrease: Filters from cached larger radius (FREE)
  * - Radius increase: New Overpass query, then cached
  * - Same radius: Cache hit (FREE)
- * 
+ *
  * @example
- * // GET /api/v1/routes/preview?lat=50.788&lng=-1.089&radius=2000
+ * // GET /api/v1/projects/preview?lat=50.788&lng=-1.089&radius=2000
  * {
  *   "success": true,
  *   "preview": {
@@ -197,41 +216,41 @@ export interface RouteRefreshResponse {
  *   }
  * }
  */
-export interface RoutePreview {
+export interface ProjectPreview {
   /** Center latitude of the preview area */
   centerLat: number;
-  
+
   /** Center longitude of the preview area */
   centerLng: number;
-  
+
   /** Requested radius in meters */
   radiusMeters: number;
-  
-  /** 
+
+  /**
    * Actual radius in cache (may be larger than requested)
    * If larger, results were filtered to requested radius
    */
   cachedRadiusMeters: number;
-  
-  /** 
+
+  /**
    * Cache key to pass to create endpoint
-   * Allows route creation to skip Overpass query
+   * Allows project creation to skip Overpass query
    */
   cacheKey: string;
-  
+
   /** Total number of streets in the area */
   totalStreets: number;
-  
+
   /** Combined length of all streets in meters */
   totalLengthMeters: number;
-  
-  /** 
+
+  /**
    * Street count grouped by highway type
    * @example { "residential": 78, "footway": 23, "primary": 12 }
    */
   streetsByType: Record<string, number>;
-  
-  /** 
+
+  /**
    * Warning messages for the user
    * @example ["Large area: 500+ streets. Consider reducing radius."]
    */
@@ -239,11 +258,11 @@ export interface RoutePreview {
 }
 
 /**
- * API response wrapper for route preview endpoint
+ * API response wrapper for project preview endpoint
  */
-export interface RoutePreviewResponse {
+export interface ProjectPreviewResponse {
   success: true;
-  preview: RoutePreview;
+  preview: ProjectPreview;
 }
 
 // ============================================
@@ -251,10 +270,10 @@ export interface RoutePreviewResponse {
 // ============================================
 
 /**
- * Data needed to update route progress after activity processing
+ * Data needed to update project progress after activity processing
  */
-export interface RouteProgressUpdate {
-  routeId: string;
+export interface ProjectProgressUpdate {
+  projectId: string;
   updatedStreets: Array<{
     osmId: string;
     newPercentage: number;
@@ -266,7 +285,7 @@ export interface RouteProgressUpdate {
  * Result of comparing old and new snapshots during refresh
  */
 export interface SnapshotDiff {
-  added: string[];           // OSM IDs of new streets
-  removed: string[];         // OSM IDs of removed streets
-  unchanged: string[];       // OSM IDs of unchanged streets
+  added: string[]; // OSM IDs of new streets
+  removed: string[]; // OSM IDs of removed streets
+  unchanged: string[]; // OSM IDs of unchanged streets
 }

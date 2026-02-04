@@ -28,7 +28,7 @@ Street Keeper helps runners track which streets they've run in their local area.
 Most endpoints require authentication. In development, use the \`x-user-id\` header with a valid user UUID.
 
 \`\`\`bash
-curl -H "x-user-id: your-user-id" http://localhost:8000/api/v1/routes
+curl -H "x-user-id: your-user-id" http://localhost:8000/api/v1/projects
 \`\`\`
 
 In production, authentication is handled via Strava OAuth.
@@ -53,7 +53,7 @@ In production, authentication is handled via Strava OAuth.
     ],
     tags: [
       { name: "Auth", description: "Authentication endpoints (Strava OAuth)" },
-      { name: "Routes", description: "Route CRUD and street tracking" },
+      { name: "Projects", description: "Project CRUD and street tracking" },
       { name: "Activities", description: "Activity listing and management" },
       { name: "GPX", description: "GPX file upload and analysis" },
       { name: "Webhooks", description: "Strava webhook handlers" },
@@ -92,8 +92,8 @@ In production, authentication is handled via Strava OAuth.
           },
           example: {
             success: false,
-            error: "Route not found",
-            code: "ROUTE_NOT_FOUND",
+            error: "Project not found",
+            code: "PROJECT_NOT_FOUND",
           },
         },
 
@@ -141,7 +141,7 @@ In production, authentication is handled via Strava OAuth.
         },
 
         // ============================================
-        // Route Schemas
+        // Project Schemas
         // ============================================
 
         SnapshotStreet: {
@@ -199,7 +199,7 @@ In production, authentication is handled via Strava OAuth.
           },
         },
 
-        RouteListItem: {
+        ProjectListItem: {
           type: "object",
           required: [
             "id",
@@ -236,9 +236,9 @@ In production, authentication is handled via Strava OAuth.
           },
         },
 
-        RouteDetail: {
+        ProjectDetail: {
           allOf: [
-            { $ref: "#/components/schemas/RouteListItem" },
+            { $ref: "#/components/schemas/ProjectListItem" },
             {
               type: "object",
               required: ["streets", "snapshotDate"],
@@ -263,7 +263,7 @@ In production, authentication is handled via Strava OAuth.
           ],
         },
 
-        RoutePreview: {
+        ProjectPreview: {
           type: "object",
           required: [
             "centerLat",
@@ -299,7 +299,7 @@ In production, authentication is handled via Strava OAuth.
           },
         },
 
-        CreateRouteRequest: {
+        CreateProjectRequest: {
           type: "object",
           required: ["name", "centerLat", "centerLng", "radiusMeters"],
           properties: {
@@ -324,25 +324,25 @@ In production, authentication is handled via Strava OAuth.
           },
         },
 
-        RouteListResponse: {
+        ProjectListResponse: {
           type: "object",
-          required: ["success", "routes", "total"],
+          required: ["success", "projects", "total"],
           properties: {
             success: { type: "boolean", enum: [true] },
-            routes: {
+            projects: {
               type: "array",
-              items: { $ref: "#/components/schemas/RouteListItem" },
+              items: { $ref: "#/components/schemas/ProjectListItem" },
             },
             total: { type: "integer" },
           },
         },
 
-        RouteDetailResponse: {
+        ProjectDetailResponse: {
           type: "object",
-          required: ["success", "route"],
+          required: ["success", "project"],
           properties: {
             success: { type: "boolean", enum: [true] },
-            route: { $ref: "#/components/schemas/RouteDetail" },
+            project: { $ref: "#/components/schemas/ProjectDetail" },
             warning: {
               type: "string",
               description: "Optional warning message",
@@ -350,12 +350,129 @@ In production, authentication is handled via Strava OAuth.
           },
         },
 
-        RoutePreviewResponse: {
+        ProjectPreviewResponse: {
           type: "object",
           required: ["success", "preview"],
           properties: {
             success: { type: "boolean", enum: [true] },
-            preview: { $ref: "#/components/schemas/RoutePreview" },
+            preview: { $ref: "#/components/schemas/ProjectPreview" },
+          },
+        },
+
+        ProjectMapBoundary: {
+          type: "object",
+          required: ["type", "center", "radiusMeters"],
+          properties: {
+            type: { type: "string", enum: ["circle"] },
+            center: {
+              type: "object",
+              required: ["lat", "lng"],
+              properties: {
+                lat: { type: "number" },
+                lng: { type: "number" },
+              },
+            },
+            radiusMeters: { type: "integer" },
+          },
+        },
+
+        ProjectMapStats: {
+          type: "object",
+          required: [
+            "totalStreets",
+            "completedStreets",
+            "partialStreets",
+            "notRunStreets",
+            "completionPercentage",
+          ],
+          properties: {
+            totalStreets: { type: "integer" },
+            completedStreets: { type: "integer" },
+            partialStreets: { type: "integer" },
+            notRunStreets: { type: "integer" },
+            completionPercentage: { type: "number" },
+          },
+        },
+
+        ProjectMapStreet: {
+          type: "object",
+          required: [
+            "osmId",
+            "name",
+            "highwayType",
+            "lengthMeters",
+            "percentage",
+            "status",
+            "geometry",
+          ],
+          properties: {
+            osmId: { type: "string" },
+            name: { type: "string" },
+            highwayType: { type: "string" },
+            lengthMeters: { type: "number" },
+            percentage: { type: "number", minimum: 0, maximum: 100 },
+            status: {
+              type: "string",
+              enum: ["completed", "partial", "not_started"],
+              description:
+                "completed = green, partial = yellow, not_started = grey",
+            },
+            geometry: {
+              type: "object",
+              required: ["type", "coordinates"],
+              properties: {
+                type: { type: "string", enum: ["LineString"] },
+                coordinates: {
+                  type: "array",
+                  items: {
+                    type: "array",
+                    items: { type: "number" },
+                    minItems: 2,
+                    maxItems: 2,
+                    description: "[lng, lat] per GeoJSON",
+                  },
+                },
+              },
+            },
+          },
+        },
+
+        ProjectMapData: {
+          type: "object",
+          required: [
+            "id",
+            "name",
+            "boundary",
+            "stats",
+            "streets",
+            "geometryCacheHit",
+          ],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            name: { type: "string" },
+            centerLat: { type: "number" },
+            centerLng: { type: "number" },
+            radiusMeters: { type: "integer" },
+            progress: { type: "number" },
+            boundary: { $ref: "#/components/schemas/ProjectMapBoundary" },
+            stats: { $ref: "#/components/schemas/ProjectMapStats" },
+            streets: {
+              type: "array",
+              items: { $ref: "#/components/schemas/ProjectMapStreet" },
+            },
+            geometryCacheHit: {
+              type: "boolean",
+              description: "True if geometry came from cache",
+            },
+          },
+        },
+
+        ProjectMapResponse: {
+          type: "object",
+          required: ["success", "map"],
+          properties: {
+            success: { type: "boolean", enum: [true] },
+            map: { $ref: "#/components/schemas/ProjectMapData" },
           },
         },
 
@@ -439,13 +556,13 @@ In production, authentication is handled via Strava OAuth.
                   format: "date-time",
                   nullable: true,
                 },
-                routeImpacts: {
+                projectImpacts: {
                   type: "array",
                   items: {
                     type: "object",
                     properties: {
-                      routeId: { type: "string", format: "uuid" },
-                      routeName: { type: "string" },
+                      projectId: { type: "string", format: "uuid" },
+                      projectName: { type: "string" },
                       streetsCompleted: { type: "integer" },
                       streetsImproved: { type: "integer" },
                       impactDetails: {

@@ -1,8 +1,8 @@
 /**
  * Backfill UserStreetProgress from existing route snapshots
  *
- * One-time script: populates UserStreetProgress from Route.streetsSnapshot
- * for all users and routes. Uses MAX rule for percentage per user+osmId.
+ * One-time script: populates UserStreetProgress from Project.streetsSnapshot
+ * for all users and projects. Uses MAX rule for percentage per user+osmId.
  * Run counts and completion counts are left at 0 (they accumulate on
  * future activity processing).
  *
@@ -15,7 +15,7 @@
 import "dotenv/config";
 
 import prisma from "../lib/prisma.js";
-import type { StreetSnapshot, SnapshotStreet } from "../types/route.types.js";
+import type { StreetSnapshot, SnapshotStreet } from "../types/project.types.js";
 
 // ============================================
 // Types
@@ -37,7 +37,7 @@ interface AggregatedStreet {
 
 async function main(): Promise<void> {
   console.log(
-    "[Backfill] Starting UserStreetProgress backfill from route snapshots..."
+    "[Backfill] Starting UserStreetProgress backfill from project snapshots..."
   );
 
   const users = await prisma.user.findMany({
@@ -49,15 +49,15 @@ async function main(): Promise<void> {
   let totalUpserted = 0;
 
   for (const user of users) {
-    const routes = await prisma.route.findMany({
+    const projects = await prisma.project.findMany({
       where: { userId: user.id },
       select: { id: true, name: true, streetsSnapshot: true },
     });
 
     const byOsmId = new Map<string, AggregatedStreet>();
 
-    for (const route of routes) {
-      const snapshot = route.streetsSnapshot as StreetSnapshot | null;
+    for (const project of projects) {
+      const snapshot = project.streetsSnapshot as StreetSnapshot | null;
       if (!snapshot?.streets?.length) continue;
 
       for (const street of snapshot.streets as SnapshotStreet[]) {

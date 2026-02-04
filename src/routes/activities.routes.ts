@@ -422,7 +422,7 @@ router.delete("/:id", async (req: Request, res: Response) => {
     res.status(200).json({
       success: true,
       message: "Activity deleted successfully",
-      routesAffected: result.routesAffected,
+      projectsRecalculated: result.projectsAffected,
     });
   } catch (error) {
     if (error instanceof ActivityNotFoundError) {

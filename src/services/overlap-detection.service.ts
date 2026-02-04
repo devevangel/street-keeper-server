@@ -1,7 +1,7 @@
 /**
  * Overlap Detection Service
  * Detects which routes an activity overlaps with using optimized algorithms
- * 
+ *
  * PROBLEM:
  * --------
  * When a user completes a run, we need to determine which of their routes
@@ -9,36 +9,36 @@
  * route's radius - this is O(n × m) where n = routes, m = GPS points.
  * For a user with 50 routes and a 5km run (~3000 GPS points), this could
  * mean 150,000 distance calculations.
- * 
+ *
  * SOLUTION: Two-Phase Detection
  * -----------------------------
- * 
+ *
  * Phase 1: Bounding Box Check (Fast Filter)
  *   - Calculate activity bounding box (min/max lat/lng of all GPS points)
  *   - Expand route circle to axis-aligned bounding box
  *   - If boxes don't intersect → route can't overlap (skip it)
  *   - Time complexity: O(n) where n = routes
  *   - Typically filters out 80-95% of routes
- * 
+ *
  * Phase 2: Point-in-Circle Check (Precise)
  *   - For routes that passed Phase 1
  *   - Check if ANY GPS point falls within route's radius
  *   - Uses Haversine distance (accurate on Earth's curved surface)
  *   - Early exit: stop checking once ONE point is found inside
- * 
+ *
  * PERFORMANCE:
  * ------------
  * - Without bbox: O(n × m) = 150,000 operations for 50 routes, 3000 points
  * - With bbox: O(n) + O(k × m) where k = overlapping routes (typically 1-3)
  * - Typical speedup: 10-100x depending on route distribution
- * 
+ *
  * @example
  * // Find all routes that overlap with an activity
  * const overlappingRoutes = await detectOverlappingRoutes(
  *   "user-123",
  *   activityCoordinates
  * );
- * 
+ *
  * for (const route of overlappingRoutes) {
  *   console.log(`Activity overlaps with route: ${route.name}`);
  * }
@@ -53,7 +53,7 @@ import type { GpxPoint } from "../types/run.types.js";
 
 /**
  * Axis-aligned bounding box
- * 
+ *
  * Represents a rectangular region defined by min/max coordinates.
  * Used for fast overlap checks before expensive distance calculations.
  */
@@ -69,32 +69,32 @@ export interface BoundingBox {
 }
 
 /**
- * Route data needed for overlap detection
- * 
- * Minimal route info fetched from database for efficiency.
+ * Project data needed for overlap detection
+ *
+ * Minimal project info fetched from database for efficiency.
  */
-export interface RouteForOverlap {
-  /** Route ID (UUID) */
+export interface ProjectForOverlap {
+  /** Project ID (UUID) */
   id: string;
-  /** Route name (for logging) */
+  /** Project name (for logging) */
   name: string;
-  /** Center latitude of route circle */
+  /** Center latitude of project circle */
   centerLat: number;
-  /** Center longitude of route circle */
+  /** Center longitude of project circle */
   centerLng: number;
   /** Radius in meters */
   radiusMeters: number;
 }
 
 /**
- * Result of overlap detection for a single route
+ * Result of overlap detection for a single project
  */
 export interface OverlapResult {
-  /** The overlapping route */
-  route: RouteForOverlap;
-  /** Sample of GPS points that fell within the route (for debugging) */
+  /** The overlapping project */
+  project: ProjectForOverlap;
+  /** Sample of GPS points that fell within the project (for debugging) */
   samplePointsInside: GpxPoint[];
-  /** Total number of GPS points inside the route */
+  /** Total number of GPS points inside the project */
   pointsInsideCount: number;
 }
 
@@ -103,48 +103,49 @@ export interface OverlapResult {
 // ============================================
 
 /**
- * Detect which routes an activity overlaps with
- * 
+ * Detect which projects an activity overlaps with
+ *
  * Uses two-phase algorithm for efficiency:
- * 1. Fast bounding box filter (eliminates most non-overlapping routes)
+ * 1. Fast bounding box filter (eliminates most non-overlapping projects)
  * 2. Precise point-in-circle check (for remaining candidates)
- * 
- * @param userId - User whose routes to check
+ *
+ * @param userId - User whose projects to check
  * @param coordinates - GPS coordinates from the activity
  * @param options - Detection options
- * @returns Array of routes that overlap with the activity
- * 
+ * @returns Array of projects that overlap with the activity
+ *
  * @example
- * const overlapping = await detectOverlappingRoutes("user-123", gpsPoints);
- * console.log(`Activity overlaps with ${overlapping.length} routes`);
+ * const overlapping = await detectOverlappingProjects("user-123", gpsPoints);
+ * console.log(`Activity overlaps with ${overlapping.length} projects`);
  */
-export async function detectOverlappingRoutes(
+export async function detectOverlappingProjects(
   userId: string,
   coordinates: GpxPoint[],
   options: {
-    /** Include archived routes? Default: false */
+    /** Include archived projects? Default: false */
     includeArchived?: boolean;
-    /** Max sample points to return per route. Default: 5 */
+    /** Max sample points to return per project. Default: 5 */
     maxSamplePoints?: number;
   } = {}
 ): Promise<OverlapResult[]> {
   const { includeArchived = false, maxSamplePoints = 5 } = options;
 
-  // Handle empty coordinates
   if (coordinates.length === 0) {
     console.log("[Overlap] No coordinates provided, returning empty result");
     return [];
   }
 
-  // Step 1: Calculate activity bounding box
   const activityBbox = calculateBoundingBox(coordinates);
   console.log(
-    `[Overlap] Activity bbox: lat[${activityBbox.minLat.toFixed(4)}, ${activityBbox.maxLat.toFixed(4)}], ` +
-    `lng[${activityBbox.minLng.toFixed(4)}, ${activityBbox.maxLng.toFixed(4)}]`
+    `[Overlap] Activity bbox: lat[${activityBbox.minLat.toFixed(
+      4
+    )}, ${activityBbox.maxLat.toFixed(4)}], ` +
+      `lng[${activityBbox.minLng.toFixed(4)}, ${activityBbox.maxLng.toFixed(
+        4
+      )}]`
   );
 
-  // Step 2: Fetch user's routes
-  const routes = await prisma.route.findMany({
+  const projects = await prisma.project.findMany({
     where: {
       userId,
       ...(includeArchived ? {} : { isArchived: false }),
@@ -158,31 +159,29 @@ export async function detectOverlappingRoutes(
     },
   });
 
-  console.log(`[Overlap] Checking ${routes.length} routes for overlap`);
+  console.log(`[Overlap] Checking ${projects.length} projects for overlap`);
 
-  if (routes.length === 0) {
+  if (projects.length === 0) {
     return [];
   }
 
-  // Step 3: Phase 1 - Bounding box filter
-  const candidateRoutes = routes.filter((route) => {
-    const routeBbox = routeToBoundingBox(route);
-    return bboxIntersects(activityBbox, routeBbox);
+  const candidateProjects = projects.filter((project) => {
+    const projectBbox = projectToBoundingBox(project);
+    return bboxIntersects(activityBbox, projectBbox);
   });
 
   console.log(
-    `[Overlap] Phase 1 (bbox): ${routes.length} routes → ${candidateRoutes.length} candidates`
+    `[Overlap] Phase 1 (bbox): ${projects.length} projects → ${candidateProjects.length} candidates`
   );
 
-  // Step 4: Phase 2 - Point-in-circle check
-  const overlappingRoutes: OverlapResult[] = [];
+  const overlappingProjects: OverlapResult[] = [];
 
-  for (const route of candidateRoutes) {
-    const result = checkRouteOverlap(route, coordinates, maxSamplePoints);
+  for (const project of candidateProjects) {
+    const result = checkProjectOverlap(project, coordinates, maxSamplePoints);
 
     if (result.overlaps) {
-      overlappingRoutes.push({
-        route,
+      overlappingProjects.push({
+        project,
         samplePointsInside: result.samplePoints,
         pointsInsideCount: result.pointsInsideCount,
       });
@@ -190,10 +189,10 @@ export async function detectOverlappingRoutes(
   }
 
   console.log(
-    `[Overlap] Phase 2 (precise): ${candidateRoutes.length} candidates → ${overlappingRoutes.length} overlapping`
+    `[Overlap] Phase 2 (precise): ${candidateProjects.length} candidates → ${overlappingProjects.length} overlapping`
   );
 
-  return overlappingRoutes;
+  return overlappingProjects;
 }
 
 // ============================================
@@ -202,13 +201,13 @@ export async function detectOverlappingRoutes(
 
 /**
  * Calculate bounding box for a set of GPS coordinates
- * 
+ *
  * Finds the minimum and maximum lat/lng values to create
  * an axis-aligned rectangle containing all points.
- * 
+ *
  * @param coordinates - Array of GPS points
  * @returns Bounding box containing all points
- * 
+ *
  * @example
  * const bbox = calculateBoundingBox([
  *   { lat: 50.78, lng: -1.09 },
@@ -227,7 +226,7 @@ export function calculateBoundingBox(coordinates: GpxPoint[]): BoundingBox {
   // Iterate through all points to find min/max
   for (let i = 1; i < coordinates.length; i++) {
     const point = coordinates[i];
-    
+
     if (point.lat < minLat) minLat = point.lat;
     if (point.lat > maxLat) maxLat = point.lat;
     if (point.lng < minLng) minLng = point.lng;
@@ -238,66 +237,46 @@ export function calculateBoundingBox(coordinates: GpxPoint[]): BoundingBox {
 }
 
 /**
- * Convert a circular route to a bounding box
- * 
- * Expands the route's center point by its radius in all directions
+ * Convert a circular project to a bounding box
+ *
+ * Expands the project's center point by its radius in all directions
  * to create an axis-aligned bounding box that fully contains the circle.
- * 
- * Note: This is an approximation because lat/lng to meters conversion
- * varies by latitude. We use conservative estimates to avoid false negatives.
- * 
- * @param route - Route with center and radius
- * @returns Bounding box containing the entire route circle
- * 
- * @example
- * const route = { centerLat: 50.788, centerLng: -1.089, radiusMeters: 2000 };
- * const bbox = routeToBoundingBox(route);
- * // bbox contains the entire 2km circle
+ *
+ * @param project - Project with center and radius
+ * @returns Bounding box containing the entire project circle
  */
-export function routeToBoundingBox(route: RouteForOverlap): BoundingBox {
-  // Convert radius from meters to degrees
-  // 
-  // MATH EXPLANATION:
-  // - 1 degree of latitude ≈ 111,000 meters (fairly constant)
-  // - 1 degree of longitude ≈ 111,000 * cos(latitude) meters (varies by latitude)
-  // 
-  // We use conservative estimates:
-  // - For latitude: 1° = 110,574m (at equator, slightly larger at poles)
-  // - For longitude: We use the route's latitude to calculate correctly
-  
+export function projectToBoundingBox(project: ProjectForOverlap): BoundingBox {
   const METERS_PER_DEGREE_LAT = 110574;
-  const latDelta = route.radiusMeters / METERS_PER_DEGREE_LAT;
-  
-  // Longitude degrees vary by latitude (smaller near poles)
-  // cos(lat) gives us the scaling factor
-  const metersPerDegreeLng = METERS_PER_DEGREE_LAT * Math.cos(toRadians(route.centerLat));
-  const lngDelta = route.radiusMeters / metersPerDegreeLng;
+  const latDelta = project.radiusMeters / METERS_PER_DEGREE_LAT;
+  const metersPerDegreeLng =
+    METERS_PER_DEGREE_LAT * Math.cos(toRadians(project.centerLat));
+  const lngDelta = project.radiusMeters / metersPerDegreeLng;
 
   return {
-    minLat: route.centerLat - latDelta,
-    maxLat: route.centerLat + latDelta,
-    minLng: route.centerLng - lngDelta,
-    maxLng: route.centerLng + lngDelta,
+    minLat: project.centerLat - latDelta,
+    maxLat: project.centerLat + latDelta,
+    minLng: project.centerLng - lngDelta,
+    maxLng: project.centerLng + lngDelta,
   };
 }
 
 /**
  * Check if two bounding boxes intersect
- * 
+ *
  * Two boxes intersect if they overlap on BOTH axes.
  * They DON'T intersect if separated on ANY axis.
- * 
+ *
  * VISUAL:
  * ```
  * Case 1: Intersecting       Case 2: Not intersecting (separated on X)
- * 
+ *
  *   +-------+                     +-------+
  *   |   +---|---+                 |       |      +-------+
  *   |   |   |   |                 |       |      |       |
  *   +---|---+   |                 +-------+      |       |
  *       +-------+                                +-------+
  * ```
- * 
+ *
  * @param a - First bounding box
  * @param b - Second bounding box
  * @returns True if boxes intersect (overlap)
@@ -324,18 +303,10 @@ export function bboxIntersects(a: BoundingBox, b: BoundingBox): boolean {
 // ============================================
 
 /**
- * Check if a route overlaps with coordinates (precise check)
- * 
- * Tests each GPS point to see if it falls within the route's radius.
- * Uses early exit optimization - stops as soon as overlap is confirmed.
- * 
- * @param route - Route to check
- * @param coordinates - GPS points from activity
- * @param maxSamplePoints - Max number of inside points to collect
- * @returns Overlap result with inside points
+ * Check if a project overlaps with coordinates (precise check)
  */
-function checkRouteOverlap(
-  route: RouteForOverlap,
+function checkProjectOverlap(
+  project: ProjectForOverlap,
   coordinates: GpxPoint[],
   maxSamplePoints: number
 ): { overlaps: boolean; samplePoints: GpxPoint[]; pointsInsideCount: number } {
@@ -344,16 +315,14 @@ function checkRouteOverlap(
 
   for (const point of coordinates) {
     const distance = haversineDistance(
-      route.centerLat,
-      route.centerLng,
+      project.centerLat,
+      project.centerLng,
       point.lat,
       point.lng
     );
 
-    if (distance <= route.radiusMeters) {
+    if (distance <= project.radiusMeters) {
       pointsInsideCount++;
-      
-      // Collect sample points (limited to maxSamplePoints)
       if (samplePoints.length < maxSamplePoints) {
         samplePoints.push(point);
       }
@@ -368,25 +337,19 @@ function checkRouteOverlap(
 }
 
 /**
- * Check if a single point is inside a route's radius
- * 
- * Useful for quick single-point checks.
- * 
- * @param point - GPS point to check
- * @param route - Route with center and radius
- * @returns True if point is inside the route's radius
+ * Check if a single point is inside a project's radius
  */
-export function isPointInRoute(
+export function isPointInProject(
   point: GpxPoint,
-  route: RouteForOverlap
+  project: ProjectForOverlap
 ): boolean {
   const distance = haversineDistance(
-    route.centerLat,
-    route.centerLng,
+    project.centerLat,
+    project.centerLng,
     point.lat,
     point.lng
   );
-  return distance <= route.radiusMeters;
+  return distance <= project.radiusMeters;
 }
 
 // ============================================
@@ -395,35 +358,35 @@ export function isPointInRoute(
 
 /**
  * Calculate distance between two points using Haversine formula
- * 
+ *
  * The Haversine formula calculates the great-circle distance between
  * two points on a sphere. This is the shortest distance over the
  * Earth's surface (as the crow flies).
- * 
+ *
  * FORMULA EXPLANATION:
  * -------------------
  * The formula accounts for Earth's curvature:
- * 
+ *
  * a = sin²(Δlat/2) + cos(lat1) × cos(lat2) × sin²(Δlng/2)
  * c = 2 × atan2(√a, √(1-a))
  * d = R × c
- * 
+ *
  * Where:
  * - Δlat, Δlng = differences in latitude/longitude
  * - R = Earth's radius (6,371,000 meters)
  * - d = distance in meters
- * 
+ *
  * ACCURACY:
  * - Very accurate for distances up to several hundred km
  * - Error < 0.3% for most use cases
  * - Slightly less accurate near poles
- * 
+ *
  * @param lat1 - Latitude of first point (degrees)
  * @param lng1 - Longitude of first point (degrees)
  * @param lat2 - Latitude of second point (degrees)
  * @param lng2 - Longitude of second point (degrees)
  * @returns Distance in meters
- * 
+ *
  * @example
  * // Distance between two points in Portsmouth
  * const distance = haversineDistance(50.788, -1.089, 50.792, -1.095);
@@ -459,7 +422,7 @@ export function haversineDistance(
 
 /**
  * Convert degrees to radians
- * 
+ *
  * @param degrees - Angle in degrees
  * @returns Angle in radians
  */
@@ -472,22 +435,17 @@ function toRadians(degrees: number): number {
 // ============================================
 
 /**
- * Get routes that potentially overlap with a bounding box
- * 
- * Uses database query to filter routes before loading into memory.
- * This is an optional optimization for users with many routes.
- * 
+ * Get projects that potentially overlap with a bounding box
+ *
  * @param userId - User ID
  * @param bbox - Bounding box to check against
- * @returns Routes that might overlap (needs Phase 2 verification)
+ * @returns Projects that might overlap (needs Phase 2 verification)
  */
-export async function getRoutesInBbox(
+export async function getProjectsInBbox(
   userId: string,
   bbox: BoundingBox
-): Promise<RouteForOverlap[]> {
-  // Fetch all routes and filter in-memory
-  // (Database spatial queries would require PostGIS extension)
-  const routes = await prisma.route.findMany({
+): Promise<ProjectForOverlap[]> {
+  const projects = await prisma.project.findMany({
     where: {
       userId,
       isArchived: false,
@@ -501,25 +459,25 @@ export async function getRoutesInBbox(
     },
   });
 
-  // Filter by bounding box intersection
-  return routes.filter((route) => {
-    const routeBbox = routeToBoundingBox(route);
-    return bboxIntersects(bbox, routeBbox);
+  return projects.filter((project) => {
+    const projectBbox = projectToBoundingBox(project);
+    return bboxIntersects(bbox, projectBbox);
   });
 }
 
 /**
  * Calculate approximate area of a bounding box in square meters
- * 
+ *
  * Useful for logging and debugging overlap detection.
- * 
+ *
  * @param bbox - Bounding box
  * @returns Approximate area in square meters
  */
 export function bboxArea(bbox: BoundingBox): number {
   const METERS_PER_DEGREE_LAT = 110574;
   const avgLat = (bbox.minLat + bbox.maxLat) / 2;
-  const metersPerDegreeLng = METERS_PER_DEGREE_LAT * Math.cos(toRadians(avgLat));
+  const metersPerDegreeLng =
+    METERS_PER_DEGREE_LAT * Math.cos(toRadians(avgLat));
 
   const heightMeters = (bbox.maxLat - bbox.minLat) * METERS_PER_DEGREE_LAT;
   const widthMeters = (bbox.maxLng - bbox.minLng) * metersPerDegreeLng;

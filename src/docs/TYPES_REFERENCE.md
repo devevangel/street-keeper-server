@@ -6,7 +6,7 @@ This document provides a complete reference of all TypeScript types used in the 
 
 1. [Common Types](#common-types)
 2. [Authentication Types](#authentication-types)
-3. [Route Types](#route-types)
+3. [Project Types](#project-types)
 4. [Activity Types](#activity-types)
 5. [GPX Analysis Types](#gpx-analysis-types)
 6. [Webhook Types](#webhook-types)
@@ -38,8 +38,8 @@ interface ApiErrorResponse {
 ```json
 {
   "success": false,
-  "error": "Route not found",
-  "code": "ROUTE_NOT_FOUND"
+  "error": "Project not found",
+  "code": "PROJECT_NOT_FOUND"
 }
 ```
 
@@ -99,11 +99,11 @@ interface AuthSuccessResponse {
 
 ---
 
-## Route Types
+## Project Types
 
 ### SnapshotStreet
 
-Individual street in a route snapshot with progress tracking.
+Individual street in a project snapshot with progress tracking.
 
 ```typescript
 interface SnapshotStreet {
@@ -147,16 +147,16 @@ interface SnapshotStreet {
 }
 ```
 
-### RouteListItem
+### ProjectListItem
 
-Route summary for list views (without full street data).
+Project summary for list views (without full street data).
 
 ```typescript
-interface RouteListItem {
-  /** Route UUID */
+interface ProjectListItem {
+  /** Project UUID */
   id: string;
 
-  /** User-defined route name */
+  /** User-defined project name */
   name: string;
 
   /** Center latitude */
@@ -171,7 +171,7 @@ interface RouteListItem {
   /** Overall progress percentage (0-100) */
   progress: number;
 
-  /** Total number of streets in route */
+  /** Total number of streets in project */
   totalStreets: number;
 
   /** Number of completed streets (>= 90%) */
@@ -183,7 +183,7 @@ interface RouteListItem {
   /** Optional deadline date */
   deadline: string | null;
 
-  /** Whether route is archived */
+  /** Whether project is archived */
   isArchived: boolean;
 
   /** Creation timestamp */
@@ -194,12 +194,12 @@ interface RouteListItem {
 }
 ```
 
-### RouteDetail
+### ProjectDetail
 
-Full route detail including all streets.
+Full project detail including all streets.
 
 ```typescript
-interface RouteDetail extends RouteListItem {
+interface ProjectDetail extends ProjectListItem {
   /** Array of all streets with progress */
   streets: SnapshotStreet[];
 
@@ -223,12 +223,12 @@ interface RouteDetail extends RouteListItem {
 }
 ```
 
-### RoutePreview
+### ProjectPreview
 
-Preview data returned before creating a route.
+Preview data returned before creating a project.
 
 ```typescript
-interface RoutePreview {
+interface ProjectPreview {
   /** Center latitude */
   centerLat: number;
 
@@ -244,7 +244,7 @@ interface RoutePreview {
   /** Cache key to pass to create endpoint */
   cacheKey: string;
 
-  /** Total number of streets in area */
+  /** Total number of streets in project area */
   totalStreets: number;
 
   /** Total length of all streets in meters */
@@ -258,13 +258,13 @@ interface RoutePreview {
 }
 ```
 
-### CreateRouteRequest
+### CreateProjectRequest
 
-Request body for creating a new route.
+Request body for creating a new project.
 
 ```typescript
-interface CreateRouteRequest {
-  /** Route name (1-100 characters) */
+interface CreateProjectRequest {
+  /** Project name (1-100 characters) */
   name: string;
 
   /** Center latitude (-90 to 90) */
@@ -321,8 +321,8 @@ interface ActivityListItem {
   /** Creation timestamp */
   createdAt: string;
 
-  /** Number of routes affected by this activity */
-  routesAffected?: number;
+  /** Number of projects affected by this activity */
+  projectsAffected?: number;
 
   /** Number of streets completed (crossed 90% threshold) */
   streetsCompleted?: number;
@@ -334,7 +334,7 @@ interface ActivityListItem {
 
 ### ActivityImpact
 
-Impact of an activity on a specific route.
+Impact of an activity on a specific project.
 
 ```typescript
 interface ActivityImpact {
@@ -365,10 +365,10 @@ interface ActivityDetail extends ActivityListItem {
   /** When activity was processed (null if not yet processed) */
   processedAt: string | null;
 
-  /** Impact on each affected route */
-  routeImpacts: Array<{
-    routeId: string;
-    routeName: string;
+  /** Impact on each affected project */
+  projectImpacts: Array<{
+    projectId: string;
+    projectName: string;
     streetsCompleted: number;
     streetsImproved: number;
     impactDetails: ActivityImpact | null;
