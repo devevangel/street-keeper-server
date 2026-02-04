@@ -289,7 +289,9 @@ export function extractStreetsFromMatch(
       distanceMeters: Math.round(data.distance * 100) / 100,
       pointsCount: data.points || 1, // At least 1 if we have a step
       geometry:
-        data.geometries.length > 0 ? mergeGeometries(data.geometries) : undefined,
+        data.geometries.length > 0
+          ? mergeGeometries(data.geometries)
+          : undefined,
     });
   }
 
@@ -300,6 +302,18 @@ export function extractStreetsFromMatch(
 // ============================================
 // Helper Functions
 // ============================================
+
+/**
+ * Get timestamp as Unix seconds. Handles both Date and string (e.g. from DB JSON).
+ * Coordinates loaded from Prisma have timestamps as ISO strings, not Date objects.
+ */
+function getTimestampSeconds(
+  timestamp: Date | string | undefined
+): number | null {
+  if (!timestamp) return null;
+  const date = typeof timestamp === "string" ? new Date(timestamp) : timestamp;
+  return Math.floor(date.getTime() / 1000);
+}
 
 /**
  * Make a single request to Mapbox Map Matching API
@@ -324,9 +338,10 @@ async function makeMapboxRequest(
   let timestamps: string | undefined;
   if (points[0]?.timestamp) {
     timestamps = points
-      .map((p) =>
-        p.timestamp ? Math.floor(p.timestamp.getTime() / 1000).toString() : ""
-      )
+      .map((p) => {
+        const secs = getTimestampSeconds(p.timestamp);
+        return secs !== null ? secs.toString() : "";
+      })
       .join(";");
   }
 
@@ -348,9 +363,7 @@ async function makeMapboxRequest(
   }
 
   try {
-    console.log(
-      `[Mapbox] Sending ${points.length} points to Map Matching API`
-    );
+    console.log(`[Mapbox] Sending ${points.length} points to Map Matching API`);
 
     const response = await axios.get<MapboxMatchResponse>(url, {
       params,
@@ -367,10 +380,7 @@ async function makeMapboxRequest(
     }
 
     // Validate we got a match
-    if (
-      !response.data.matchings ||
-      response.data.matchings.length === 0
-    ) {
+    if (!response.data.matchings || response.data.matchings.length === 0) {
       throw new MapboxError(
         "No valid route match found",
         undefined,
@@ -387,7 +397,9 @@ async function makeMapboxRequest(
     }
 
     console.log(
-      `[Mapbox] Match successful (confidence: ${(confidence * 100).toFixed(1)}%)`
+      `[Mapbox] Match successful (confidence: ${(confidence * 100).toFixed(
+        1
+      )}%)`
     );
 
     return response.data;
@@ -397,7 +409,10 @@ async function makeMapboxRequest(
     }
 
     if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError<{ message?: string; code?: string }>;
+      const axiosError = error as AxiosError<{
+        message?: string;
+        code?: string;
+      }>;
       const status = axiosError.response?.status;
       const message =
         axiosError.response?.data?.message ||
@@ -424,7 +439,9 @@ async function makeMapboxRequest(
     }
 
     throw new MapboxError(
-      `Mapbox request failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      `Mapbox request failed: ${
+        error instanceof Error ? error.message : "Unknown error"
+      }`
     );
   }
 }
@@ -465,7 +482,9 @@ async function mapMatchLargeTrace(
 
   for (let i = 0; i < chunks.length; i++) {
     console.log(
-      `[Mapbox] Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} points)`
+      `[Mapbox] Processing chunk ${i + 1}/${chunks.length} (${
+        chunks[i].length
+      } points)`
     );
     const result = await makeMapboxRequest(chunks[i], token);
     results.push(result);
@@ -564,12 +583,7 @@ function mergeGeometries(geometries: GeoJsonLineString[]): GeoJsonLineString {
 /**
  * Check if two coordinates are equal (within small tolerance)
  */
-function coordsEqual(
-  a: [number, number],
-  b: [number, number]
-): boolean {
+function coordsEqual(a: [number, number], b: [number, number]): boolean {
   const tolerance = 0.000001; // ~0.1m at equator
-  return (
-    Math.abs(a[0] - b[0]) < tolerance && Math.abs(a[1] - b[1]) < tolerance
-  );
+  return Math.abs(a[0] - b[0]) < tolerance && Math.abs(a[1] - b[1]) < tolerance;
 }

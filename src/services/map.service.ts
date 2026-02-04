@@ -18,6 +18,10 @@ import {
   filterStreetsToRadius,
 } from "./geometry-cache.service.js";
 import { getUserStreetProgress } from "./user-street-progress.service.js";
+import {
+  isUnnamedStreet,
+  normalizeStreetName,
+} from "./street-aggregation.service.js";
 import type { OsmStreet } from "../types/run.types.js";
 import type {
   MapStreet,
@@ -25,6 +29,84 @@ import type {
   MapStreetsResponse,
 } from "../types/map.types.js";
 import { MAP } from "../config/constants.js";
+
+// ============================================
+// Aggregation Helper
+// ============================================
+
+/**
+ * Aggregate segment-level streets into logical streets by normalized name.
+ * Used so the list shows one row per street (e.g. "Elm Grove") instead of
+ * multiple rows for the same street (different OSM segments).
+ *
+ * For each group: max percentage, sum of run counts, everCompleted if any.
+ * Uses the segment with highest percentage as the representative (geometry, name, osmId).
+ */
+function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
+  if (streets.length === 0) return [];
+
+  const byName = new Map<string, MapStreet[]>();
+
+  for (const street of streets) {
+    const key = normalizeStreetName(street.name) || street.osmId;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key)!.push(street);
+  }
+
+  return Array.from(byName.values()).map((segments) => {
+    const byPercentage = [...segments].sort(
+      (a, b) => b.percentage - a.percentage
+    );
+    const base = byPercentage[0];
+    const maxPercentage = base.percentage;
+    const totalRuns = segments.reduce((sum, s) => sum + s.stats.runCount, 0);
+    const totalCompletions = segments.reduce(
+      (sum, s) => sum + s.stats.completionCount,
+      0
+    );
+    const everCompleted = segments.some((s) => s.stats.everCompleted);
+    const firstRunDate = segments.reduce(
+      (earliest, s) =>
+        !s.stats.firstRunDate
+          ? earliest
+          : !earliest || s.stats.firstRunDate < earliest
+          ? s.stats.firstRunDate
+          : earliest,
+      null as string | null
+    );
+    const lastRunDate = segments.reduce(
+      (latest, s) =>
+        !s.stats.lastRunDate
+          ? latest
+          : !latest || s.stats.lastRunDate > latest
+          ? s.stats.lastRunDate
+          : latest,
+      null as string | null
+    );
+    const totalLengthMeters = segments.reduce(
+      (sum, s) => sum + s.lengthMeters,
+      0
+    );
+
+    const stats: MapStreetStats = {
+      runCount: totalRuns,
+      completionCount: totalCompletions,
+      firstRunDate,
+      lastRunDate,
+      totalLengthMeters,
+      currentPercentage: maxPercentage,
+      everCompleted,
+    };
+
+    return {
+      ...base,
+      percentage: maxPercentage,
+      lengthMeters: totalLengthMeters,
+      status: everCompleted ? "completed" : "partial",
+      stats,
+    };
+  });
+}
 
 // ============================================
 // Main Function
@@ -59,6 +141,7 @@ export async function getMapStreets(
     return {
       success: true,
       streets: [],
+      segments: [],
       center: { lat, lng },
       radiusMeters: radius,
       totalStreets: 0,
@@ -73,22 +156,18 @@ export async function getMapStreets(
     minPercentage: 0.01,
   });
 
-  const progressByOsmId = new Map(progressList.map((p) => [p.osmId, p]));
   const geometryByOsmId = new Map(geometries.map((g) => [g.osmId, g]));
 
-  // 3. Merge: only include streets we have geometry for
-  const streets: MapStreet[] = [];
-  let completedCount = 0;
-  let partialCount = 0;
+  // 3. Build segment-level list (for map polylines)
+  const segments: MapStreet[] = [];
 
   for (const progress of progressList) {
+    if (isUnnamedStreet(progress.name)) continue;
+
     const geometry = geometryByOsmId.get(progress.osmId);
     if (!geometry || !geometry.geometry?.coordinates?.length) continue;
 
     const status = progress.everCompleted ? "completed" : "partial";
-    if (status === "completed") completedCount++;
-    else partialCount++;
-
     const stats: MapStreetStats = {
       runCount: progress.runCount,
       completionCount: progress.completionCount,
@@ -99,7 +178,7 @@ export async function getMapStreets(
       everCompleted: progress.everCompleted,
     };
 
-    streets.push({
+    segments.push({
       osmId: progress.osmId,
       name: progress.name,
       highwayType: progress.highwayType,
@@ -111,9 +190,15 @@ export async function getMapStreets(
     });
   }
 
+  // 4. Aggregate by name for list and stats (no duplicates)
+  const streets = aggregateStreetsByName(segments);
+  const completedCount = streets.filter((s) => s.status === "completed").length;
+  const partialCount = streets.filter((s) => s.status === "partial").length;
+
   return {
     success: true,
     streets,
+    segments,
     center: { lat, lng },
     radiusMeters: radius,
     totalStreets: streets.length,

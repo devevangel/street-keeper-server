@@ -66,13 +66,15 @@ export interface MapStreet {
  */
 export interface MapStreetsResponse {
   success: true;
-  /** Streets the user has run on in the requested area */
+  /** Aggregated logical streets (for list and stats) */
   streets: MapStreet[];
+  /** Segment-level streets (for map polylines) */
+  segments: MapStreet[];
   /** Request center (lat, lng) */
   center: { lat: number; lng: number };
   /** Request radius in meters */
   radiusMeters: number;
-  /** Total streets returned */
+  /** Total logical streets (aggregated count) */
   totalStreets: number;
   /** Count of completed streets (green) */
   completedCount: number;

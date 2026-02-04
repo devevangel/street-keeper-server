@@ -1,7 +1,7 @@
 /**
  * Authentication Routes
  * Handles OAuth flows for Strava (and later Garmin)
- * 
+ *
  * @openapi
  * tags:
  *   - name: Auth
@@ -11,10 +11,47 @@
 import { Router, Request, Response } from "express";
 import { buildAuthorizationUrl } from "../services/strava.service.js";
 import { handleStravaCallback } from "../services/auth.service.js";
-import { ERROR_CODES } from "../config/constants.js";
-import type { StravaCallbackQuery, ApiErrorResponse } from "../types/auth.types.js";
+import { requireAuth } from "../middleware/auth.middleware.js";
+import { ERROR_CODES, FRONTEND_URL } from "../config/constants.js";
+import type {
+  StravaCallbackQuery,
+  ApiErrorResponse,
+} from "../types/auth.types.js";
 
 const router = Router();
+
+/**
+ * @openapi
+ * /auth/me:
+ *   get:
+ *     summary: Get current user
+ *     description: Returns the authenticated user (via x-user-id header or session).
+ *     tags: [Auth]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Current user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AuthSuccessResponse'
+ *       401:
+ *         description: Not authenticated
+ */
+router.get("/me", requireAuth, (req: Request, res: Response) => {
+  const user = req.user!;
+  res.status(200).json({
+    success: true,
+    message: "OK",
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      stravaId: user.stravaId,
+      profilePic: user.profilePic,
+    },
+  });
+});
 
 /**
  * @openapi
@@ -42,7 +79,8 @@ router.get("/strava", (req: Request, res: Response) => {
 
     const errorResponse: ApiErrorResponse = {
       success: false,
-      error: "Failed to initiate Strava authentication. Please check server configuration.",
+      error:
+        "Failed to initiate Strava authentication. Please check server configuration.",
       code: ERROR_CODES.AUTH_CONFIG_ERROR,
     };
 
@@ -58,7 +96,7 @@ router.get("/strava", (req: Request, res: Response) => {
  *     description: |
  *       Called by Strava after user authorizes. Exchanges the authorization code for tokens,
  *       creates or updates the user, and returns user data.
- *       
+ *
  *       **Note:** This endpoint is typically called by Strava redirect, not directly by frontend.
  *     tags: [Auth]
  *     parameters:
@@ -119,51 +157,43 @@ router.get("/strava", (req: Request, res: Response) => {
 router.get("/strava/callback", async (req: Request, res: Response) => {
   const { code, error, scope } = req.query as StravaCallbackQuery;
 
-  // Handle user denied access
+  // Handle user denied access - redirect to frontend login with error
   if (error) {
-    const errorResponse: ApiErrorResponse = {
-      success: false,
-      error: "Authorization denied by user",
-      code: ERROR_CODES.AUTH_DENIED,
-    };
-    return res.status(400).json(errorResponse);
+    const redirectUrl = `${FRONTEND_URL}/login?${new URLSearchParams({
+      error: "access_denied",
+    })}`;
+    return res.redirect(redirectUrl);
   }
 
-  // Validate code parameter
+  // Validate code parameter - redirect to frontend login with error
   if (!code) {
-    const errorResponse: ApiErrorResponse = {
-      success: false,
-      error: "Missing authorization code",
-      code: ERROR_CODES.AUTH_MISSING_CODE,
-    };
-    return res.status(400).json(errorResponse);
+    const redirectUrl = `${FRONTEND_URL}/login?${new URLSearchParams({
+      error: "missing_code",
+    })}`;
+    return res.redirect(redirectUrl);
   }
 
   try {
     // Process the OAuth callback
     const user = await handleStravaCallback(code);
 
-    // Return success response
-    // Note: JWT token will be added in US-AUTH-04
-    res.status(200).json({
-      success: true,
-      message: "Authentication successful",
-      user,
-    });
-  } catch (error) {
-    console.error("Strava callback error:", error);
+    // Redirect to frontend callback with userId so the app can set user state
+    const redirectUrl = `${FRONTEND_URL}/auth/callback?${new URLSearchParams({
+      userId: user.id,
+    })}`;
+    return res.redirect(redirectUrl);
+  } catch (err) {
+    console.error("Strava callback error:", err);
 
-    // Check if it's an invalid code error
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    const isInvalidCode = errorMessage.includes("Invalid") || errorMessage.includes("expired");
+    const errorMessage = err instanceof Error ? err.message : "Unknown error";
+    const isInvalidCode =
+      errorMessage.includes("Invalid") || errorMessage.includes("expired");
+    const errorParam = isInvalidCode ? "invalid_code" : "auth_failed";
 
-    const errorResponse: ApiErrorResponse = {
-      success: false,
-      error: isInvalidCode ? "Invalid or expired authorization code" : "Authentication failed",
-      code: isInvalidCode ? ERROR_CODES.AUTH_INVALID_CODE : ERROR_CODES.INTERNAL_ERROR,
-    };
-
-    res.status(isInvalidCode ? 401 : 500).json(errorResponse);
+    const redirectUrl = `${FRONTEND_URL}/login?${new URLSearchParams({
+      error: errorParam,
+    })}`;
+    return res.redirect(redirectUrl);
   }
 });
 

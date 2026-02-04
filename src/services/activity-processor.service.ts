@@ -97,10 +97,14 @@ import {
 } from "./overlap-detection.service.js";
 import { updateRouteProgress } from "./route.service.js";
 import { upsertStreetProgress } from "./user-street-progress.service.js";
-import { queryStreetsInRadius } from "./overpass.service.js";
+import {
+  queryStreetsInRadius,
+  queryStreetsInBoundingBox,
+} from "./overpass.service.js";
 import { matchPointsToStreetsHybrid } from "./street-matching.service.js";
 import {
   aggregateSegmentsIntoLogicalStreets,
+  isUnnamedStreet,
   normalizeStreetNameForMatching,
   streetNamesMatch,
 } from "./street-aggregation.service.js";
@@ -109,6 +113,7 @@ import {
   getCachedGeometries,
   setCachedGeometries,
 } from "./geometry-cache.service.js";
+import { STREET_MATCHING } from "../config/constants.js";
 import prisma from "../lib/prisma.js";
 import type { GpxPoint, OsmStreet, MatchedStreet } from "../types/run.types.js";
 import type { StreetSnapshot, SnapshotStreet } from "../types/route.types.js";
@@ -156,6 +161,10 @@ export interface ActivityProcessingResult {
   processingTimeMs: number;
   /** Error message if failed */
   error?: string;
+  /** When no routes overlap: streets updated for map (standalone processing) */
+  standaloneStreetsCovered?: number;
+  /** When no routes overlap: streets completed (>= 90%) in standalone processing */
+  standaloneStreetsCompleted?: number;
 }
 
 /**
@@ -168,6 +177,135 @@ interface StreetCoverage {
   percentage: number;
   /** Whether this activity alone would complete the street */
   isComplete: boolean;
+}
+
+// ============================================
+// Helper Functions
+// ============================================
+
+/**
+ * Calculate bounding box from activity GPS coordinates.
+ * Used for standalone activity processing (no routes) to query streets in area.
+ *
+ * @param coordinates - Activity GPS points
+ * @returns Bounding box { south, west, north, east } with small buffer for edge matching
+ */
+function calculateActivityBoundingBox(coordinates: GpxPoint[]): {
+  south: number;
+  west: number;
+  north: number;
+  east: number;
+} {
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  for (const pt of coordinates) {
+    if (pt.lat < minLat) minLat = pt.lat;
+    if (pt.lat > maxLat) maxLat = pt.lat;
+    if (pt.lng < minLng) minLng = pt.lng;
+    if (pt.lng > maxLng) maxLng = pt.lng;
+  }
+  // ~50m buffer for edge matching
+  const buffer = 0.0005;
+  return {
+    south: minLat - buffer,
+    west: minLng - buffer,
+    north: maxLat + buffer,
+    east: maxLng + buffer,
+  };
+}
+
+/**
+ * Process an activity when the user has no overlapping routes.
+ * Queries streets in the activity's bounding box, matches GPS points to streets,
+ * and updates UserStreetProgress so the home page map shows streets run on.
+ *
+ * @param activityId - Internal activity ID (for logging)
+ * @param userId - User ID
+ * @param coordinates - Activity GPS points
+ * @returns Count of streets covered and completed
+ */
+async function processStandaloneActivity(
+  activityId: string,
+  userId: string,
+  coordinates: GpxPoint[]
+): Promise<{ streetsCovered: number; streetsCompleted: number }> {
+  const bbox = calculateActivityBoundingBox(coordinates);
+  const geometries = await queryStreetsInBoundingBox(bbox);
+
+  if (geometries.length === 0) {
+    console.log(
+      `[Processor] Standalone: no streets in bbox for activity ${activityId}`
+    );
+    return { streetsCovered: 0, streetsCompleted: 0 };
+  }
+
+  const matchedStreets = await matchPointsToStreetsHybrid(
+    coordinates,
+    geometries
+  );
+
+  if (matchedStreets.length === 0) {
+    console.log(
+      `[Processor] Standalone: no street matches for activity ${activityId}`
+    );
+    return { streetsCovered: 0, streetsCompleted: 0 };
+  }
+
+  const filteredStreets = matchedStreets.filter((m) => {
+    const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
+    const percentage = ratio * 100;
+    return (
+      m.matchedPointsCount >= STREET_MATCHING.MIN_POINTS_PER_STREET &&
+      percentage >= STREET_MATCHING.MIN_COVERAGE_PERCENTAGE
+    );
+  });
+
+  if (filteredStreets.length === 0) {
+    console.log(
+      `[Processor] Standalone: no streets passed filter (min ${STREET_MATCHING.MIN_POINTS_PER_STREET} points, min ${STREET_MATCHING.MIN_COVERAGE_PERCENTAGE}%) for activity ${activityId}`
+    );
+    return { streetsCovered: 0, streetsCompleted: 0 };
+  }
+
+  const namedStreets = filteredStreets.filter((m) => !isUnnamedStreet(m.name));
+
+  if (namedStreets.length === 0) {
+    console.log(
+      `[Processor] Standalone: no named streets (all unnamed filtered out) for activity ${activityId}`
+    );
+    return { streetsCovered: 0, streetsCompleted: 0 };
+  }
+
+  console.log(
+    `[Processor] Standalone: matched ${matchedStreets.length} streets, ${filteredStreets.length} passed filter, ${namedStreets.length} named for activity ${activityId}`
+  );
+
+  const streetProgressInput = namedStreets.map((m) => {
+    const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
+    const percentage = Math.min(100, Math.round(ratio * 100));
+    const isComplete = ratio >= 0.9;
+    return {
+      osmId: m.osmId,
+      name: m.name,
+      highwayType: m.highwayType,
+      lengthMeters: m.lengthMeters,
+      percentage,
+      isComplete,
+    };
+  });
+
+  await upsertStreetProgress(userId, streetProgressInput);
+
+  const streetsCompleted = streetProgressInput.filter(
+    (s) => s.isComplete
+  ).length;
+
+  return {
+    streetsCovered: streetProgressInput.length,
+    streetsCompleted,
+  };
 }
 
 // ============================================
@@ -232,13 +370,20 @@ export async function processActivity(
     );
 
     if (overlappingRoutes.length === 0) {
-      // No routes affected - still mark as processed
+      // No routes: still process for user-level street progress (map feature)
+      const standalone = await processStandaloneActivity(
+        activityId,
+        userId,
+        coordinates
+      );
       await markActivityProcessed(activityId);
       return {
         activityId,
         success: true,
         routesProcessed: 0,
         routes: [],
+        standaloneStreetsCovered: standalone.streetsCovered,
+        standaloneStreetsCompleted: standalone.streetsCompleted,
         processingTimeMs: Date.now() - startTime,
       };
     }

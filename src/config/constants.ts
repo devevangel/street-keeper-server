@@ -32,6 +32,12 @@ export const API = {
 } as const;
 
 // ============================================
+// Frontend URL (for OAuth redirect)
+// ============================================
+
+export const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
+
+// ============================================
 // Error Codes
 // ============================================
 
@@ -144,6 +150,8 @@ export const STREET_MATCHING = {
   BBOX_BUFFER_METERS: 100,
   COMPLETION_THRESHOLD: 0.9,
   MIN_POINTS_PER_STREET: 3,
+  /** Don't save street progress for segments with less than this coverage (noise) */
+  MIN_COVERAGE_PERCENTAGE: 5,
 } as const;
 
 export const GPX_UPLOAD = {

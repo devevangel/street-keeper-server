@@ -9,7 +9,9 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "backfill:street-progress": "tsx src/scripts/backfill-user-street-progress.ts"
+    "backfill:street-progress": "tsx src/scripts/backfill-user-street-progress.ts",
+    "cleanup:low-coverage": "tsx src/scripts/cleanup-low-coverage-street-progress.ts",
+    "cleanup:unnamed": "tsx src/scripts/cleanup-unnamed-street-progress.ts"
   },
   "keywords": [],
   "author": "",

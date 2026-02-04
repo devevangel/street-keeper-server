@@ -16,25 +16,25 @@ import type { GpxPoint } from "./run.types.js";
 export interface StravaActivity {
   id: number;
   name: string;
-  distance: number;          // meters
-  moving_time: number;       // seconds
-  elapsed_time: number;      // seconds
+  distance: number; // meters
+  moving_time: number; // seconds
+  elapsed_time: number; // seconds
   total_elevation_gain: number;
-  type: string;              // "Run", "Walk", "Hike", etc.
+  type: string; // "Run", "Walk", "Hike", etc.
   sport_type: string;
-  start_date: string;        // ISO date string (UTC)
-  start_date_local: string;  // ISO date string (local timezone)
+  start_date: string; // ISO date string (UTC)
+  start_date_local: string; // ISO date string (local timezone)
   timezone: string;
   start_latlng: [number, number] | null;
   end_latlng: [number, number] | null;
-  
+
   // Map data
   map: {
     id: string;
     summary_polyline: string | null;
     polyline: string | null;
   };
-  
+
   // Optional fields
   average_speed?: number;
   max_speed?: number;
@@ -42,11 +42,29 @@ export interface StravaActivity {
   max_heartrate?: number;
   calories?: number;
   description?: string | null;
-  
+
   // Athlete info (partial)
   athlete: {
     id: number;
   };
+}
+
+/**
+ * Strava summary activity from GET /athlete/activities (list)
+ * @see https://developers.strava.com/docs/reference/#api-Activities-getLoggedInAthleteActivities
+ */
+export interface StravaActivitySummary {
+  id: number;
+  name: string;
+  type: string;
+  sport_type: string;
+  start_date: string;
+  start_date_local: string;
+  distance: number;
+  moving_time: number;
+  elapsed_time: number;
+  total_elevation_gain: number;
+  athlete: { id: number };
 }
 
 /**
@@ -55,25 +73,25 @@ export interface StravaActivity {
  */
 export interface StravaStream {
   latlng?: {
-    data: [number, number][];  // [lat, lng] pairs
+    data: [number, number][]; // [lat, lng] pairs
     series_type: "distance" | "time";
     original_size: number;
     resolution: "low" | "medium" | "high";
   };
   time?: {
-    data: number[];            // seconds from start
+    data: number[]; // seconds from start
     series_type: "distance" | "time";
     original_size: number;
     resolution: "low" | "medium" | "high";
   };
   distance?: {
-    data: number[];            // meters from start
+    data: number[]; // meters from start
     series_type: "distance" | "time";
     original_size: number;
     resolution: "low" | "medium" | "high";
   };
   altitude?: {
-    data: number[];            // meters
+    data: number[]; // meters
     series_type: "distance" | "time";
     original_size: number;
     resolution: "low" | "medium" | "high";
@@ -90,11 +108,11 @@ export interface StravaStream {
  */
 export interface StravaWebhookPayload {
   object_type: "activity" | "athlete";
-  object_id: number;         // Activity ID or Athlete ID
+  object_id: number; // Activity ID or Athlete ID
   aspect_type: "create" | "update" | "delete";
-  owner_id: number;          // Athlete ID who owns the object
+  owner_id: number; // Athlete ID who owns the object
   subscription_id: number;
-  event_time: number;        // Unix timestamp
+  event_time: number; // Unix timestamp
   updates?: Record<string, unknown>; // For update events
 }
 
@@ -120,7 +138,7 @@ export interface StravaWebhookVerifyResponse {
 
 /**
  * Job data for BullMQ activity processing queue
- * 
+ *
  * Contains the information needed to fetch and process a Strava activity.
  * The worker uses this to:
  * 1. Look up the user by stravaAthleteId (ownerId)
@@ -142,11 +160,11 @@ export interface ProcessActivityJob {
  * Impact of an activity on a route
  */
 export interface ActivityImpact {
-  completed: string[];       // OSM IDs of streets completed (crossed 90% threshold)
+  completed: string[]; // OSM IDs of streets completed (crossed 90% threshold)
   improved: Array<{
     osmId: string;
-    from: number;            // Previous percentage
-    to: number;              // New percentage
+    from: number; // Previous percentage
+    to: number; // New percentage
   }>;
 }
 
@@ -182,7 +200,7 @@ export interface ActivityListItem {
   activityType: string;
   isProcessed: boolean;
   createdAt: string;
-  
+
   // Impact summary (if processed)
   routesAffected?: number;
   streetsCompleted?: number;
@@ -195,7 +213,7 @@ export interface ActivityListItem {
 export interface ActivityDetail extends ActivityListItem {
   coordinates: GpxPoint[];
   processedAt: string | null;
-  
+
   // Impact on each route
   routeImpacts: Array<{
     routeId: string;

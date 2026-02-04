@@ -113,7 +113,9 @@ export async function refreshAccessToken(
   } catch (error) {
     if (error instanceof AxiosError) {
       throw new Error(
-        `Token refresh failed: ${error.response?.data?.message || error.message}`
+        `Token refresh failed: ${
+          error.response?.data?.message || error.message
+        }`
       );
     }
     throw error;
@@ -136,26 +138,85 @@ export function isTokenExpired(expiresAt: number | Date): boolean {
 }
 
 // ============================================
+// List Athlete Activities (for Manual Sync)
+// ============================================
+
+export interface ListActivitiesOptions {
+  /** Unix timestamp - return activities before this time */
+  before?: number;
+  /** Unix timestamp - return activities after this time */
+  after?: number;
+  /** Page number (default 1) */
+  page?: number;
+  /** Items per page (default 30, max 200) */
+  perPage?: number;
+}
+
+/**
+ * List recent activities for the authenticated athlete
+ *
+ * Used by the manual sync endpoint to fetch activities without webhooks.
+ * @see https://developers.strava.com/docs/reference/#api-Activities-getLoggedInAthleteActivities
+ */
+export async function listAthleteActivities(
+  accessToken: string,
+  options?: ListActivitiesOptions
+): Promise<StravaActivitySummary[]> {
+  const params = new URLSearchParams();
+  if (options?.before != null) params.set("before", String(options.before));
+  if (options?.after != null) params.set("after", String(options.after));
+  if (options?.page != null) params.set("page", String(options.page));
+  params.set("per_page", String(options?.perPage ?? 30));
+
+  const url = `${STRAVA.API_BASE_URL}/athlete/activities?${params.toString()}`;
+
+  try {
+    const response = await axios.get<StravaActivitySummary[]>(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 15000,
+    });
+    return response.data;
+  } catch (error) {
+    if (error instanceof AxiosError) {
+      if (error.response?.status === 401) {
+        throw new StravaApiError(
+          "Strava access token is invalid or expired",
+          "TOKEN_INVALID"
+        );
+      }
+      throw new StravaApiError(
+        `Failed to list activities: ${
+          error.response?.data?.message ?? error.message
+        }`,
+        "API_ERROR"
+      );
+    }
+    throw error;
+  }
+}
+
+// ============================================
 // Activity Fetching (for Webhook Processing)
 // ============================================
 
 import type {
   StravaActivity,
+  StravaActivitySummary,
   StravaStream,
 } from "../types/activity.types.js";
 import type { GpxPoint } from "../types/run.types.js";
 
 /**
  * Fetch a single activity from Strava API
- * 
+ *
  * Called when webhook notifies us of a new activity.
  * Returns activity metadata (name, distance, duration, etc.)
- * 
+ *
  * @param accessToken - Valid Strava access token
  * @param activityId - Strava activity ID (from webhook)
  * @returns Activity metadata
  * @throws Error if API call fails
- * 
+ *
  * @example
  * const activity = await fetchActivity(token, "12345678");
  * console.log(activity.name); // "Morning Run"
@@ -190,7 +251,9 @@ export async function fetchActivity(
         );
       }
       throw new StravaApiError(
-        `Failed to fetch activity: ${error.response?.data?.message || error.message}`,
+        `Failed to fetch activity: ${
+          error.response?.data?.message || error.message
+        }`,
         "API_ERROR"
       );
     }
@@ -200,21 +263,21 @@ export async function fetchActivity(
 
 /**
  * Fetch GPS streams (detailed coordinates) for an activity
- * 
+ *
  * Strava streams provide detailed GPS data (~1 point per second).
  * This is much more accurate than the simplified polyline.
- * 
+ *
  * Streams available:
  * - latlng: GPS coordinates [lat, lng]
  * - time: Seconds from start
  * - distance: Meters from start
  * - altitude: Elevation in meters
- * 
+ *
  * @param accessToken - Valid Strava access token
  * @param activityId - Strava activity ID
  * @returns Stream data with coordinates and timestamps
  * @throws Error if API call fails
- * 
+ *
  * @example
  * const streams = await fetchActivityStreams(token, "12345678");
  * console.log(streams.latlng.data.length); // ~1800 points for 30min run
@@ -254,7 +317,9 @@ export async function fetchActivityStreams(
         );
       }
       throw new StravaApiError(
-        `Failed to fetch streams: ${error.response?.data?.message || error.message}`,
+        `Failed to fetch streams: ${
+          error.response?.data?.message || error.message
+        }`,
         "API_ERROR"
       );
     }
@@ -264,14 +329,14 @@ export async function fetchActivityStreams(
 
 /**
  * Convert Strava streams to GpxPoint array
- * 
+ *
  * Transforms Strava's stream format into our internal GpxPoint format
  * that's compatible with the existing street matching services.
- * 
+ *
  * @param streams - Strava stream data (from fetchActivityStreams)
  * @param startDate - Activity start time (for calculating timestamps)
  * @returns Array of GpxPoint objects ready for street matching
- * 
+ *
  * @example
  * const streams = await fetchActivityStreams(token, activityId);
  * const points = streamsToGpxPoints(streams, new Date(activity.start_date));
@@ -322,7 +387,7 @@ export function streamsToGpxPoints(
 
 /**
  * Custom error class for Strava API errors
- * 
+ *
  * Provides structured error information for handling different
  * failure scenarios (auth issues, rate limits, etc.)
  */
