@@ -644,6 +644,9 @@ In production, authentication is handled via Strava OAuth.
             "completionCount",
             "currentPercentage",
             "everCompleted",
+            "weightedCompletionRatio",
+            "segmentCount",
+            "connectorCount",
           ],
           properties: {
             runCount: {
@@ -678,6 +681,23 @@ In production, authentication is handled via Strava OAuth.
               type: "boolean",
               description:
                 "True if user has ever completed this street (>= 90%)",
+            },
+            weightedCompletionRatio: {
+              type: "number",
+              minimum: 0,
+              maximum: 1,
+              description:
+                "Length-weighted completion (0-1); connectors count at CONNECTOR_WEIGHT",
+            },
+            segmentCount: {
+              type: "integer",
+              description:
+                "Number of OSM segments (parts on map) for this street",
+            },
+            connectorCount: {
+              type: "integer",
+              description:
+                "Number of segments classified as connectors (length <= CONNECTOR_MAX_LENGTH_METERS)",
             },
           },
         },
@@ -742,6 +762,7 @@ In production, authentication is handled via Strava OAuth.
           required: [
             "success",
             "streets",
+            "segments",
             "center",
             "radiusMeters",
             "totalStreets",
@@ -753,7 +774,12 @@ In production, authentication is handled via Strava OAuth.
             streets: {
               type: "array",
               items: { $ref: "#/components/schemas/MapStreet" },
-              description: "Streets the user has run on in the requested area",
+              description: "Aggregated logical streets (for list and stats)",
+            },
+            segments: {
+              type: "array",
+              items: { $ref: "#/components/schemas/MapStreet" },
+              description: "Segment-level streets (for map polylines)",
             },
             center: {
               type: "object",

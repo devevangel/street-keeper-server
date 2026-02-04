@@ -194,6 +194,19 @@ export const STREET_AGGREGATION = {
   // Clamp coverage ratios to max 1.0 for UX (display purposes)
   // Raw ratios are kept unclamped for debugging
   MAX_DISPLAY_COVERAGE_RATIO: 1.0,
+
+  // Street-level completion (map aggregation)
+  // A street is "completed" when its length-weighted completion ratio meets this threshold.
+  // Stricter than segment-level STREET_MATCHING.COMPLETION_THRESHOLD (0.9).
+  STREET_COMPLETION_THRESHOLD: 0.95,
+
+  // Connector segments: short links (e.g. between intersections) that count less.
+  // Segments with length <= this are treated as connectors in weighted completion.
+  CONNECTOR_MAX_LENGTH_METERS: 20,
+
+  // Weight applied to connector segments in length-weighted completion (0–1).
+  // Connectors contribute less so one short gap doesn't override long completed stretches.
+  CONNECTOR_WEIGHT: 0.5,
 } as const;
 
 // ============================================

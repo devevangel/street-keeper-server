@@ -25,6 +25,12 @@ export interface MapStreetStats {
   currentPercentage: number;
   /** True if user has ever completed this street (>= 90%) */
   everCompleted: boolean;
+  /** Length-weighted completion ratio (0–1), connectors count at CONNECTOR_WEIGHT */
+  weightedCompletionRatio: number;
+  /** Number of OSM segments that make up this street */
+  segmentCount: number;
+  /** Number of segments classified as connectors (length <= CONNECTOR_MAX_LENGTH_METERS) */
+  connectorCount: number;
 }
 
 // ============================================

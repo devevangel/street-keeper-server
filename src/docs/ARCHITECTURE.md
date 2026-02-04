@@ -241,6 +241,8 @@ The codebase follows a strict three-layer architecture:
 - Some uncovered sections count as "complete"
 - Configurable via `STREET_MATCHING.COMPLETION_THRESHOLD`
 
+**Map display (two-tier):** The map uses a second, stricter tier for **aggregated** streets (grouped by name). Street-level status is **completed** only when length-weighted completion ≥ 95% (`STREET_AGGREGATION.STREET_COMPLETION_THRESHOLD`). Short segments (≤ 20 m, "connectors") count at 50% weight so one small gap doesn’t mark the whole street partial. Segment-level polylines inherit their status from the aggregated street, so all segments of a street are drawn with the same style (solid green or dotted yellow). See [MAP_FEATURE.md](MAP_FEATURE.md#completion-status-two-tier-logic).
+
 ---
 
 ### 6. MAX Rule for Progress

@@ -8,7 +8,7 @@ This document describes the home page map feature: user-level street progress wi
 2. [Data Model](#data-model)
 3. [API Endpoint](#api-endpoint)
 4. [Stats Tracked](#stats-tracked)
-5. [Completion Status (everCompleted)](#completion-status-evercompleted)
+5. [Completion Status (Two-Tier Logic)](#completion-status-two-tier-logic)
 6. [Activity Processing Integration](#activity-processing-integration)
 7. [Backfill](#backfill)
 
@@ -74,8 +74,10 @@ Returns streets the user has run on in a given area, with geometry and stats.
 
 1. Fetch street geometries in the area (geometry cache or Overpass).
 2. Fetch UserStreetProgress for the user where osmId is in that set and percentage > 0.
-3. Merge geometry with progress; set status to "completed" if everCompleted, else "partial".
-4. Return streets array plus center, radius, and counts.
+3. Build segment-level list: merge geometry with progress.
+4. Aggregate by street name: compute length-weighted completion (connectors weighted at 0.5); set street status to completed if **weighted ratio ≥ 95%**, else partial.
+5. Propagate aggregated status back to segments so all segments of a street share the same visual style on the map.
+6. Return `streets` (aggregated), `segments` (for polylines), center, radius, and counts.
 
 ---
 
@@ -83,26 +85,43 @@ Returns streets the user has run on in a given area, with geometry and stats.
 
 Per street, the following are stored and returned for the info icon:
 
-| Stat                  | Description                                                     |
-| --------------------- | --------------------------------------------------------------- |
-| **runCount**          | Number of times the user has run on this street (any coverage). |
-| **completionCount**   | Number of runs where the user achieved >= 90% coverage.         |
-| **firstRunDate**      | Date of first run on this street.                               |
-| **lastRunDate**       | Date of most recent run on this street.                         |
-| **totalLengthMeters** | Street length in meters.                                        |
-| **currentPercentage** | Current coverage 0–100 (MAX across all runs).                   |
-| **everCompleted**     | True if the user has ever reached >= 90% on this street.        |
+| Stat                        | Description                                                                                                     |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **runCount**                | Number of times the user has run on this street (any coverage).                                                 |
+| **completionCount**         | Number of runs where the user achieved >= 90% coverage.                                                         |
+| **firstRunDate**            | Date of first run on this street.                                                                               |
+| **lastRunDate**             | Date of most recent run on this street.                                                                         |
+| **totalLengthMeters**       | Street length in meters.                                                                                        |
+| **currentPercentage**       | Current coverage 0–100 (MAX across all runs).                                                                   |
+| **everCompleted**           | True if the user has ever reached >= 90% on this street.                                                        |
+| **weightedCompletionRatio** | Length-weighted completion 0–1 (connectors count at CONNECTOR_WEIGHT). Used for street-level completed/partial. |
+| **segmentCount**            | Number of OSM segments (parts on map) that make up this street.                                                 |
+| **connectorCount**          | Number of short segments (≤ 20 m) weighted less in completion.                                                  |
 
 ---
 
-## Completion Status (everCompleted)
+## Completion Status (Two-Tier Logic)
 
-**Display rule:**
+Completion uses two tiers so the map is accurate: **segment-level** (per OSM way) and **street-level** (aggregated by name).
 
-- **Completed (green):** `everCompleted === true` – user has at least once reached >= 90% coverage. The street stays green even if a later run only covered part of it.
-- **Partial (yellow):** `everCompleted === false` – user has some progress but has never reached 90%.
+### Segment-level (per polyline)
 
-**Data rule:** When percentage is updated (during activity processing), if the new percentage is >= 90%, `everCompleted` is set to true and never set back to false.
+- **Completed (green):** current `percentage` ≥ 90% (`STREET_MATCHING.COMPLETION_THRESHOLD`).
+- **Partial (yellow):** current `percentage` < 90%.
+
+So each segment’s color reflects **current** coverage, not “ever” completed.
+
+### Street-level (aggregated list and counts)
+
+Streets with the same name are grouped. Completion is **length-weighted** so one short gap doesn’t mark the whole street partial:
+
+- **Connectors:** segments with length ≤ 20 m (`CONNECTOR_MAX_LENGTH_METERS`) count at 50% weight (`CONNECTOR_WEIGHT`).
+- **Weighted ratio:** `sum((percentage/100) × weight) / sum(weight)` where weight = length × (0.5 if connector, 1 otherwise).
+- **Street status:** **Completed** if `weightedCompletionRatio` ≥ 95% (`STREET_COMPLETION_THRESHOLD`), else **Partial**.
+
+Constants live in `config/constants.ts`: `STREET_AGGREGATION.*` and `STREET_MATCHING.COMPLETION_THRESHOLD`.
+
+**Data rule:** When percentage is updated (during activity processing), if the new percentage is >= 90%, `everCompleted` is set to true and never set back to false (used for stats only; display uses the rules above).
 
 ---
 

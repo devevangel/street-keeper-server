@@ -640,6 +640,12 @@ interface MapStreetStats {
   currentPercentage: number;
   /** True if user has ever completed this street (>= 90%) */
   everCompleted: boolean;
+  /** Length-weighted completion ratio (0–1); connectors count at CONNECTOR_WEIGHT. Used for street-level completed/partial. */
+  weightedCompletionRatio: number;
+  /** Number of OSM segments (parts on map) that make up this street */
+  segmentCount: number;
+  /** Number of segments classified as connectors (length <= CONNECTOR_MAX_LENGTH_METERS) */
+  connectorCount: number;
 }
 ```
 
@@ -678,13 +684,15 @@ Response for GET /api/v1/map/streets.
 ```typescript
 interface MapStreetsResponse {
   success: true;
-  /** Streets the user has run on in the requested area */
+  /** Aggregated logical streets (for list and stats; one row per street name) */
   streets: MapStreet[];
+  /** Segment-level streets (for map polylines; one entry per OSM way) */
+  segments: MapStreet[];
   /** Request center (lat, lng) */
   center: { lat: number; lng: number };
   /** Request radius in meters */
   radiusMeters: number;
-  /** Total streets returned */
+  /** Total logical streets returned */
   totalStreets: number;
   /** Count of completed streets (green) */
   completedCount: number;

@@ -28,7 +28,11 @@ import type {
   MapStreetStats,
   MapStreetsResponse,
 } from "../types/map.types.js";
-import { MAP } from "../config/constants.js";
+import {
+  MAP,
+  STREET_AGGREGATION,
+  STREET_MATCHING,
+} from "../config/constants.js";
 
 // ============================================
 // Aggregation Helper
@@ -39,7 +43,8 @@ import { MAP } from "../config/constants.js";
  * Used so the list shows one row per street (e.g. "Elm Grove") instead of
  * multiple rows for the same street (different OSM segments).
  *
- * For each group: max percentage, sum of run counts, everCompleted if any.
+ * Completion: length-weighted ratio with connector segments weighted at CONNECTOR_WEIGHT.
+ * Street status (completed/partial) is derived from weightedCompletionRatio >= STREET_COMPLETION_THRESHOLD.
  * Uses the segment with highest percentage as the representative (geometry, name, osmId).
  */
 function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
@@ -52,6 +57,12 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
     if (!byName.has(key)) byName.set(key, []);
     byName.get(key)!.push(street);
   }
+
+  const {
+    STREET_COMPLETION_THRESHOLD,
+    CONNECTOR_MAX_LENGTH_METERS,
+    CONNECTOR_WEIGHT,
+  } = STREET_AGGREGATION;
 
   return Array.from(byName.values()).map((segments) => {
     const byPercentage = [...segments].sort(
@@ -88,6 +99,29 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       0
     );
 
+    // Classify segments: connector = length <= CONNECTOR_MAX_LENGTH_METERS
+    const connectorCount = segments.filter(
+      (s) => s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS
+    ).length;
+
+    // Length-weighted completion: each segment contributes (percentage/100) * weight,
+    // where weight = lengthMeters * (CONNECTOR_WEIGHT for connectors, 1 for primary).
+    let weightedSum = 0;
+    let totalWeight = 0;
+    for (const s of segments) {
+      const isConnector = s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS;
+      const weight = s.lengthMeters * (isConnector ? CONNECTOR_WEIGHT : 1);
+      weightedSum += (s.percentage / 100) * weight;
+      totalWeight += weight;
+    }
+    const weightedCompletionRatio =
+      totalWeight === 0 ? 0 : weightedSum / totalWeight;
+
+    const status =
+      weightedCompletionRatio >= STREET_COMPLETION_THRESHOLD
+        ? "completed"
+        : "partial";
+
     const stats: MapStreetStats = {
       runCount: totalRuns,
       completionCount: totalCompletions,
@@ -96,13 +130,16 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       totalLengthMeters,
       currentPercentage: maxPercentage,
       everCompleted,
+      weightedCompletionRatio,
+      segmentCount: segments.length,
+      connectorCount,
     };
 
     return {
       ...base,
       percentage: maxPercentage,
       lengthMeters: totalLengthMeters,
-      status: everCompleted ? "completed" : "partial",
+      status,
       stats,
     };
   });
@@ -113,7 +150,10 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
 // ============================================
 
 /**
- * Get streets the user has run on in the given area, with geometry and stats
+ * Get streets the user has run on in the given area, with geometry and stats.
+ * Segment status is propagated from the aggregated street status so all segments
+ * of a street share the same visual style on the map (solid green if completed,
+ * dotted yellow if partial).
  *
  * @param userId - User ID (from auth)
  * @param lat - Center latitude
@@ -167,7 +207,14 @@ export async function getMapStreets(
     const geometry = geometryByOsmId.get(progress.osmId);
     if (!geometry || !geometry.geometry?.coordinates?.length) continue;
 
-    const status = progress.everCompleted ? "completed" : "partial";
+    const segmentCompletionThreshold =
+      STREET_MATCHING.COMPLETION_THRESHOLD * 100;
+    const status =
+      progress.percentage >= segmentCompletionThreshold
+        ? "completed"
+        : "partial";
+    const isConnector =
+      progress.lengthMeters <= STREET_AGGREGATION.CONNECTOR_MAX_LENGTH_METERS;
     const stats: MapStreetStats = {
       runCount: progress.runCount,
       completionCount: progress.completionCount,
@@ -176,6 +223,9 @@ export async function getMapStreets(
       totalLengthMeters: progress.lengthMeters,
       currentPercentage: progress.percentage,
       everCompleted: progress.everCompleted,
+      weightedCompletionRatio: progress.percentage / 100,
+      segmentCount: 1,
+      connectorCount: isConnector ? 1 : 0,
     };
 
     segments.push({
@@ -192,6 +242,22 @@ export async function getMapStreets(
 
   // 4. Aggregate by name for list and stats (no duplicates)
   const streets = aggregateStreetsByName(segments);
+
+  // 5. Propagate aggregated street status to segments so all segments of a street
+  // share the same visual style on the map (solid green or dotted yellow).
+  const streetStatusByName = new Map<string, "completed" | "partial">();
+  for (const street of streets) {
+    const key = normalizeStreetName(street.name) || street.osmId;
+    streetStatusByName.set(key, street.status);
+  }
+  for (const segment of segments) {
+    const key = normalizeStreetName(segment.name) || segment.osmId;
+    const aggregatedStatus = streetStatusByName.get(key);
+    if (aggregatedStatus) {
+      segment.status = aggregatedStatus;
+    }
+  }
+
   const completedCount = streets.filter((s) => s.status === "completed").length;
   const partialCount = streets.filter((s) => s.status === "partial").length;
 

@@ -20,21 +20,22 @@ This document serves as the single source of truth for coding patterns, conventi
 12. [Testing Patterns](#testing-patterns)
 13. [Import/Export Conventions](#importexport-conventions)
 14. [Code Documentation](#code-documentation)
-15. [Environment Variables](#environment-variables)
+15. [Street Completion Accuracy (Map)](#street-completion-accuracy-map)
+16. [Environment Variables](#environment-variables)
 
 ---
 
 ## Tech Stack
 
-| Technology | Purpose | Version |
-|------------|---------|---------|
-| **Node.js** | Runtime | 20+ |
-| **TypeScript** | Language | 5.x |
-| **Express 5** | Web framework | 5.x |
-| **Prisma** | ORM | 7.x |
-| **PostgreSQL** | Database | - |
-| **Vitest** | Testing | 4.x |
-| **Axios** | HTTP client | 1.x |
+| Technology     | Purpose       | Version |
+| -------------- | ------------- | ------- |
+| **Node.js**    | Runtime       | 20+     |
+| **TypeScript** | Language      | 5.x     |
+| **Express 5**  | Web framework | 5.x     |
+| **Prisma**     | ORM           | 7.x     |
+| **PostgreSQL** | Database      | -       |
+| **Vitest**     | Testing       | 4.x     |
+| **Axios**      | HTTP client   | 1.x     |
 
 ### Key Configuration
 
@@ -89,15 +90,15 @@ backend/
 
 ### Directory Purposes
 
-| Directory | Purpose | Contains |
-|-----------|---------|----------|
-| `config/` | Static configuration values | Constants, environment helpers |
-| `lib/` | Shared singletons and utilities | Database clients, common helpers |
-| `middleware/` | Request/response interceptors | Auth, validation, logging middleware |
-| `routes/` | HTTP endpoint definitions | Route handlers (thin, delegate to services) |
-| `services/` | Business logic | Core application logic, external API calls |
-| `types/` | TypeScript interfaces | Request/response types, domain models |
-| `tests/` | Automated tests | Unit and integration tests |
+| Directory     | Purpose                         | Contains                                    |
+| ------------- | ------------------------------- | ------------------------------------------- |
+| `config/`     | Static configuration values     | Constants, environment helpers              |
+| `lib/`        | Shared singletons and utilities | Database clients, common helpers            |
+| `middleware/` | Request/response interceptors   | Auth, validation, logging middleware        |
+| `routes/`     | HTTP endpoint definitions       | Route handlers (thin, delegate to services) |
+| `services/`   | Business logic                  | Core application logic, external API calls  |
+| `types/`      | TypeScript interfaces           | Request/response types, domain models       |
+| `tests/`      | Automated tests                 | Unit and integration tests                  |
 
 ---
 
@@ -105,14 +106,14 @@ backend/
 
 ### Pattern: `[feature].[layer].ts`
 
-| Layer | Pattern | Example |
-|-------|---------|---------|
-| Routes | `*.routes.ts` | `auth.routes.ts`, `runs.routes.ts` |
-| Services | `*.service.ts` | `auth.service.ts`, `strava.service.ts` |
-| Types | `*.types.ts` | `auth.types.ts`, `run.types.ts` |
-| Tests | `*.test.ts` | `auth.test.ts`, `strava.test.ts` |
-| Middleware | `*.middleware.ts` | `auth.middleware.ts` |
-| Config | `*.ts` (descriptive) | `constants.ts`, `database.ts` |
+| Layer      | Pattern              | Example                                |
+| ---------- | -------------------- | -------------------------------------- |
+| Routes     | `*.routes.ts`        | `auth.routes.ts`, `runs.routes.ts`     |
+| Services   | `*.service.ts`       | `auth.service.ts`, `strava.service.ts` |
+| Types      | `*.types.ts`         | `auth.types.ts`, `run.types.ts`        |
+| Tests      | `*.test.ts`          | `auth.test.ts`, `strava.test.ts`       |
+| Middleware | `*.middleware.ts`    | `auth.middleware.ts`                   |
+| Config     | `*.ts` (descriptive) | `constants.ts`, `database.ts`          |
 
 ### Rules
 
@@ -234,11 +235,11 @@ export const STRAVA = {
 
 ### Layer Responsibilities
 
-| Layer | Can Call | Cannot Call |
-|-------|----------|-------------|
-| Routes | Services | Database directly |
-| Services | Other services, Prisma, External APIs | Routes |
-| Data (Prisma) | Database | Services, Routes |
+| Layer         | Can Call                              | Cannot Call       |
+| ------------- | ------------------------------------- | ----------------- |
+| Routes        | Services                              | Database directly |
+| Services      | Other services, Prisma, External APIs | Routes            |
+| Data (Prisma) | Database                              | Services, Routes  |
 
 ---
 
@@ -357,16 +358,18 @@ router.get("/protected", requireAuth, async (req, res) => {
 ```
 
 **Middleware exports:**
+
 - `requireAuth` - Requires authentication, returns 401 if not authenticated
 - `optionalAuth` - Attaches user if authenticated, continues regardless
 - `isAuthenticated(req)` - Type guard to check if request is authenticated
 
 **Request augmentation:**
 After `requireAuth`, `req.user` contains:
+
 ```typescript
 interface AuthenticatedUser {
-  id: string;        // User UUID
-  name: string;      // Display name
+  id: string; // User UUID
+  name: string; // Display name
   email: string | null;
   stravaId: string | null;
   profilePic: string | null;
@@ -375,6 +378,7 @@ interface AuthenticatedUser {
 
 **Development mode:**
 Use `x-user-id` header for testing without full auth flow:
+
 ```bash
 curl -H "x-user-id: abc-123" http://localhost:8000/api/v1/routes
 ```
@@ -419,7 +423,7 @@ function helperFunction(data: SomeType): TransformedType {
 // Public function - exported
 export async function handleStravaCallback(code: string): Promise<AuthUser> {
   const tokenData = await exchangeCodeForTokens(code);
-  const userData = extractStravaUserData(tokenData);  // Private helper
+  const userData = extractStravaUserData(tokenData); // Private helper
   const user = await findOrCreateStravaUser(userData); // Private helper
   return mapToAuthUser(user);
 }
@@ -443,19 +447,25 @@ Use dedicated service files for external APIs (e.g., `strava.service.ts`):
 /**
  * Exchange authorization code for access and refresh tokens
  */
-export async function exchangeCodeForTokens(code: string): Promise<StravaTokenResponse> {
+export async function exchangeCodeForTokens(
+  code: string
+): Promise<StravaTokenResponse> {
   const config = getStravaConfig();
 
   try {
     const response = await axios.post<StravaTokenResponse>(
       STRAVA.TOKEN_URL,
-      new URLSearchParams({ /* params */ }),
+      new URLSearchParams({
+        /* params */
+      }),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
     return response.data;
   } catch (error) {
     if (error instanceof AxiosError) {
-      throw new Error(`Strava API error: ${error.response?.data?.message || error.message}`);
+      throw new Error(
+        `Strava API error: ${error.response?.data?.message || error.message}`
+      );
     }
     throw error;
   }
@@ -507,13 +517,13 @@ export interface StravaUserData {
 
 ### Type Categories
 
-| Category | Purpose | Example |
-|----------|---------|---------|
-| External API Types | Match third-party API responses | `StravaTokenResponse` |
-| Request Types | Query params, body shapes | `StravaCallbackQuery` |
-| Response Types | API response shapes | `AuthSuccessResponse`, `ApiErrorResponse` |
-| Internal Types | Data transfer between layers | `StravaUserData`, `AuthUser` |
-| Config Types | Configuration shapes | `StravaOAuthConfig` |
+| Category           | Purpose                         | Example                                   |
+| ------------------ | ------------------------------- | ----------------------------------------- |
+| External API Types | Match third-party API responses | `StravaTokenResponse`                     |
+| Request Types      | Query params, body shapes       | `StravaCallbackQuery`                     |
+| Response Types     | API response shapes             | `AuthSuccessResponse`, `ApiErrorResponse` |
+| Internal Types     | Data transfer between layers    | `StravaUserData`, `AuthUser`              |
+| Config Types       | Configuration shapes            | `StravaOAuthConfig`                       |
 
 ---
 
@@ -603,8 +613,8 @@ All error responses follow a consistent structure:
 ```typescript
 interface ApiErrorResponse {
   success: false;
-  error: string;      // Human-readable message
-  code?: string;      // Machine-readable error code
+  error: string; // Human-readable message
+  code?: string; // Machine-readable error code
 }
 ```
 
@@ -646,7 +656,9 @@ try {
     if (error.response?.status === 400) {
       throw new Error("Invalid or expired authorization code");
     }
-    throw new Error(`Strava API error: ${error.response?.data?.message || error.message}`);
+    throw new Error(
+      `Strava API error: ${error.response?.data?.message || error.message}`
+    );
   }
   throw error;
 }
@@ -681,12 +693,16 @@ async function findOrCreateStravaUser(userData: StravaUserData) {
   if (existingUser) {
     return prisma.user.update({
       where: { id: existingUser.id },
-      data: { /* update fields */ },
+      data: {
+        /* update fields */
+      },
     });
   }
 
   return prisma.user.create({
-    data: { /* create fields */ },
+    data: {
+      /* create fields */
+    },
   });
 }
 ```
@@ -699,12 +715,12 @@ model User {
   stravaId      String?   @unique
   email         String?   @unique
   name          String
-  
+
   // Related tokens grouped together
   stravaAccessToken     String?
   stravaRefreshToken    String?
   stravaTokenExpiresAt  DateTime?
-  
+
   // Timestamps at the end
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -797,7 +813,10 @@ import { STRAVA, ERROR_CODES } from "../config/constants.js";
 import { handleStravaCallback } from "../services/auth.service.js";
 
 // 5. Type imports
-import type { StravaCallbackQuery, ApiErrorResponse } from "../types/auth.types.js";
+import type {
+  StravaCallbackQuery,
+  ApiErrorResponse,
+} from "../types/auth.types.js";
 ```
 
 ### Export Pattern
@@ -811,12 +830,12 @@ const router = Router();
 export default router;
 
 // Services - named exports
-export async function handleStravaCallback(code: string): Promise<AuthUser> { }
-export async function getUserById(userId: string): Promise<AuthUser | null> { }
+export async function handleStravaCallback(code: string): Promise<AuthUser> {}
+export async function getUserById(userId: string): Promise<AuthUser | null> {}
 
 // Types - named exports
-export interface AuthUser { }
-export interface ApiErrorResponse { }
+export interface AuthUser {}
+export interface ApiErrorResponse {}
 ```
 
 ### File Extension in Imports
@@ -841,6 +860,7 @@ import { buildAuthorizationUrl } from "../services/strava.service.ts";
 ### File Headers
 
 Every file starts with a detailed JSDoc comment explaining:
+
 1. **Purpose**: What this file/module does
 2. **Context**: How it fits into the larger system
 3. **Key concepts**: Important algorithms or patterns used
@@ -850,22 +870,22 @@ Every file starts with a detailed JSDoc comment explaining:
 /**
  * Geometry Cache Service
  * Caches street geometries to reduce Overpass API calls
- * 
+ *
  * This service provides a caching layer for street geometry data retrieved
  * from OpenStreetMap via Overpass API. Key features:
- * 
+ *
  * 1. **24-hour TTL**: Cached data expires after 24 hours
  * 2. **Smart key generation**: Cache keys include coordinates and radius
  * 3. **Larger radius filtering**: Can filter cached larger-radius results for smaller requests
- * 
+ *
  * Cache is stored in PostgreSQL (GeometryCache table) rather than Redis
  * to simplify deployment and because street data is relatively static.
- * 
+ *
  * @example
  * // Check cache before querying Overpass
  * const cacheKey = generateRadiusCacheKey(50.788, -1.089, 2000);
  * let streets = await getCachedGeometries(cacheKey);
- * 
+ *
  * if (!streets) {
  *   streets = await queryStreetsInRadius(50.788, -1.089, 2000);
  *   await setCachedGeometries(cacheKey, streets);
@@ -886,22 +906,22 @@ Every file starts with a detailed JSDoc comment explaining:
 ```typescript
 /**
  * Query streets within a radius from a center point
- * 
+ *
  * Used for creating Routes - queries all streets within a circular area
  * around a center point. This is more appropriate for Routes than bounding
  * box queries because Routes are defined by center + radius.
- * 
+ *
  * Features:
  * - Queries by radius (circular area) instead of bounding box
  * - Only returns named streets (filters out unnamed roads)
  * - Same retry/fallback logic as bounding box query
- * 
+ *
  * @param centerLat - Center latitude of the search area
  * @param centerLng - Center longitude of the search area
  * @param radiusMeters - Radius in meters (e.g., 2000 for 2km)
  * @returns Array of OsmStreet objects with name, length, and geometry
  * @throws OverpassError if all API requests fail after retries
- * 
+ *
  * @example
  * // Query streets within 2km of a point
  * const streets = await queryStreetsInRadius(50.788, -1.089, 2000);
@@ -953,6 +973,7 @@ export async function findLargerCachedRadius(...) { }
 ### Inline Comments
 
 Use inline comments to explain:
+
 1. **WHY** something is done (not what - the code shows what)
 2. **Non-obvious logic** or algorithms
 3. **Edge cases** being handled
@@ -982,7 +1003,7 @@ For complex algorithms, include a high-level explanation:
 ```typescript
 /**
  * Two-phase overlap detection for activity-to-route matching
- * 
+ *
  * ALGORITHM:
  * ---------
  * Phase 1: Bounding Box Check (Fast Filter)
@@ -990,12 +1011,12 @@ For complex algorithms, include a high-level explanation:
  *   - Calculate route circular bounds
  *   - If boxes don't overlap → skip route (no match possible)
  *   - This eliminates most routes in O(1) time
- * 
+ *
  * Phase 2: Point-in-Circle Check (Precise)
  *   - Only for routes that passed Phase 1
  *   - Check if ANY activity point falls within route radius
  *   - Uses Haversine distance for accuracy on Earth's surface
- * 
+ *
  * PERFORMANCE:
  *   - Without bbox: O(n * m) where n=routes, m=points
  *   - With bbox: O(n) for most cases, O(n * m) worst case
@@ -1013,32 +1034,32 @@ Document interfaces with field-level comments:
 ```typescript
 /**
  * Snapshot of a street's progress within a route
- * 
+ *
  * Stored in Route.streetsSnapshot JSON field.
  * Progress is tracked as percentage (0-100) of street length covered.
  */
 export interface SnapshotStreet {
   /** OSM way ID in format "way/123456789" */
   osmId: string;
-  
+
   /** Street name from OSM, or "Unnamed Road" */
   name: string;
-  
+
   /** Total length of this street segment in meters */
   lengthMeters: number;
-  
+
   /** OSM highway type (residential, footway, etc.) */
   highwayType: string;
-  
+
   /** True if percentage >= 90% (completion threshold) */
   completed: boolean;
-  
+
   /** Percentage of street length covered (0-100) */
   percentage: number;
-  
+
   /** ISO date string of last run on this street, or null */
   lastRunDate: string | null;
-  
+
   /** True if this street was added in a recent refresh */
   isNew?: boolean;
 }
@@ -1049,11 +1070,11 @@ export interface SnapshotStreet {
 ```typescript
 /**
  * Error thrown when route is not found
- * 
+ *
  * This error indicates:
  * - Route ID doesn't exist in database
  * - Route was deleted
- * 
+ *
  * HTTP Status: 404
  * Error Code: ROUTE_NOT_FOUND
  */
@@ -1093,27 +1114,39 @@ export class RouteNotFoundError extends Error {
 
 ---
 
+## Street Completion Accuracy (Map)
+
+The map shows streets as **completed** (green) or **partial** (yellow). To avoid marking a whole street green when only one segment was fully run, we use two tiers:
+
+1. **Segment-level (per polyline):** Each OSM segment’s color is based on **current** `percentage` only: completed if ≥ `STREET_MATCHING.COMPLETION_THRESHOLD` (90%), else partial. Do not use `everCompleted` for display.
+
+2. **Street-level (aggregated list):** Streets with the same name are grouped in `map.service.ts` (`aggregateStreetsByName`). Completion is **length-weighted**: each segment contributes `(percentage/100) × weight`, where weight is `lengthMeters × (CONNECTOR_WEIGHT if connector else 1)`. Segments with `lengthMeters <= CONNECTOR_MAX_LENGTH_METERS` are connectors. Street status is completed only if `weightedCompletionRatio >= STREET_COMPLETION_THRESHOLD` (95%).
+
+Constants: `STREET_AGGREGATION.STREET_COMPLETION_THRESHOLD`, `CONNECTOR_MAX_LENGTH_METERS`, `CONNECTOR_WEIGHT`; segment threshold `STREET_MATCHING.COMPLETION_THRESHOLD`. See [MAP_FEATURE.md](MAP_FEATURE.md#completion-status-two-tier-logic) and [ARCHITECTURE.md](ARCHITECTURE.md#5-90-threshold-for-street-completion).
+
+---
+
 ## Environment Variables
 
 ### Required Environment Variables
 
-| Variable | Description | Example |
-|----------|-------------|---------|
+| Variable       | Description                  | Example                                    |
+| -------------- | ---------------------------- | ------------------------------------------ |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@localhost:5432/db` |
 
 ### Optional Environment Variables
 
-| Variable | Description | Default | Notes |
-|----------|-------------|---------|-------|
-| `PORT` | Server port | `8000` | |
-| `NODE_ENV` | Environment | `development` | `development`, `production`, `test` |
-| `STRAVA_CLIENT_ID` | Strava OAuth client ID | - | Required for Strava integration |
-| `STRAVA_CLIENT_SECRET` | Strava OAuth client secret | - | Required for Strava integration |
-| `STRAVA_REDIRECT_URI` | Strava OAuth callback URL | - | Required for Strava integration |
-| `MAPBOX_ACCESS_TOKEN` | Mapbox API access token | - | Enables high-accuracy GPS matching |
-| `DISABLE_QUEUE` | Disable job queue | `false` | Set to `true` to run without job processing |
-| `STRAVA_WEBHOOK_VERIFY_TOKEN` | Webhook verification token | `street-keeper-verify-token` | Set when creating Strava subscription |
-| `BASE_URL` | Public base URL of the server | `http://localhost:8000` | Used for webhook callback URL |
+| Variable                      | Description                   | Default                      | Notes                                       |
+| ----------------------------- | ----------------------------- | ---------------------------- | ------------------------------------------- |
+| `PORT`                        | Server port                   | `8000`                       |                                             |
+| `NODE_ENV`                    | Environment                   | `development`                | `development`, `production`, `test`         |
+| `STRAVA_CLIENT_ID`            | Strava OAuth client ID        | -                            | Required for Strava integration             |
+| `STRAVA_CLIENT_SECRET`        | Strava OAuth client secret    | -                            | Required for Strava integration             |
+| `STRAVA_REDIRECT_URI`         | Strava OAuth callback URL     | -                            | Required for Strava integration             |
+| `MAPBOX_ACCESS_TOKEN`         | Mapbox API access token       | -                            | Enables high-accuracy GPS matching          |
+| `DISABLE_QUEUE`               | Disable job queue             | `false`                      | Set to `true` to run without job processing |
+| `STRAVA_WEBHOOK_VERIFY_TOKEN` | Webhook verification token    | `street-keeper-verify-token` | Set when creating Strava subscription       |
+| `BASE_URL`                    | Public base URL of the server | `http://localhost:8000`      | Used for webhook callback URL               |
 
 ### Mapbox Configuration
 
@@ -1181,10 +1214,10 @@ Set `DISABLE_QUEUE=true` to run without job processing (useful for testing route
 
 ## Version History
 
-| Date | Version | Changes |
-|------|---------|---------|
-| 2026-01-20 | 1.4.0 | Replaced BullMQ/Redis with pg-boss (PostgreSQL-based queue) |
-| 2026-01-20 | 1.3.0 | Added Redis/BullMQ configuration documentation |
-| 2026-01-19 | 1.2.0 | Expanded Code Documentation section with comprehensive JSDoc guidelines |
-| 2026-01-18 | 1.1.0 | Added Mapbox integration documentation |
-| 2026-01-17 | 1.0.0 | Initial documentation |
+| Date       | Version | Changes                                                                 |
+| ---------- | ------- | ----------------------------------------------------------------------- |
+| 2026-01-20 | 1.4.0   | Replaced BullMQ/Redis with pg-boss (PostgreSQL-based queue)             |
+| 2026-01-20 | 1.3.0   | Added Redis/BullMQ configuration documentation                          |
+| 2026-01-19 | 1.2.0   | Expanded Code Documentation section with comprehensive JSDoc guidelines |
+| 2026-01-18 | 1.1.0   | Added Mapbox integration documentation                                  |
+| 2026-01-17 | 1.0.0   | Initial documentation                                                   |
