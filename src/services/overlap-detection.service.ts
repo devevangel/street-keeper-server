@@ -112,6 +112,7 @@ export interface OverlapResult {
  * @param userId - User whose projects to check
  * @param coordinates - GPS coordinates from the activity
  * @param options - Detection options
+ * @param options.activityStartDate - If set, only include projects created on or before this moment (date and time). Ensures a run only counts for projects that existed when the run happened.
  * @returns Array of projects that overlap with the activity
  *
  * @example
@@ -126,9 +127,15 @@ export async function detectOverlappingProjects(
     includeArchived?: boolean;
     /** Max sample points to return per project. Default: 5 */
     maxSamplePoints?: number;
+    /** Only include projects where createdAt <= this timestamp (date and time). Omit to include all projects. */
+    activityStartDate?: Date;
   } = {}
 ): Promise<OverlapResult[]> {
-  const { includeArchived = false, maxSamplePoints = 5 } = options;
+  const {
+    includeArchived = false,
+    maxSamplePoints = 5,
+    activityStartDate,
+  } = options;
 
   if (coordinates.length === 0) {
     console.log("[Overlap] No coordinates provided, returning empty result");
@@ -149,6 +156,8 @@ export async function detectOverlappingProjects(
     where: {
       userId,
       ...(includeArchived ? {} : { isArchived: false }),
+      // Full timestamp comparison: project must exist at or before activity start
+      ...(activityStartDate ? { createdAt: { lte: activityStartDate } } : {}),
     },
     select: {
       id: true,

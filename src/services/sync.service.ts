@@ -26,7 +26,10 @@ import {
   isSupportedActivityType,
   isActivityTooOld,
 } from "./activity.service.js";
-import { processActivity } from "./activity-processor.service.js";
+import {
+  processActivity,
+  recheckActivityForNewProjects,
+} from "./activity-processor.service.js";
 
 // ============================================
 // Types
@@ -117,6 +120,14 @@ async function processOneActivity(
   if (existing) {
     if (!existing.isProcessed) {
       await processActivity(existing.id, userId);
+      return { status: "processed" };
+    }
+    // Already processed: still check for new projects (created before this activity, date+time)
+    const newProjectsUpdated = await recheckActivityForNewProjects(
+      existing.id,
+      userId
+    );
+    if (newProjectsUpdated > 0) {
       return { status: "processed" };
     }
     return { status: "skipped", reason: "already_processed" };

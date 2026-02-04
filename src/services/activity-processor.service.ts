@@ -87,9 +87,9 @@
  */
 
 import {
-  getActivityCoordinates,
   markActivityProcessed,
   saveProjectActivity,
+  ActivityNotFoundError,
 } from "./activity.service.js";
 import {
   detectOverlappingProjects,
@@ -342,9 +342,16 @@ export async function processActivity(
   const projectResults: ProjectProcessingResult[] = [];
 
   try {
-    // Step 1: Get activity coordinates
+    // Step 1: Get activity coordinates and start date
     console.log(`[Processor] Starting processing for activity ${activityId}`);
-    const coordinates = await getActivityCoordinates(activityId);
+    const activity = await prisma.activity.findUnique({
+      where: { id: activityId },
+      select: { coordinates: true, startDate: true },
+    });
+    if (!activity) {
+      throw new ActivityNotFoundError(activityId);
+    }
+    const coordinates = activity.coordinates as GpxPoint[];
 
     if (coordinates.length === 0) {
       console.log(`[Processor] Activity ${activityId} has no coordinates`);
@@ -360,10 +367,11 @@ export async function processActivity(
 
     console.log(`[Processor] Activity has ${coordinates.length} GPS points`);
 
-    // Step 2: Detect overlapping projects
+    // Step 2: Detect overlapping projects (only those created at or before activity start, date and time)
     const overlappingProjects = await detectOverlappingProjects(
       userId,
-      coordinates
+      coordinates,
+      { activityStartDate: activity.startDate }
     );
     console.log(
       `[Processor] Found ${overlappingProjects.length} overlapping projects`
@@ -445,6 +453,61 @@ export async function processActivity(
       error: errorMessage,
     };
   }
+}
+
+/**
+ * Re-check an already-processed activity for newly created projects.
+ * Used when the user clicks Sync and an activity was processed before some
+ * projects existed. Only projects with createdAt <= activity.startDate (date and time)
+ * are considered, so "create project then run" still updates on next sync.
+ *
+ * @param activityId - Internal activity ID
+ * @param userId - User ID
+ * @returns Number of projects that were updated
+ */
+export async function recheckActivityForNewProjects(
+  activityId: string,
+  userId: string
+): Promise<number> {
+  const activity = await prisma.activity.findUnique({
+    where: { id: activityId },
+    select: { coordinates: true, startDate: true },
+  });
+  if (!activity || !activity.coordinates?.length) {
+    return 0;
+  }
+  const coordinates = activity.coordinates as GpxPoint[];
+
+  const overlappingProjects = await detectOverlappingProjects(
+    userId,
+    coordinates,
+    { activityStartDate: activity.startDate }
+  );
+  if (overlappingProjects.length === 0) return 0;
+
+  let updated = 0;
+  for (const overlap of overlappingProjects) {
+    const existing = await prisma.projectActivity.findUnique({
+      where: {
+        projectId_activityId: {
+          projectId: overlap.project.id,
+          activityId,
+        },
+      },
+    });
+    if (existing) continue;
+
+    try {
+      await processProjectOverlap(activityId, userId, overlap, coordinates);
+      updated++;
+    } catch (error) {
+      console.error(
+        `[Processor] Recheck: error processing project ${overlap.project.id}:`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+  return updated;
 }
 
 // ============================================

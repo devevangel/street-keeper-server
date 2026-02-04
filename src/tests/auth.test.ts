@@ -18,7 +18,8 @@ describe("US-AUTH-01: Strava Authentication", () => {
     // Mock environment variables for tests
     process.env.STRAVA_CLIENT_ID = "test_client_id";
     process.env.STRAVA_CLIENT_SECRET = "test_client_secret";
-    process.env.STRAVA_REDIRECT_URI = "http://localhost:8000/api/v1/auth/strava/callback";
+    process.env.STRAVA_REDIRECT_URI =
+      "http://localhost:8000/api/v1/auth/strava/callback";
   });
 
   describe("GET /api/v1/auth/strava", () => {
@@ -27,7 +28,9 @@ describe("US-AUTH-01: Strava Authentication", () => {
         .get("/api/v1/auth/strava")
         .expect(302);
 
-      expect(response.headers.location).toContain("https://www.strava.com/oauth/authorize");
+      expect(response.headers.location).toContain(
+        "https://www.strava.com/oauth/authorize"
+      );
       expect(response.headers.location).toContain("client_id=test_client_id");
       expect(response.headers.location).toContain("response_type=code");
       expect(response.headers.location).toContain("scope=read");
@@ -35,23 +38,22 @@ describe("US-AUTH-01: Strava Authentication", () => {
   });
 
   describe("GET /api/v1/auth/strava/callback", () => {
-    it("should return 400 when code is missing", async () => {
+    it("should redirect to login with error when code is missing", async () => {
       const response = await request(app)
         .get("/api/v1/auth/strava/callback")
-        .expect(400);
+        .expect(302);
 
-      expect(response.body.success).toBe(false);
-      expect(response.body.code).toBe("AUTH_MISSING_CODE");
+      expect(response.headers.location).toContain("/login");
+      expect(response.headers.location).toContain("error=missing_code");
     });
 
-    it("should return 400 when user denies access", async () => {
+    it("should redirect to login with error when user denies access", async () => {
       const response = await request(app)
         .get("/api/v1/auth/strava/callback?error=access_denied")
-        .expect(400);
+        .expect(302);
 
-      expect(response.body.success).toBe(false);
-      expect(response.body.code).toBe("AUTH_DENIED");
-      expect(response.body.error).toBe("Authorization denied by user");
+      expect(response.headers.location).toContain("/login");
+      expect(response.headers.location).toContain("error=access_denied");
     });
   });
 });
