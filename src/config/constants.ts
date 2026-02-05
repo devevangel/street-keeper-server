@@ -148,11 +148,56 @@ export const OVERPASS = {
 export const STREET_MATCHING = {
   MAX_DISTANCE_METERS: 25,
   BBOX_BUFFER_METERS: 100,
-  COMPLETION_THRESHOLD: 0.9,
+  COMPLETION_THRESHOLD: 0.9, // Default threshold (for backwards compatibility)
   MIN_POINTS_PER_STREET: 3,
   /** Don't save street progress for segments with less than this coverage (noise) */
   MIN_COVERAGE_PERCENTAGE: 5,
+  /** Confidence thresholds for Mapbox matching fallback */
+  CONFIDENCE_THRESHOLDS: {
+    HIGH: 0.7, // Use Mapbox result directly
+    MEDIUM: 0.3, // Use Mapbox with caution, consider hybrid fallback
+    LOW: 0.1, // Fallback to Overpass-only
+  },
+  /** Length-based completion thresholds - STRICT for accuracy */
+  COMPLETION_THRESHOLDS: {
+    VERY_SHORT: { maxLength: 50, threshold: 0.85 }, // < 50m: 85% required
+    SHORT: { maxLength: 100, threshold: 0.9 }, // 50-100m: 90% required
+    MEDIUM: { maxLength: 300, threshold: 0.95 }, // 100-300m: 95% required
+    LONG: { maxLength: Infinity, threshold: 0.98 }, // > 300m: 98% required
+  },
 } as const;
+
+/**
+ * Get the appropriate completion threshold for a street based on its length.
+ *
+ * Shorter streets have slightly lower thresholds to account for GPS accuracy limitations.
+ * GPS devices typically have ±5-15m accuracy, which has a larger impact on shorter streets.
+ *
+ * STRICT thresholds ensure users must actually complete streets, not just run 80%.
+ *
+ * @param streetLengthMeters - Total length of the street in meters
+ * @returns Completion threshold (0.0 to 1.0) - coverage ratio required for "FULL" status
+ *
+ * @example
+ * getCompletionThreshold(45)  // 0.85 (very short street)
+ * getCompletionThreshold(75)  // 0.9 (short street)
+ * getCompletionThreshold(200) // 0.95 (medium street)
+ * getCompletionThreshold(500) // 0.98 (long street)
+ */
+export function getCompletionThreshold(streetLengthMeters: number): number {
+  const thresholds = STREET_MATCHING.COMPLETION_THRESHOLDS;
+
+  if (streetLengthMeters <= thresholds.VERY_SHORT.maxLength) {
+    return thresholds.VERY_SHORT.threshold;
+  }
+  if (streetLengthMeters <= thresholds.SHORT.maxLength) {
+    return thresholds.SHORT.threshold;
+  }
+  if (streetLengthMeters <= thresholds.MEDIUM.maxLength) {
+    return thresholds.MEDIUM.threshold;
+  }
+  return thresholds.LONG.threshold;
+}
 
 export const GPX_UPLOAD = {
   MAX_FILE_SIZE_BYTES: 10 * 1024 * 1024,
@@ -197,8 +242,8 @@ export const STREET_AGGREGATION = {
 
   // Street-level completion (map aggregation)
   // A street is "completed" when its length-weighted completion ratio meets this threshold.
-  // Stricter than segment-level STREET_MATCHING.COMPLETION_THRESHOLD (0.9).
-  STREET_COMPLETION_THRESHOLD: 0.95,
+  // STRICT: Requires 98% weighted completion for full accuracy.
+  STREET_COMPLETION_THRESHOLD: 0.98,
 
   // Connector segments: short links (e.g. between intersections) that count less.
   // Segments with length <= this are treated as connectors in weighted completion.
@@ -222,9 +267,14 @@ export const MAPBOX = {
   // See: https://docs.mapbox.com/api/navigation/map-matching/
   GEOMETRIES: "geojson", // Return GeoJSON geometry (easier to work with)
   OVERVIEW: "full", // Full route geometry (not simplified)
-  ANNOTATIONS: "distance", // Include distance annotations per leg
+  ANNOTATIONS: "distance,duration,speed", // Include distance, duration, and speed annotations for validation
   TIDY: true, // Clean up noisy traces (removes redundant points)
   STEPS: true, // Include turn-by-turn steps (gives us street names)
+
+  /** Maximum expected speed in m/s for validation (15 m/s = 54 km/h) */
+  MAX_EXPECTED_SPEED_MS: 15,
+  /** Minimum expected average speed for a valid activity (0.5 m/s = ~1.8 km/h) */
+  MIN_EXPECTED_SPEED_MS: 0.5,
 
   // Radiuses: How far from the road network to search (meters)
   // Higher = more lenient matching, lower = stricter

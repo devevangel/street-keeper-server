@@ -282,13 +282,27 @@ function parseOverpassResponse(data: OverpassResponse): OsmStreet[] {
       coordinates,
     };
 
-    // Create OsmStreet object
+    // Collect alternative names for better cross-source matching
+    const altNames: string[] = [];
+    if (element.tags.alt_name) altNames.push(element.tags.alt_name);
+    if (element.tags["name:en"]) altNames.push(element.tags["name:en"]);
+    if (element.tags.old_name) altNames.push(element.tags.old_name);
+    if (element.tags.loc_name) altNames.push(element.tags.loc_name);
+
+    // Use primary name or fallback to alternatives, then "Unnamed Road"
+    const primaryName =
+      element.tags.name ||
+      element.tags.alt_name ||
+      element.tags["name:en"] ||
+      "Unnamed Road";
+
+    // Create OsmStreet object with extended metadata
     const street: OsmStreet = {
       // Unique identifier: "way/123456789"
       osmId: `way/${element.id}`,
 
-      // Street name from tags, or "Unnamed Road" if not set
-      name: element.tags.name || "Unnamed Road",
+      // Street name from tags, with fallback chain
+      name: primaryName,
 
       // Calculate total length of the street in meters
       lengthMeters: calculateLineLength(geometry),
@@ -298,6 +312,18 @@ function parseOverpassResponse(data: OverpassResponse): OsmStreet[] {
 
       // Type of road (residential, primary, footway, etc.)
       highwayType: element.tags.highway || "unknown",
+
+      // Alternative names for cross-source matching
+      altNames: altNames.length > 0 ? altNames : undefined,
+
+      // Surface type (asphalt, concrete, gravel, etc.)
+      surface: element.tags.surface,
+
+      // Access restrictions (private, no, permissive, etc.)
+      access: element.tags.access,
+
+      // Road reference number (e.g., "A1", "B2154")
+      ref: element.tags.ref,
     };
 
     streets.push(street);

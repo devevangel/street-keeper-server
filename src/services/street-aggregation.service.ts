@@ -53,7 +53,11 @@ import type {
   AggregationResult,
   CompletionStatus,
 } from "../types/run.types.js";
-import { STREET_AGGREGATION, STREET_MATCHING } from "../config/constants.js";
+import {
+  STREET_AGGREGATION,
+  STREET_MATCHING,
+  getCompletionThreshold,
+} from "../config/constants.js";
 
 // ============================================
 // Street Name Normalization
@@ -97,20 +101,29 @@ export function normalizeStreetName(name: string): string {
  * @returns Normalized name suitable for fuzzy matching
  *
  * @example
+ * normalizeStreetNameForMatching("Elm Grove (B2154)")  // "elm grove" (removes road classification)
  * normalizeStreetNameForMatching("St. Alban's Street")  // "saint albans street"
  * normalizeStreetNameForMatching("Saint Alban's Street")  // "saint albans street"
  * normalizeStreetNameForMatching("MAIN RD")  // "main road"
- * normalizeStreetNameForMatching("High St.")  // "high street"
+ * normalizeStreetNameForMatching("High St.")  // "high saint"
  */
 export function normalizeStreetNameForMatching(name: string): string {
   if (!name) return "";
 
   return (
     name
+      // Remove road classifications: "(A3)", "(B2154)", "(A288)", etc.
+      // Must be done BEFORE lowercasing to match [A-Z]
+      .replace(/\s*\([A-Z]\d+[A-Za-z]?\d*\)\s*/g, "")
+      // Remove "The" prefix: "The High Street" → "High Street"
+      .replace(/^the\s+/i, "")
       .toLowerCase()
       // Expand common abbreviations (order matters: do before removing punctuation)
       // "St." or "St " at word boundary → "saint"
-      .replace(/\bst\.?\s/gi, "saint ")
+      // Match "St." followed by space or end of string
+      .replace(/\bst\.\s/gi, "saint ")
+      .replace(/\bst\.$/gi, "saint") // "St." at end of string
+      .replace(/\bst\s/gi, "saint ")
       // "Rd." or "Rd " at word boundary → "road"
       .replace(/\brd\.?\b/gi, "road")
       // "Ave." or "Ave " → "avenue"
@@ -129,10 +142,14 @@ export function normalizeStreetNameForMatching(name: string): string {
       .replace(/\bpl\.?\b/gi, "place")
       // "Sq." or "Sq " → "square"
       .replace(/\bsq\.?\b/gi, "square")
-      // "N." or "N " → "north"
-      .replace(/\bn\.?\s/gi, "north ")
-      // "S." or "S " → "south"
-      .replace(/\bs\.?\s/gi, "south ")
+      // Directional abbreviations (must come after "St." expansion to avoid conflicts)
+      // "N." or "N " → "north" (only standalone word)
+      .replace(/(?:^|\s)n\.\s/gi, " north ")
+      .replace(/(?:^|\s)n\s/gi, " north ")
+      // "S." or "S " → "south" (only standalone, not part of other words like "marys")
+      // Use lookbehind to ensure "s" is preceded by space or start, not part of word
+      .replace(/(?:^|\s)s\.\s/gi, " south ")
+      .replace(/(?:^|\s)s\s/gi, " south ")
       // "E." or "E " → "east"
       .replace(/\be\.?\s/gi, "east ")
       // "W." or "W " → "west"
@@ -326,9 +343,7 @@ export function aggregateSegmentsIntoLogicalStreets(
  * @param segments - Named street segments
  * @returns Array of aggregated logical streets
  */
-function aggregateNamedStreets(
-  segments: MatchedStreet[]
-): AggregatedStreet[] {
+function aggregateNamedStreets(segments: MatchedStreet[]): AggregatedStreet[] {
   // Group segments by (normalizedName + highwayType)
   const groups = new Map<string, MatchedStreet[]>();
 
@@ -352,8 +367,7 @@ function aggregateNamedStreets(
     // Use geometry-based distance if available (Phase 2), otherwise use regular distance
     const totalDistanceCovered = groupSegments.reduce(
       (sum, seg) =>
-        sum +
-        (seg.geometryDistanceCoveredMeters ?? seg.distanceCoveredMeters),
+        sum + (seg.geometryDistanceCoveredMeters ?? seg.distanceCoveredMeters),
       0
     );
 
@@ -377,13 +391,44 @@ function aggregateNamedStreets(
     // (raw distance is preserved in rawCoverageRatio for debugging)
     const clampedDistanceCovered = Math.min(totalDistanceCovered, totalLength);
 
-    // Determine completion status based on geometry ratio if available
-    // Otherwise use regular coverage ratio
-    const effectiveCoverageRatio = rawCoverageRatio;
-    const completionStatus: CompletionStatus =
-      effectiveCoverageRatio >= STREET_MATCHING.COMPLETION_THRESHOLD
-        ? "FULL"
-        : "PARTIAL";
+    // Determine completion status using length-based thresholds and spatial verification
+    // Individual segments already have spatial verification applied in street-matching.service.ts
+    //
+    // Rules for aggregated street completion:
+    // 1. Use length-based threshold (shorter streets = more lenient threshold)
+    // 2. Use CAPPED ratio (not raw) - ratio > 1.0 doesn't mean "more complete"
+    // 3. Consider if all individual segments passed verification
+    const lengthBasedThreshold = getCompletionThreshold(totalLength);
+
+    // Count segments that passed spatial verification (have "FULL" status)
+    const fullSegments = groupSegments.filter(
+      (seg) => seg.completionStatus === "FULL"
+    );
+    const allSegmentsFull =
+      fullSegments.length === groupSegments.length && groupSegments.length > 0;
+
+    // Use capped ratio for threshold comparison
+    // A ratio > 1.0 can happen due to GPS drift or multiple passes, but doesn't mean "more complete"
+    const cappedRatioForThreshold = Math.min(rawCoverageRatio, 1.0);
+
+    // Determine completion status
+    // FULL requires:
+    //   - Capped ratio meets length-based threshold, AND
+    //   - All individual segments passed spatial verification (or ratio naturally < 1.0)
+    // This prevents false FULL when ratio > 1.0 from GPS drift without actual coverage
+    let completionStatus: CompletionStatus;
+    if (cappedRatioForThreshold >= lengthBasedThreshold) {
+      // Ratio meets threshold, but verify spatial coverage if ratio was > 1.0
+      if (rawCoverageRatio > 1.0 && !allSegmentsFull) {
+        // High ratio but individual segments failed spatial verification
+        // This indicates GPS issues rather than actual full coverage
+        completionStatus = "PARTIAL";
+      } else {
+        completionStatus = "FULL";
+      }
+    } else {
+      completionStatus = "PARTIAL";
+    }
 
     // Build aggregated street
     aggregatedStreets.push({
@@ -391,7 +436,8 @@ function aggregateNamedStreets(
       normalizedName,
       highwayType,
       totalLengthMeters: Math.round(totalLength * 100) / 100,
-      totalDistanceCoveredMeters: Math.round(clampedDistanceCovered * 100) / 100,
+      totalDistanceCoveredMeters:
+        Math.round(clampedDistanceCovered * 100) / 100,
       totalDistanceRunMeters: Math.round(totalDistanceCovered * 100) / 100, // Actual distance run (unclamped)
       coverageRatio: Math.round(coverageRatio * 1000) / 1000,
       rawCoverageRatio: Math.round(rawCoverageRatio * 1000) / 1000,
@@ -426,9 +472,7 @@ function aggregateNamedStreets(
  * @param segments - Unnamed street segments
  * @returns Array of unnamed road buckets
  */
-function bucketUnnamedRoads(
-  segments: MatchedStreet[]
-): UnnamedRoadBucket[] {
+function bucketUnnamedRoads(segments: MatchedStreet[]): UnnamedRoadBucket[] {
   // Filter out tiny unnamed segments
   const filteredSegments = segments.filter((seg) => {
     const isLongEnough =
@@ -460,8 +504,7 @@ function bucketUnnamedRoads(
     // Use geometry-based distance if available (Phase 2), otherwise use regular distance
     const totalDistanceCovered = groupSegments.reduce(
       (sum, seg) =>
-        sum +
-        (seg.geometryDistanceCoveredMeters ?? seg.distanceCoveredMeters),
+        sum + (seg.geometryDistanceCoveredMeters ?? seg.distanceCoveredMeters),
       0
     );
 
@@ -489,7 +532,8 @@ function bucketUnnamedRoads(
       highwayType,
       displayName,
       totalLengthMeters: Math.round(totalLength * 100) / 100,
-      totalDistanceCoveredMeters: Math.round(clampedDistanceCovered * 100) / 100,
+      totalDistanceCoveredMeters:
+        Math.round(clampedDistanceCovered * 100) / 100,
       totalDistanceRunMeters: Math.round(totalDistanceCovered * 100) / 100, // Actual distance run (unclamped)
       coverageRatio: Math.round(coverageRatio * 1000) / 1000,
       segmentCount: groupSegments.length,

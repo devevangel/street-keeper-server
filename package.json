@@ -11,7 +11,9 @@
     "test:watch": "vitest",
     "backfill:street-progress": "tsx src/scripts/backfill-user-street-progress.ts",
     "cleanup:low-coverage": "tsx src/scripts/cleanup-low-coverage-street-progress.ts",
-    "cleanup:unnamed": "tsx src/scripts/cleanup-unnamed-street-progress.ts"
+    "cleanup:unnamed": "tsx src/scripts/cleanup-unnamed-street-progress.ts",
+    "reset:processed-activities": "tsx src/scripts/reset-processed-activities.ts",
+    "wipe:and-resync": "tsx src/scripts/wipe-and-resync.ts"
   },
   "keywords": [],
   "author": "",

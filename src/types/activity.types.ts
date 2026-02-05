@@ -96,6 +96,20 @@ export interface StravaStream {
     original_size: number;
     resolution: "low" | "medium" | "high";
   };
+  /** Smoothed velocity in m/s - useful for detecting GPS errors */
+  velocity_smooth?: {
+    data: number[]; // m/s
+    series_type: "distance" | "time";
+    original_size: number;
+    resolution: "low" | "medium" | "high";
+  };
+  /** Boolean indicating if athlete was moving - useful for filtering stopped points */
+  moving?: {
+    data: boolean[];
+    series_type: "distance" | "time";
+    original_size: number;
+    resolution: "low" | "medium" | "high";
+  };
 }
 
 // ============================================

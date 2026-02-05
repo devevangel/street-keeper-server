@@ -4,11 +4,12 @@
  *
  * Flow:
  * 1. Get street geometries in the requested area (cache or Overpass)
- * 2. Get user's street progress for those osmIds (percentage > 0)
- * 3. Merge: attach geometry + build MapStreet with status (completed / partial)
- * 4. Return MapStreetsResponse
+ * 2. Get user's street progress for those osmIds (percentage > 0, including spatialCoverage)
+ * 3. Merge: attach geometry + build MapStreet with status and optional coveredGeometry
+ * 4. Return MapStreetsResponse (segments include full + covered geometry for partial streets)
  */
 
+import * as turf from "@turf/turf";
 import { queryAllStreetsInRadius } from "./overpass.service.js";
 import {
   getCachedGeometries,
@@ -45,7 +46,9 @@ import {
  *
  * Completion: length-weighted ratio with connector segments weighted at CONNECTOR_WEIGHT.
  * Street status (completed/partial) is derived from weightedCompletionRatio >= STREET_COMPLETION_THRESHOLD.
- * Uses the segment with highest percentage as the representative (geometry, name, osmId).
+ *
+ * IMPORTANT: Concatenates ALL segment geometries into a single polyline for accurate map rendering.
+ * Segments are sorted geographically before concatenation to form a continuous line.
  */
 function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
   if (streets.length === 0) return [];
@@ -135,11 +138,49 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       connectorCount,
     };
 
+    // Concatenate ALL segment geometries into a single polyline
+    // Sort segments geographically by their first coordinate (latitude) for continuity
+    const sortedSegments = [...segments].sort((a, b) => {
+      const aFirst = a.geometry.coordinates[0];
+      const bFirst = b.geometry.coordinates[0];
+      // Sort by latitude (index 1 in GeoJSON [lng, lat])
+      // If latitudes are similar, sort by longitude
+      const latDiff = aFirst[1] - bFirst[1];
+      if (Math.abs(latDiff) > 0.0001) return latDiff;
+      return aFirst[0] - bFirst[0];
+    });
+
+    // Concatenate all coordinates, removing duplicates at segment boundaries
+    const allCoordinates: [number, number][] = [];
+    for (const segment of sortedSegments) {
+      for (const coord of segment.geometry.coordinates) {
+        // Skip duplicate points at segment boundaries
+        const lastCoord = allCoordinates[allCoordinates.length - 1];
+        if (
+          lastCoord &&
+          Math.abs(lastCoord[0] - coord[0]) < 0.000001 &&
+          Math.abs(lastCoord[1] - coord[1]) < 0.000001
+        ) {
+          continue;
+        }
+        allCoordinates.push(coord);
+      }
+    }
+
+    // Build merged geometry
+    const mergedGeometry = {
+      type: "LineString" as const,
+      coordinates: allCoordinates,
+    };
+
     return {
-      ...base,
+      osmId: base.osmId,
+      name: base.name,
+      highwayType: base.highwayType,
       percentage: maxPercentage,
       lengthMeters: totalLengthMeters,
       status,
+      geometry: mergedGeometry,
       stats,
     };
   });
@@ -228,6 +269,26 @@ export async function getMapStreets(
       connectorCount: isConnector ? 1 : 0,
     };
 
+    // For partial streets: slice covered portion so map can draw full (grey) + covered (yellow)
+    let coveredGeometry: MapStreet["coveredGeometry"];
+    let coverageInterval: [number, number] | undefined;
+    const intervals = progress.spatialCoverage?.intervals;
+    if (
+      status === "partial" &&
+      intervals?.length &&
+      progress.lengthMeters > 0
+    ) {
+      const startPercent = Math.min(...intervals.map((i) => i[0]));
+      const endPercent = Math.max(...intervals.map((i) => i[1]));
+      coveredGeometry = sliceGeometryByInterval(
+        geometry.geometry,
+        startPercent,
+        endPercent,
+        progress.lengthMeters
+      );
+      coverageInterval = [startPercent, endPercent];
+    }
+
     segments.push({
       osmId: progress.osmId,
       name: progress.name,
@@ -236,6 +297,8 @@ export async function getMapStreets(
       percentage: progress.percentage,
       status,
       geometry: geometry.geometry,
+      ...(coveredGeometry && { coveredGeometry }),
+      ...(coverageInterval && { coverageInterval }),
       stats,
     });
   }
@@ -270,6 +333,48 @@ export async function getMapStreets(
     totalStreets: streets.length,
     completedCount,
     partialCount,
+  };
+}
+
+// ============================================
+// Geometry Helpers
+// ============================================
+
+/**
+ * Slice a LineString by start/end percentage along the line.
+ * Used to produce coveredGeometry for partial streets so the map can draw
+ * the full street (grey) and the covered portion (yellow) separately.
+ *
+ * @param geometry - GeoJSON LineString (full street)
+ * @param startPercent - Start position 0-100
+ * @param endPercent - End position 0-100
+ * @param lengthMeters - Total length in meters (for turf.lineSliceAlong)
+ * @returns Sliced LineString or undefined if slice is invalid
+ */
+function sliceGeometryByInterval(
+  geometry: { type: "LineString"; coordinates: [number, number][] },
+  startPercent: number,
+  endPercent: number,
+  lengthMeters: number
+): MapStreet["coveredGeometry"] | undefined {
+  if (
+    lengthMeters <= 0 ||
+    startPercent >= endPercent ||
+    geometry.coordinates.length < 2
+  ) {
+    return undefined;
+  }
+  const startDist = (lengthMeters * Math.max(0, startPercent)) / 100;
+  const endDist = (lengthMeters * Math.min(100, endPercent)) / 100;
+  if (startDist >= endDist) return undefined;
+
+  const line = turf.lineString(geometry.coordinates);
+  const sliced = turf.lineSliceAlong(line, startDist, endDist, {
+    units: "meters",
+  });
+  return {
+    type: "LineString",
+    coordinates: sliced.geometry.coordinates as [number, number][],
   };
 }
 

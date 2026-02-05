@@ -173,6 +173,7 @@ model UserStreetProgress {
 
   // Progress tracking
   percentage    Float     @default(0)   // 0-100, MAX rule applies
+  spatialCoverage Json?   // { intervals: [[0, 50], [75, 100]] } - covered portions as percentages
   everCompleted Boolean   @default(false) // Once true, always true
 
   // Stats for map info icon

@@ -272,10 +272,12 @@ export async function fetchActivity(
  * - time: Seconds from start
  * - distance: Meters from start
  * - altitude: Elevation in meters
+ * - velocity_smooth: Smoothed velocity in m/s (for GPS error detection)
+ * - moving: Boolean indicating if athlete was moving (for filtering stops)
  *
  * @param accessToken - Valid Strava access token
  * @param activityId - Strava activity ID
- * @returns Stream data with coordinates and timestamps
+ * @returns Stream data with coordinates, timestamps, velocity, and moving status
  * @throws Error if API call fails
  *
  * @example
@@ -291,8 +293,8 @@ export async function fetchActivityStreams(
       `${STRAVA.API_BASE_URL}/activities/${activityId}/streams`,
       {
         params: {
-          // Request these stream types
-          keys: "latlng,time,distance,altitude",
+          // Request these stream types including velocity and moving for quality filtering
+          keys: "latlng,time,distance,altitude,velocity_smooth,moving",
           // Return as object keyed by type (easier to work with)
           key_by_type: true,
         },
@@ -328,23 +330,49 @@ export async function fetchActivityStreams(
 }
 
 /**
- * Convert Strava streams to GpxPoint array
+ * Maximum velocity in m/s for valid running GPS points.
+ * Points with velocity above this are likely GPS errors (teleportation).
+ * 15 m/s = 54 km/h = ~33 mph (faster than any human can run)
+ */
+const MAX_VALID_VELOCITY_MS = 15;
+
+/**
+ * Options for converting Strava streams to GPS points
+ */
+export interface StreamsToGpxOptions {
+  /** Filter out points where velocity exceeds threshold (GPS errors) */
+  filterHighVelocity?: boolean;
+  /** Filter out points where athlete was stopped (reduces noise) */
+  filterStopped?: boolean;
+}
+
+/**
+ * Convert Strava streams to GpxPoint array with quality filtering
  *
  * Transforms Strava's stream format into our internal GpxPoint format
  * that's compatible with the existing street matching services.
  *
+ * Quality filtering (when enabled):
+ * - Filters points with unrealistic velocity (GPS teleportation errors)
+ * - Filters stopped points (reduce noise at traffic lights, etc.)
+ *
  * @param streams - Strava stream data (from fetchActivityStreams)
  * @param startDate - Activity start time (for calculating timestamps)
+ * @param options - Optional filtering options
  * @returns Array of GpxPoint objects ready for street matching
  *
  * @example
  * const streams = await fetchActivityStreams(token, activityId);
- * const points = streamsToGpxPoints(streams, new Date(activity.start_date));
+ * const points = streamsToGpxPoints(streams, new Date(activity.start_date), {
+ *   filterHighVelocity: true,
+ *   filterStopped: true
+ * });
  * const matched = await matchPointsToStreetsHybrid(points, streets);
  */
 export function streamsToGpxPoints(
   streams: StravaStream,
-  startDate: Date
+  startDate: Date,
+  options?: StreamsToGpxOptions
 ): GpxPoint[] {
   // Need at least latlng data
   if (!streams.latlng?.data || streams.latlng.data.length === 0) {
@@ -355,8 +383,31 @@ export function streamsToGpxPoints(
   const latlngData = streams.latlng.data;
   const timeData = streams.time?.data;
   const altitudeData = streams.altitude?.data;
+  const velocityData = streams.velocity_smooth?.data;
+  const movingData = streams.moving?.data;
+
+  const filterHighVelocity = options?.filterHighVelocity ?? true;
+  const filterStopped = options?.filterStopped ?? false; // Default false to preserve existing behavior
+
+  let filteredCount = 0;
 
   for (let i = 0; i < latlngData.length; i++) {
+    // Filter out GPS errors based on velocity
+    if (filterHighVelocity && velocityData && velocityData[i] !== undefined) {
+      if (velocityData[i] > MAX_VALID_VELOCITY_MS) {
+        filteredCount++;
+        continue; // Skip this point - likely GPS teleportation
+      }
+    }
+
+    // Filter out stopped points if requested
+    if (filterStopped && movingData && movingData[i] !== undefined) {
+      if (!movingData[i]) {
+        filteredCount++;
+        continue; // Skip this point - athlete was stopped
+      }
+    }
+
     const [lat, lng] = latlngData[i];
 
     const point: GpxPoint = {
@@ -376,6 +427,12 @@ export function streamsToGpxPoints(
     }
 
     points.push(point);
+  }
+
+  if (filteredCount > 0) {
+    console.log(
+      `[Strava] Filtered ${filteredCount} low-quality GPS points (velocity/stopped)`
+    );
   }
 
   return points;

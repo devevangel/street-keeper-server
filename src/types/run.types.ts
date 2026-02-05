@@ -42,6 +42,14 @@ export interface OsmStreet {
   lengthMeters: number;
   geometry: GeoJsonLineString;
   highwayType: string;
+  /** Alternative names for better cross-source matching */
+  altNames?: string[];
+  /** Road surface type (asphalt, concrete, gravel, etc.) */
+  surface?: string;
+  /** Access restrictions (private, no, permissive, etc.) */
+  access?: string;
+  /** Road reference number (e.g., "A1", "B2154") */
+  ref?: string;
 }
 
 /** Result of matching a single street */
@@ -62,6 +70,17 @@ export interface MatchedStreet {
    */
   geometryDistanceCoveredMeters?: number;
   geometryCoverageRatio?: number;
+
+  /**
+   * Phase 3: Actual coverage interval [start%, end%]
+   * Calculated from GPS point projections onto street geometry.
+   * Used for cumulative spatial coverage tracking.
+   * Example: [10, 75] means runner covered from 10% to 75% of the street.
+   */
+  coverageInterval?: [number, number];
+
+  /** Street geometry for coverage calculations */
+  geometry?: GeoJsonLineString;
 }
 
 /** Successful GPX analysis response */

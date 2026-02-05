@@ -38,7 +38,7 @@ import {
 import { buildComprehensiveAnalysis } from "../services/gpx-analysis.service.js";
 import { isMapboxConfigured, MapboxError } from "../services/mapbox.service.js";
 import { aggregateSegmentsIntoLogicalStreets } from "../services/street-aggregation.service.js";
-import { ERROR_CODES } from "../config/constants.js";
+import { ERROR_CODES, STREET_MATCHING } from "../config/constants.js";
 import type {
   EnhancedAnalyzeGpxResponse,
   GpxErrorResponse,
@@ -214,6 +214,24 @@ router.post(
       );
 
       // ========================================
+      // Step 5b: Safety net - Filter streets with too few points
+      // ========================================
+      // This is a safety net that ensures consistency between hybrid and Overpass-only paths.
+      // Streets with only 1-2 points are likely GPS noise or brief touches, not actual runs.
+      // The Overpass-only path already filters these, but hybrid path may include them.
+      // Even with this filter, determineCompletionStatus also marks low-point streets as PARTIAL.
+      const filteredMatchedStreets = matchedStreets.filter(
+        (s) => s.matchedPointsCount >= STREET_MATCHING.MIN_POINTS_PER_STREET
+      );
+
+      if (filteredMatchedStreets.length < matchedStreets.length) {
+        const removed = matchedStreets.length - filteredMatchedStreets.length;
+        console.log(
+          `[GPX] Filtered out ${removed} street(s) with < ${STREET_MATCHING.MIN_POINTS_PER_STREET} matched points`
+        );
+      }
+
+      // ========================================
       // Step 6: Aggregate segments into logical streets (Phase 4)
       // ========================================
       // Groups OSM way segments by normalized name + highway type
@@ -221,7 +239,7 @@ router.post(
       // Reduces duplicate street entries for better UX
 
       const aggregationResult = aggregateSegmentsIntoLogicalStreets(
-        matchedStreets
+        filteredMatchedStreets
       );
 
       console.log(

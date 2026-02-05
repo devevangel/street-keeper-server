@@ -54,11 +54,21 @@ export interface MapStreet {
   percentage: number;
   /** Display status: completed (green) or partial (yellow) */
   status: "completed" | "partial";
-  /** GeoJSON LineString for drawing the street on the map */
+  /** GeoJSON LineString for the full street (always present) */
   geometry: {
     type: "LineString";
     coordinates: [number, number][];
   };
+  /**
+   * GeoJSON LineString for the covered portion only (partial streets).
+   * Enables map to draw full street in grey and covered part in yellow.
+   */
+  coveredGeometry?: {
+    type: "LineString";
+    coordinates: [number, number][];
+  };
+  /** Coverage interval [start%, end%] along the street (0-100) when partial */
+  coverageInterval?: [number, number];
   /** Stats for the info icon popup */
   stats: MapStreetStats;
 }

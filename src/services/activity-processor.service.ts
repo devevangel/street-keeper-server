@@ -96,7 +96,12 @@ import {
   type OverlapResult,
 } from "./overlap-detection.service.js";
 import { updateProjectProgress } from "./project.service.js";
-import { upsertStreetProgress } from "./user-street-progress.service.js";
+import {
+  upsertStreetProgress,
+  calculateCoverageInterval,
+  type CoverageInterval,
+} from "./user-street-progress.service.js";
+import { getCompletionThreshold } from "../config/constants.js";
 import {
   queryStreetsInRadius,
   queryStreetsInBoundingBox,
@@ -285,7 +290,16 @@ async function processStandaloneActivity(
   const streetProgressInput = namedStreets.map((m) => {
     const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
     const percentage = Math.min(100, Math.round(ratio * 100));
-    const isComplete = ratio >= 0.9;
+    // Use length-based threshold for completion determination
+    const threshold = getCompletionThreshold(m.lengthMeters);
+    const isComplete = ratio >= threshold;
+
+    // Phase 3: Use actual coverage interval from street matching
+    // This is calculated from GPS point projections onto street geometry
+    // Falls back to [0, percentage] if interval not available (e.g., Mapbox-only matches)
+    const coverageInterval: CoverageInterval | undefined =
+      m.coverageInterval ?? (percentage > 0 ? [0, percentage] : undefined);
+
     return {
       osmId: m.osmId,
       name: m.name,
@@ -293,6 +307,7 @@ async function processStandaloneActivity(
       lengthMeters: m.lengthMeters,
       percentage,
       isComplete,
+      coverageInterval,
     };
   });
 
@@ -718,6 +733,9 @@ function calculateRouteImpact(
   // Map: osmId -> MatchedStreet (for raw matches)
   const rawByOsmId = new Map(rawMatchedStreets.map((s) => [s.osmId, s]));
 
+  // Map: normalizedName -> MatchedStreet[] (for grouping segments by name)
+  const rawByName = groupRawMatchesByName(rawMatchedStreets);
+
   // Map: normalizedName -> aggregated street
   const aggregatedByName = new Map(
     aggregatedStreets.map((s) => [s.normalizedName, s])
@@ -729,6 +747,7 @@ function calculateRouteImpact(
     const coverage = findMatchingCoverage(
       snapshotStreet,
       rawByOsmId,
+      rawByName,
       aggregatedByName,
       rawMatchedStreets
     );
@@ -742,12 +761,16 @@ function calculateRouteImpact(
     const newPercentage = Math.min(Math.round(coverage.ratio * 100), 100);
     const oldPercentage = snapshotStreet.percentage;
 
+    // Use length-based threshold for completion determination
+    const threshold = getCompletionThreshold(snapshotStreet.lengthMeters);
+    const thresholdPercentage = Math.round(threshold * 100);
+
     // Only update if coverage increased (MAX rule)
     if (newPercentage > oldPercentage) {
       coverages.push({
         osmId: snapshotStreet.osmId,
         percentage: newPercentage,
-        isComplete: newPercentage >= 90,
+        isComplete: newPercentage >= thresholdPercentage,
       });
 
       // Track improvements
@@ -758,10 +781,16 @@ function calculateRouteImpact(
       });
 
       // Track completions (newly completed)
-      if (newPercentage >= 90 && oldPercentage < 90) {
+      if (
+        newPercentage >= thresholdPercentage &&
+        oldPercentage < thresholdPercentage
+      ) {
         completed.push(snapshotStreet.osmId);
       }
-    } else if (newPercentage >= 90 && oldPercentage >= 90) {
+    } else if (
+      newPercentage >= thresholdPercentage &&
+      oldPercentage >= thresholdPercentage
+    ) {
       // Already complete, still count as coverage but no improvement
       coverages.push({
         osmId: snapshotStreet.osmId,
@@ -778,29 +807,56 @@ function calculateRouteImpact(
 }
 
 /**
+ * Group raw matched streets by normalized name
+ *
+ * Used to aggregate multiple OSM segments (ways) that share the same street name.
+ *
+ * @param rawMatchedStreets - Array of matched streets
+ * @returns Map of normalized name -> MatchedStreet[]
+ */
+function groupRawMatchesByName(
+  rawMatchedStreets: MatchedStreet[]
+): Map<string, MatchedStreet[]> {
+  const grouped = new Map<string, MatchedStreet[]>();
+
+  for (const street of rawMatchedStreets) {
+    const normalized = normalizeStreetNameForMatching(street.name);
+    if (!grouped.has(normalized)) {
+      grouped.set(normalized, []);
+    }
+    grouped.get(normalized)!.push(street);
+  }
+
+  return grouped;
+}
+
+/**
  * Find matching coverage from activity for a snapshot street
  *
  * Tries multiple matching strategies:
- * 1. Direct OSM ID match in raw matched streets
+ * 1. Direct OSM ID match in raw matched streets (most accurate)
  * 2. Normalized name match in aggregated streets
- * 3. Fuzzy name match against all matched streets
+ * 3. Grouped name match: find all raw segments with same name, calculate weighted coverage
+ * 4. Fuzzy name match against all matched streets
  *
  * @param snapshotStreet - Street from route snapshot
  * @param rawByOsmId - Map of OSM ID -> MatchedStreet
+ * @param rawByName - Map of normalized name -> MatchedStreet[] (for segment aggregation)
  * @param aggregatedByName - Map of normalized name -> aggregated street
- * @param rawMatchedStreets - All raw matched streets
+ * @param rawMatchedStreets - All raw matched streets (for fuzzy matching)
  * @returns Coverage ratio or null if not covered
  */
 function findMatchingCoverage(
   snapshotStreet: SnapshotStreet,
   rawByOsmId: Map<string, MatchedStreet>,
+  rawByName: Map<string, MatchedStreet[]>,
   aggregatedByName: Map<
     string,
     { coverageRatio: number; segmentOsmIds: string[] }
   >,
   rawMatchedStreets: MatchedStreet[]
 ): { ratio: number } | null {
-  // Strategy 1: Direct OSM ID match
+  // Strategy 1: Direct OSM ID match (most accurate)
   const rawMatch = rawByOsmId.get(snapshotStreet.osmId);
   if (rawMatch) {
     // Use geometry coverage if available (more accurate)
@@ -808,14 +864,35 @@ function findMatchingCoverage(
     return { ratio };
   }
 
-  // Strategy 2: Normalized name match
+  // Strategy 2: Normalized name match in aggregated streets
   const normalizedName = normalizeStreetNameForMatching(snapshotStreet.name);
   const aggregatedMatch = aggregatedByName.get(normalizedName);
   if (aggregatedMatch) {
     return { ratio: aggregatedMatch.coverageRatio };
   }
 
-  // Strategy 3: Fuzzy name match
+  // Strategy 3: Grouped name match - find all raw segments with same name
+  // This handles cases where Mapbox matched different OSM segments than the snapshot
+  const nameMatches = rawByName.get(normalizedName);
+  if (nameMatches && nameMatches.length > 0) {
+    // Calculate length-weighted average coverage across all segments
+    const totalLength = nameMatches.reduce((sum, s) => sum + s.lengthMeters, 0);
+    if (totalLength > 0) {
+      const weightedCoverage = nameMatches.reduce((sum, s) => {
+        const ratio = s.geometryCoverageRatio ?? s.coverageRatio;
+        return sum + ratio * s.lengthMeters;
+      }, 0);
+      const ratio = weightedCoverage / totalLength;
+      console.log(
+        `[Coverage] Name match for "${snapshotStreet.name}" (${
+          nameMatches.length
+        } segments): ${(ratio * 100).toFixed(1)}%`
+      );
+      return { ratio };
+    }
+  }
+
+  // Strategy 4: Fuzzy name match
   for (const matched of rawMatchedStreets) {
     if (streetNamesMatch(snapshotStreet.name, matched.name)) {
       const ratio = matched.geometryCoverageRatio ?? matched.coverageRatio;

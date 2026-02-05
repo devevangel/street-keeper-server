@@ -9,6 +9,7 @@
  * - Calculating line/street lengths
  * - Projecting GPS points onto street geometry (Phase 2)
  * - Measuring distance along street geometry (Phase 2)
+ * - Trajectory calculation for intersection ambiguity resolution (Phase 3)
  *
  * All distance calculations return values in METERS.
  *
@@ -20,6 +21,11 @@
  * - Measures distance along the street geometry itself
  * - More accurate than measuring distance between GPS points
  * - Accounts for GPS drift (typically 5-15m accuracy)
+ *
+ * Phase 3 Enhancement: Trajectory-Aware Point Assignment
+ * - Calculates direction of movement from surrounding GPS points
+ * - Uses trajectory to resolve ambiguous street assignments at intersections
+ * - Improves accuracy when GPS points are equidistant from multiple streets
  */
 
 import * as turf from "@turf/turf";
@@ -475,4 +481,167 @@ function calculateSegmentGeometryDistance(
   }
 
   return segmentDistance;
+}
+
+// ============================================
+// Phase 3: Trajectory Calculation
+// ============================================
+
+/**
+ * Calculate bearing (direction) between two GPS points in degrees.
+ *
+ * Bearing is the compass direction from point A to point B:
+ * - 0° = North
+ * - 90° = East
+ * - 180° = South
+ * - 270° = West
+ *
+ * Uses the forward azimuth formula for accurate bearing calculation.
+ *
+ * @param from - Starting GPS point
+ * @param to - Ending GPS point
+ * @returns Bearing in degrees (0-360)
+ *
+ * @example
+ * const bearing = calculateBearing(
+ *   { lat: 50.7989, lng: -1.0912 },
+ *   { lat: 50.7991, lng: -1.0915 }
+ * );
+ * // Returns: ~135° (southeast direction)
+ */
+export function calculateBearing(from: GpxPoint, to: GpxPoint): number {
+  const dLng = ((to.lng - from.lng) * Math.PI) / 180;
+  const lat1 = (from.lat * Math.PI) / 180;
+  const lat2 = (to.lat * Math.PI) / 180;
+
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+/**
+ * Normalize an angle to 0-360 degrees range.
+ *
+ * @param angle - Angle in degrees (can be negative or > 360)
+ * @returns Normalized angle (0-360)
+ */
+export function normalizeAngle(angle: number): number {
+  return ((angle % 360) + 360) % 360;
+}
+
+/**
+ * Calculate average of two bearings.
+ *
+ * Handles the circular nature of bearings (e.g., average of 350° and 10° is 0°, not 180°).
+ *
+ * @param b1 - First bearing in degrees
+ * @param b2 - Second bearing in degrees
+ * @returns Average bearing in degrees (0-360)
+ */
+export function averageBearing(b1: number, b2: number): number {
+  const x = Math.cos((b1 * Math.PI) / 180) + Math.cos((b2 * Math.PI) / 180);
+  const y = Math.sin((b1 * Math.PI) / 180) + Math.sin((b2 * Math.PI) / 180);
+  return (Math.atan2(y, x) * 180) / Math.PI;
+}
+
+/**
+ * Calculate trajectory (direction of movement) from surrounding GPS points.
+ *
+ * Uses a sliding window approach to determine the runner's direction of travel:
+ * - Looks back up to 3 points (if available)
+ * - Looks ahead up to 3 points (if available)
+ * - Calculates average bearing from movement
+ *
+ * This helps resolve ambiguous street assignments at intersections by considering
+ * which direction the runner is actually moving, not just which street is closest.
+ *
+ * @param points - Array of GPS points
+ * @param currentIndex - Index of the current point
+ * @returns Trajectory bearing in degrees (0-360), or 0 if insufficient data
+ *
+ * @example
+ * // Points moving northeast
+ * const trajectory = calculateTrajectory(points, 5);
+ * // Returns: ~45° (northeast direction)
+ */
+export function calculateTrajectory(
+  points: GpxPoint[],
+  currentIndex: number
+): number {
+  const lookback = Math.min(3, currentIndex);
+  const lookahead = Math.min(3, points.length - currentIndex - 1);
+
+  if (lookback === 0 && lookahead === 0) return 0;
+
+  const prevPoint = lookback > 0 ? points[currentIndex - lookback] : null;
+  const nextPoint = lookahead > 0 ? points[currentIndex + lookahead] : null;
+  const currentPoint = points[currentIndex];
+
+  if (prevPoint && nextPoint) {
+    // Average of incoming and outgoing bearings (most accurate)
+    const inBearing = calculateBearing(prevPoint, currentPoint);
+    const outBearing = calculateBearing(currentPoint, nextPoint);
+    return normalizeAngle(averageBearing(inBearing, outBearing));
+  }
+
+  if (prevPoint) {
+    // Only have previous point - use incoming direction
+    return normalizeAngle(calculateBearing(prevPoint, currentPoint));
+  }
+
+  if (nextPoint) {
+    // Only have next point - use outgoing direction
+    return normalizeAngle(calculateBearing(currentPoint, nextPoint));
+  }
+
+  return 0;
+}
+
+/**
+ * Calculate the bearing (direction) of a street at a given point.
+ *
+ * Finds the nearest point on the street geometry to the GPS point,
+ * then calculates the direction of the street at that location.
+ *
+ * @param streetGeometry - GeoJSON LineString representing the street
+ * @param point - GPS point near the street
+ * @returns Street bearing in degrees (0-360)
+ */
+export function calculateStreetBearing(
+  streetGeometry: GeoJsonLineString,
+  point: GpxPoint
+): number {
+  const coords = streetGeometry.coordinates;
+  if (coords.length < 2) return 0;
+
+  // Find the nearest segment on the street
+  let nearestSegmentIndex = 0;
+  let nearestDistance = Infinity;
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const segDistance = pointToLineDistance(point, [
+      [coords[i][0], coords[i][1]],
+      [coords[i + 1][0], coords[i + 1][1]],
+    ]);
+
+    if (segDistance < nearestDistance) {
+      nearestDistance = segDistance;
+      nearestSegmentIndex = i;
+    }
+  }
+
+  // Calculate bearing of the nearest segment
+  const segStart = {
+    lat: coords[nearestSegmentIndex][1],
+    lng: coords[nearestSegmentIndex][0],
+  };
+  const segEnd = {
+    lat: coords[nearestSegmentIndex + 1][1],
+    lng: coords[nearestSegmentIndex + 1][0],
+  };
+
+  return normalizeAngle(calculateBearing(segStart, segEnd));
 }

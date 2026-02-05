@@ -83,6 +83,16 @@ export interface MapboxLeg {
 
   /** Summary string (usually empty for map matching) */
   summary: string;
+
+  /** Annotation data for speed/duration validation (when requested) */
+  annotation?: {
+    /** Distance in meters between each coordinate pair */
+    distance?: number[];
+    /** Duration in seconds between each coordinate pair */
+    duration?: number[];
+    /** Speed in m/s between each coordinate pair */
+    speed?: number[];
+  };
 }
 
 /**
@@ -297,6 +307,121 @@ export function extractStreetsFromMatch(
 
   // Sort by distance (most distance first)
   return streets.sort((a, b) => b.distanceMeters - a.distanceMeters);
+}
+
+/**
+ * Validation result for Mapbox match speed analysis
+ */
+export interface SpeedValidationResult {
+  /** Whether the match appears valid based on speed */
+  isValid: boolean;
+  /** Average speed across all segments (m/s) */
+  averageSpeed: number;
+  /** Maximum speed observed (m/s) */
+  maxSpeed: number;
+  /** Number of segments with suspiciously high speed */
+  highSpeedSegments: number;
+  /** Suggested confidence adjustment factor (0-1) */
+  confidenceAdjustment: number;
+  /** Warning message if any issues found */
+  warning?: string;
+}
+
+/**
+ * Validate Mapbox match result using speed annotations
+ *
+ * Uses speed data from Mapbox annotations to detect potential mismatches
+ * or GPS errors. Unrealistic speeds (too fast or too slow) indicate
+ * potential issues with the match quality.
+ *
+ * @param matchResult - Mapbox match response
+ * @returns Validation result with speed statistics and confidence adjustment
+ *
+ * @example
+ * const result = await mapMatchGpsTrace(points);
+ * const validation = validateMatchSpeeds(result);
+ * if (!validation.isValid) {
+ *   console.warn(validation.warning);
+ *   // Consider falling back to Overpass-only matching
+ * }
+ */
+export function validateMatchSpeeds(
+  matchResult: MapboxMatchResponse
+): SpeedValidationResult {
+  const allSpeeds: number[] = [];
+  let highSpeedCount = 0;
+
+  // Extract all speed values from annotations
+  for (const matching of matchResult.matchings) {
+    for (const leg of matching.legs) {
+      if (leg.annotation?.speed) {
+        for (const speed of leg.annotation.speed) {
+          allSpeeds.push(speed);
+          if (speed > MAPBOX.MAX_EXPECTED_SPEED_MS) {
+            highSpeedCount++;
+          }
+        }
+      }
+    }
+  }
+
+  // If no speed data, assume valid (annotations might not be available)
+  if (allSpeeds.length === 0) {
+    return {
+      isValid: true,
+      averageSpeed: 0,
+      maxSpeed: 0,
+      highSpeedSegments: 0,
+      confidenceAdjustment: 1.0,
+    };
+  }
+
+  const averageSpeed =
+    allSpeeds.reduce((sum, s) => sum + s, 0) / allSpeeds.length;
+  const maxSpeed = Math.max(...allSpeeds);
+  const highSpeedRatio = highSpeedCount / allSpeeds.length;
+
+  // Determine if match is valid and calculate confidence adjustment
+  let isValid = true;
+  let confidenceAdjustment = 1.0;
+  let warning: string | undefined;
+
+  // Too many high-speed segments suggest GPS errors in the match
+  if (highSpeedRatio > 0.1) {
+    isValid = false;
+    confidenceAdjustment = Math.max(0.3, 1.0 - highSpeedRatio * 2);
+    warning = `${(highSpeedRatio * 100).toFixed(1)}% of segments have unrealistic speeds (>${MAPBOX.MAX_EXPECTED_SPEED_MS} m/s)`;
+  }
+  // Average speed too high for running/walking
+  else if (averageSpeed > MAPBOX.MAX_EXPECTED_SPEED_MS * 0.8) {
+    isValid = false;
+    confidenceAdjustment = 0.5;
+    warning = `Average speed (${averageSpeed.toFixed(1)} m/s) is too high for running/walking`;
+  }
+  // Average speed too low might indicate many stopped segments incorrectly matched
+  else if (
+    averageSpeed < MAPBOX.MIN_EXPECTED_SPEED_MS &&
+    allSpeeds.length > 10
+  ) {
+    confidenceAdjustment = 0.8;
+    warning = `Average speed (${averageSpeed.toFixed(1)} m/s) is unusually low`;
+  }
+  // Some high-speed segments - reduce confidence slightly
+  else if (highSpeedCount > 0) {
+    confidenceAdjustment = Math.max(0.7, 1.0 - highSpeedCount * 0.05);
+    if (highSpeedCount > 5) {
+      warning = `${highSpeedCount} segments have high speeds (possible GPS jumps)`;
+    }
+  }
+
+  return {
+    isValid,
+    averageSpeed: Math.round(averageSpeed * 100) / 100,
+    maxSpeed: Math.round(maxSpeed * 100) / 100,
+    highSpeedSegments: highSpeedCount,
+    confidenceAdjustment,
+    warning,
+  };
 }
 
 // ============================================
