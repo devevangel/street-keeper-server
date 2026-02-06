@@ -33,6 +33,7 @@ model User {
   projects        Project[]
   activities      Activity[]
   streetProgress  UserStreetProgress[]
+  edges           UserEdge[]
 }
 
 // ============================================
@@ -189,4 +190,79 @@ model UserStreetProgress {
   @@unique([userId, osmId])
   @@index([userId])
   @@index([userId, percentage])
+}
+
+// ============================================
+// User Edge Model (Parser-Test: Edge-Based System)
+// ============================================
+// Stores completed edges per user. Edges are truth, streets are derived.
+// One row per edge per user. Edges are normalized (nodeA < nodeB always).
+
+model UserEdge {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Edge identity (normalized: nodeA < nodeB always)
+  edgeId        String    // Format: "{nodeA}-{nodeB}" e.g. "123456-123457"
+  nodeA         BigInt    // Smaller OSM node ID
+  nodeB         BigInt    // Larger OSM node ID
+  
+  // Way information (for street derivation)
+  wayId         BigInt    // OSM way ID this edge belongs to
+  wayName       String?   // Street name (denormalized for display)
+  highwayType   String    // e.g. residential, footway
+  
+  // Edge metadata
+  lengthMeters  Float     // Edge length in meters
+  
+  // Tracking
+  firstRunAt    DateTime  // When first completed
+  runCount      Int       @default(1) // Times traversed
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([userId, edgeId])  // One edge per user (idempotent)
+  @@index([userId])           // Fast: "all edges for user X"
+  @@index([userId, wayId])    // Fast: "all edges for user X on way Y"
+  @@index([wayId])            // Fast: "all users who completed this way"
+}
+
+// ============================================
+// Way Cache Model (Parser-Test: Performance Optimization)
+// ============================================
+// Caches node-to-way mappings to avoid per-run Overpass queries.
+// Critical for performance - avoids hitting Overpass API repeatedly.
+
+model WayCache {
+  id            String    @id @default(uuid())
+  
+  // Node to way mapping
+  nodeId        BigInt    @unique  // OSM node ID
+  wayIds        Json      // Array of way IDs containing this node: [wayId1, wayId2, ...]
+  
+  // Way metadata (denormalized for fast lookup)
+  // Structure: { wayId: { name, highwayType, nodeSequence: [nodeA, nodeB, ...] } }
+  wayMetadata   Json
+  
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime  // Cache expiry (e.g. 30 days)
+  
+  @@index([nodeId])
+  @@index([expiresAt])
+}
+
+// ============================================
+// Way Total Edges (Parser-Test: Street Completion)
+// ============================================
+// One row per way: total edge count (nodes.length - 1). Filled by seed script.
+// Used to compute isComplete: edgesCompleted >= totalEdges.
+
+model WayTotalEdges {
+  wayId       BigInt   @id  // OSM way ID
+  totalEdges  Int            // nodes.length - 1 for this way
+  name        String?         // Denormalized for display
+  highwayType String         // e.g. residential, footway
+  createdAt   DateTime @default(now())
 }

@@ -4,9 +4,10 @@
  * Deletes in order (respecting FKs):
  *   1. ProjectActivity
  *   2. UserStreetProgress
- *   3. Activity
+ *   3. UserEdge (when GPX_ENGINE_VERSION is v2 or both)
+ *   4. Activity
  *
- * Keeps: User, Project, GeometryCache.
+ * Keeps: User, Project, GeometryCache, WayCache, WayTotalEdges.
  * After running, click Sync with Strava to re-fetch and fully re-process.
  *
  * Usage (from backend directory):
@@ -18,6 +19,7 @@
 import "dotenv/config";
 
 import prisma from "../lib/prisma.js";
+import { ENGINE } from "../config/constants.js";
 
 async function main(): Promise<void> {
   const pa = await prisma.projectActivity.deleteMany({});
@@ -25,6 +27,11 @@ async function main(): Promise<void> {
 
   const usp = await prisma.userStreetProgress.deleteMany({});
   console.log(`[Wipe] Deleted ${usp.count} UserStreetProgress rows.`);
+
+  if (ENGINE.VERSION === "v2" || ENGINE.VERSION === "both") {
+    const ue = await prisma.userEdge.deleteMany({});
+    console.log(`[Wipe] Deleted ${ue.count} UserEdge rows.`);
+  }
 
   const act = await prisma.activity.deleteMany({});
   console.log(`[Wipe] Deleted ${act.count} Activity rows.`);
