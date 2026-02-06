@@ -8,6 +8,7 @@
  * - Error reference (/docs/errors)
  * - Frontend integration guide (/docs/frontend)
  * - Engines comparison (/docs/engines)
+ * - How engines work (/docs/how-engines-work)
  */
 
 import { Router, Request, Response } from "express";
@@ -67,6 +68,7 @@ const navItems = [
   { href: "/docs/errors", label: "Error Reference", icon: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" },
   { href: "/docs/frontend", label: "Frontend Guide", icon: "M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" },
   { href: "/docs/engines", label: "Engines", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
+  { href: "/docs/how-engines-work", label: "How Engines Work", icon: "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" },
 ];
 
 /**
@@ -326,6 +328,16 @@ router.get("/", (req: Request, res: Response) => {
         <p class="text-gray-400">Compare the V1 (Overpass + Mapbox) and V2 (OSRM edge-based) GPX analysis engines, endpoints, progress storage, and configuration.</p>
       </a>
 
+      <a href="/docs/how-engines-work" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">How the Engines Work</h2>
+        </div>
+        <p class="text-gray-400">Plain-English guide to GPX, PBF, V1 and V2 pipelines, street matching, and how each layer works from upload to output.</p>
+      </a>
+
       <div class="block p-6 bg-gray-800 rounded-lg border-2 border-dashed border-gray-600">
         <div class="flex items-center mb-4">
           <svg class="h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -505,6 +517,19 @@ router.get("/engines", (req: Request, res: Response) => {
     ? (marked.parse(fs.readFileSync(filePath, "utf-8")) as string)
     : '<p class="text-red-400">Engine docs not found</p>';
   res.send(wrapInHtml("Engines", content, "/docs/engines"));
+});
+
+// ============================================
+// How Engines Work (plain-English guide)
+// ============================================
+
+/**
+ * GET /docs/how-engines-work
+ * Plain-English guide to GPX, PBF, V1/V2 pipelines, and street matching
+ */
+router.get("/how-engines-work", (req: Request, res: Response) => {
+  const content = readMarkdownFile("HOW_ENGINES_WORK.md");
+  res.send(wrapInHtml("How the Engines Work", content, "/docs/how-engines-work"));
 });
 
 // ============================================
