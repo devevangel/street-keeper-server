@@ -7,6 +7,7 @@
  * - Type reference (/docs/types)
  * - Error reference (/docs/errors)
  * - Frontend integration guide (/docs/frontend)
+ * - Engines comparison (/docs/engines)
  */
 
 import { Router, Request, Response } from "express";
@@ -49,6 +50,7 @@ marked.use({ renderer });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const docsDir = path.join(__dirname, "..", "docs");
+const enginesDir = path.join(__dirname, "..", "engines");
 
 // ============================================
 // HTML Template Helpers
@@ -64,6 +66,7 @@ const navItems = [
   { href: "/docs/architecture", label: "Architecture", icon: "M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" },
   { href: "/docs/errors", label: "Error Reference", icon: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" },
   { href: "/docs/frontend", label: "Frontend Guide", icon: "M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" },
+  { href: "/docs/engines", label: "Engines", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
 ];
 
 /**
@@ -313,6 +316,16 @@ router.get("/", (req: Request, res: Response) => {
         <p class="text-gray-400">Copy-paste ready code examples for React + TypeScript integration with fetch and axios.</p>
       </a>
 
+      <a href="/docs/engines" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-cyan-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">Engines (V1 vs V2)</h2>
+        </div>
+        <p class="text-gray-400">Compare the V1 (Overpass + Mapbox) and V2 (OSRM edge-based) GPX analysis engines, endpoints, progress storage, and configuration.</p>
+      </a>
+
       <div class="block p-6 bg-gray-800 rounded-lg border-2 border-dashed border-gray-600">
         <div class="flex items-center mb-4">
           <svg class="h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -368,24 +381,6 @@ router.get("/", (req: Request, res: Response) => {
             </tr>
             <tr class="border-b border-gray-700">
               <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
-              <td class="py-3 px-4 font-mono text-sm">/routes</td>
-              <td class="py-3 px-4">List user's routes</td>
-              <td class="py-3 px-4">Yes</td>
-            </tr>
-            <tr class="border-b border-gray-700">
-              <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
-              <td class="py-3 px-4 font-mono text-sm">/routes</td>
-              <td class="py-3 px-4">Create a new route</td>
-              <td class="py-3 px-4">Yes</td>
-            </tr>
-            <tr class="border-b border-gray-700">
-              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
-              <td class="py-3 px-4 font-mono text-sm">/routes/:id</td>
-              <td class="py-3 px-4">Get route detail with streets</td>
-              <td class="py-3 px-4">Yes</td>
-            </tr>
-            <tr class="border-b border-gray-700">
-              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
               <td class="py-3 px-4 font-mono text-sm">/activities</td>
               <td class="py-3 px-4">List user's activities</td>
               <td class="py-3 px-4">Yes</td>
@@ -393,8 +388,44 @@ router.get("/", (req: Request, res: Response) => {
             <tr class="border-b border-gray-700">
               <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
               <td class="py-3 px-4 font-mono text-sm">/runs/analyze-gpx</td>
-              <td class="py-3 px-4">Upload and analyze GPX file</td>
+              <td class="py-3 px-4">Upload and analyze GPX file (legacy)</td>
               <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v1</td>
+              <td class="py-3 px-4">Engine V1 info</td>
+              <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v1/analyze</td>
+              <td class="py-3 px-4">Analyze GPX (V1)</td>
+              <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2</td>
+              <td class="py-3 px-4">Engine V2 info</td>
+              <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2/streets</td>
+              <td class="py-3 px-4">User streets (V2)</td>
+              <td class="py-3 px-4">Yes</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2/map/streets</td>
+              <td class="py-3 px-4">Map streets (V2)</td>
+              <td class="py-3 px-4">Yes</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2/analyze</td>
+              <td class="py-3 px-4">Analyze GPX (V2)</td>
+              <td class="py-3 px-4">No (userId query)</td>
             </tr>
           </tbody>
         </table>
@@ -458,6 +489,22 @@ router.use("/api", swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 router.get("/architecture", (req: Request, res: Response) => {
   const content = readMarkdownFile("ARCHITECTURE.md");
   res.send(wrapInHtml("Architecture", content, "/docs/architecture"));
+});
+
+// ============================================
+// Engines Documentation
+// ============================================
+
+/**
+ * GET /docs/engines
+ * V1 vs V2 engine comparison and configuration
+ */
+router.get("/engines", (req: Request, res: Response) => {
+  const filePath = path.join(enginesDir, "ENGINE_COMPARISON.md");
+  const content = fs.existsSync(filePath)
+    ? (marked.parse(fs.readFileSync(filePath, "utf-8")) as string)
+    : '<p class="text-red-400">Engine docs not found</p>';
+  res.send(wrapInHtml("Engines", content, "/docs/engines"));
 });
 
 // ============================================

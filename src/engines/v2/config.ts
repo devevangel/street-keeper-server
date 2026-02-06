@@ -5,6 +5,13 @@
  * All thresholds are binary gates - pass = accept, fail = reject.
  */
 
+/**
+ * V2 engine configuration constants.
+ * - osrm: OSRM map-matching base URL, profile (foot), timeout, max coordinates per request.
+ * - validation: min edge length, max speed, excluded highway types (e.g. service, driveway).
+ * - overpass: Overpass API URL and optional SKIP_OVERPASS to use only WayCache.
+ * - cache: way data expiry in days.
+ */
 export const PARSER_CONFIG = {
   // ============================================
   // OSRM Map Matching Configuration

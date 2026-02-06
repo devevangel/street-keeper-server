@@ -9,12 +9,14 @@
 // Module 1: GPX Parser Types
 // ============================================
 
+/** Single GPS coordinate with optional timestamp */
 export interface GpxPoint {
   lat: number;
   lng: number;
   time: string | null;
 }
 
+/** Parsed GPX data with coordinates and metadata */
 export interface ParsedGpx {
   name: string | null;
   points: GpxPoint[];
@@ -25,6 +27,7 @@ export interface ParsedGpx {
 // Module 2: OSRM Matcher Types
 // ============================================
 
+/** Result of OSRM map matching */
 export interface OsrmMatchResult {
   confidence: number; // 0.0 to 1.0 (UX ONLY - never blocks edges)
   geometry: {
@@ -41,6 +44,7 @@ export interface OsrmMatchResult {
 // Module 3: Way Resolver Types
 // ============================================
 
+/** A node pair resolved to an OSM way */
 export interface ResolvedEdge {
   nodeA: bigint;
   nodeB: bigint;
@@ -50,6 +54,7 @@ export interface ResolvedEdge {
   lengthMeters: number;
 }
 
+/** Result of way resolution from node pairs */
 export interface WayResolverResult {
   resolvedEdges: ResolvedEdge[];
   cacheHits: number;
@@ -61,6 +66,7 @@ export interface WayResolverResult {
 // Module 4: Edge Builder Types
 // ============================================
 
+/** An edge that passed or failed validation */
 export interface ValidatedEdge {
   edgeId: string; // "{nodeA}-{nodeB}" normalized
   nodeA: bigint;
@@ -73,6 +79,7 @@ export interface ValidatedEdge {
   rejectionReason?: string;
 }
 
+/** Result of edge building and validation */
 export interface EdgeBuilderResult {
   validEdges: ValidatedEdge[];
   rejectedEdges: ValidatedEdge[];
@@ -88,6 +95,7 @@ export interface EdgeBuilderResult {
 // API Response Types
 // ============================================
 
+/** Per-way completion from UserEdge data */
 export interface StreetCompletion {
   wayId: bigint;
   name: string | null;
@@ -96,6 +104,7 @@ export interface StreetCompletion {
   isComplete: boolean;
 }
 
+/** Streets grouped by name for client display */
 export interface GroupedStreet {
   name: string; // Street name (or "Unnamed")
   wayIds: string[]; // All OSM way IDs for this street
@@ -105,6 +114,7 @@ export interface GroupedStreet {
   completionPercent: number; // edgesCompleted / edgesTotal * 100, rounded
 }
 
+/** Response from POST /engine-v2/analyze */
 export interface AnalyzeGpxResponse {
   success: boolean;
   run: {

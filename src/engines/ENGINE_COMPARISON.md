@@ -54,6 +54,14 @@ Street Keeper exposes two GPX analysis engines. Both produce street-level covera
   - When `v1`: GPX analysis uses POST /runs/analyze-gpx; the home map uses GET /map/streets.
 - **Interaction**: Backend `GPX_ENGINE_VERSION` determines what data gets written when activities are synced. Frontend `VITE_GPX_ENGINE` determines which API the client reads from. For a full v2 experience: set `GPX_ENGINE_VERSION=v2` (or `both`) and `VITE_GPX_ENGINE=v2`. During migration, `GPX_ENGINE_VERSION=both` with `VITE_GPX_ENGINE=v2` keeps v1 data updated while you use the v2 map.
 
+## What is a PBF file? (in simple terms)
+
+A **PBF file** (Protocol Buffer Binary) is OpenStreetMap’s compact, efficient format for storing map data for a region (e.g. a country or state). Think of it as a snapshot of roads, paths, and their IDs and geometry in that area.
+
+- **What it’s used for here:** In V2 we need to know which “ways” (street segments) your run touched. We can get that either by querying Overpass on demand or by **preloading** way data from a regional PBF into a local **WayCache**. Using a PBF lets us avoid live Overpass calls and run fully offline (e.g. with `SKIP_OVERPASS=true`).
+
+**Similar products and the same accuracy challenge:** Apps like **City Strides** do the same kind of thing: they track which streets you’ve run and show completion. They (and we) face the **same core accuracy problem**: GPS points from your watch or phone are imprecise, and “snapping” them to the map (map-matching) can misassign a stretch of run to the wrong street or segment. So street coverage is always an approximation—we try to get it right with OSRM (V2) or Mapbox/Overpass (V1), but edge cases (parallel roads, short segments, bad GPS) will still cause occasional mismatches or missed segments.
+
 ## WayCache (V2)
 
 To avoid Overpass for way resolution in v2, precompute WayCache from a regional PBF and set `SKIP_OVERPASS=true`. See `engines/v2/README.md` and `src/scripts/seed-way-cache-from-pbf.ts`.

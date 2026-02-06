@@ -61,6 +61,14 @@ In production, authentication is handled via Strava OAuth.
         name: "Map",
         description: "Map view (streets with progress and geometry)",
       },
+      {
+        name: "Engine V1",
+        description: "V1 engine: Overpass + Mapbox hybrid GPX analysis",
+      },
+      {
+        name: "Engine V2",
+        description: "V2 engine: OSRM edge-based street coverage with UserEdge persistence",
+      },
     ],
     components: {
       securitySchemes: {
@@ -750,6 +758,98 @@ In production, authentication is handled via Strava OAuth.
           },
         },
 
+        V2GroupedStreet: {
+          type: "object",
+          description: "Street grouped by name for client display (V2)",
+          required: [
+            "name",
+            "wayIds",
+            "edgesTotal",
+            "edgesCompleted",
+            "isComplete",
+            "completionPercent",
+          ],
+          properties: {
+            name: { type: "string", description: "Street name or 'Unnamed'" },
+            wayIds: {
+              type: "array",
+              items: { type: "string" },
+              description: "OSM way IDs for this street",
+            },
+            edgesTotal: { type: "integer", description: "Total edges across all ways" },
+            edgesCompleted: { type: "integer", description: "Unique edges completed" },
+            isComplete: { type: "boolean", description: "True if all ways are complete" },
+            completionPercent: {
+              type: "number",
+              description: "edgesCompleted / edgesTotal * 100, rounded",
+            },
+          },
+        },
+
+        V2AnalyzeGpxResponse: {
+          type: "object",
+          description: "Response from POST /engine-v2/analyze",
+          required: ["success", "run", "path", "edges", "streets", "warnings"],
+          properties: {
+            success: { type: "boolean", enum: [true] },
+            run: {
+              type: "object",
+              properties: {
+                name: { type: "string", nullable: true },
+                date: { type: "string", description: "ISO 8601" },
+                totalPoints: { type: "integer" },
+                matchedPoints: { type: "integer" },
+                matchConfidence: { type: "number" },
+                distanceMeters: { type: "number" },
+              },
+            },
+            path: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["LineString"] },
+                coordinates: {
+                  type: "array",
+                  items: {
+                    type: "array",
+                    items: { type: "number" },
+                    minItems: 2,
+                    maxItems: 2,
+                  },
+                  description: "[lng, lat] pairs",
+                },
+              },
+            },
+            edges: {
+              type: "object",
+              properties: {
+                total: { type: "integer" },
+                valid: { type: "integer" },
+                rejected: { type: "integer" },
+                list: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      edgeId: { type: "string" },
+                      wayId: { type: "string" },
+                      wayName: { type: "string", nullable: true },
+                      lengthMeters: { type: "number" },
+                    },
+                  },
+                },
+              },
+            },
+            streets: {
+              type: "array",
+              items: { $ref: "#/components/schemas/V2GroupedStreet" },
+            },
+            warnings: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+        },
+
         // ============================================
         // Map Schemas
         // ============================================
@@ -973,7 +1073,7 @@ In production, authentication is handled via Strava OAuth.
       },
     },
   },
-  apis: ["./src/routes/*.ts"],
+  apis: ["./src/routes/*.ts", "./src/engines/**/*.routes.ts"],
 };
 
 export const swaggerSpec = swaggerJsdoc(options);
