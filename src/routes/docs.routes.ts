@@ -9,6 +9,7 @@
  * - Frontend integration guide (/docs/frontend)
  * - Engines comparison (/docs/engines)
  * - How engines work (/docs/how-engines-work)
+ * - Database (/docs/database)
  */
 
 import { Router, Request, Response } from "express";
@@ -69,6 +70,7 @@ const navItems = [
   { href: "/docs/frontend", label: "Frontend Guide", icon: "M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" },
   { href: "/docs/engines", label: "Engines", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
   { href: "/docs/how-engines-work", label: "How Engines Work", icon: "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" },
+  { href: "/docs/database", label: "Database", icon: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" },
 ];
 
 /**
@@ -338,6 +340,16 @@ router.get("/", (req: Request, res: Response) => {
         <p class="text-gray-400">Plain-English guide to GPX, PBF, V1 and V2 pipelines, street matching, and how each layer works from upload to output.</p>
       </a>
 
+      <a href="/docs/database" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">Database</h2>
+        </div>
+        <p class="text-gray-400">Plain-English guide to all 9 Prisma models: User, Project, Activity, UserEdge, WayCache, and more. Relationships, design choices, and analogies.</p>
+      </a>
+
       <div class="block p-6 bg-gray-800 rounded-lg border-2 border-dashed border-gray-600">
         <div class="flex items-center mb-4">
           <svg class="h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -530,6 +542,19 @@ router.get("/engines", (req: Request, res: Response) => {
 router.get("/how-engines-work", (req: Request, res: Response) => {
   const content = readMarkdownFile("HOW_ENGINES_WORK.md");
   res.send(wrapInHtml("How the Engines Work", content, "/docs/how-engines-work"));
+});
+
+// ============================================
+// Database Documentation
+// ============================================
+
+/**
+ * GET /docs/database
+ * Plain-English guide to all 9 Prisma models, relationships, and design choices
+ */
+router.get("/database", (req: Request, res: Response) => {
+  const content = readMarkdownFile("DATABASE.md");
+  res.send(wrapInHtml("Database", content, "/docs/database"));
 });
 
 // ============================================

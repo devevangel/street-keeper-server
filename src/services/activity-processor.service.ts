@@ -103,6 +103,7 @@ import {
 } from "./user-street-progress.service.js";
 import { getCompletionThreshold, ENGINE } from "../config/constants.js";
 import { processActivityV2 } from "../engines/v2/process-activity.js";
+import { deriveProjectProgressV2 } from "../engines/v2/street-completion.js";
 import {
   queryStreetsInRadius,
   queryStreetsInBoundingBox,
@@ -548,15 +549,14 @@ export async function recheckActivityForNewProjects(
 /**
  * Process a single project overlap
  *
- * For a project that overlaps with the activity:
- * 1. Gets the project's current snapshot
- * 2. Queries street geometries (from cache or Overpass)
- * 3. Matches GPS points to streets
- * 4. Calculates coverage for each street
- * 5. Updates project progress
- * 6. Updates user-level street progress (for map feature)
- * 7. Saves the project-activity relationship
- * When ENGINE.VERSION is v2 or both, also runs v2 pipeline for UserEdge.
+ * When ENGINE.VERSION is v1: Gets snapshot, queries geometries, matches GPS to streets,
+ * calculates coverage, updates project progress and UserStreetProgress, saves ProjectActivity.
+ *
+ * When ENGINE.VERSION is v2: Runs processActivityV2 first (persist UserEdge), then
+ * deriveProjectProgressV2 to get percentages from UserEdge + WayTotalEdges; updates
+ * project progress and UserStreetProgress from that; saves ProjectActivity. No Overpass/Mapbox.
+ *
+ * When ENGINE.VERSION is both: Same as v1, then also runs processActivityV2 for UserEdge.
  */
 async function processProjectOverlap(
   activityId: string,
@@ -586,7 +586,72 @@ async function processProjectOverlap(
   }
 
   const snapshot = projectData.streetsSnapshot as StreetSnapshot;
+  const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
 
+  // When ENGINE.VERSION is v2, use V2 pipeline only: persist edges then derive progress from UserEdge + WayTotalEdges.
+  if (ENGINE.VERSION === "v2") {
+    const runDate = startDate ?? new Date();
+    await processActivityV2(userId, coordinates, runDate);
+
+    const v2Results = await deriveProjectProgressV2(userId, snapshot.streets);
+    const streetUpdates = v2Results.map((r) => ({
+      osmId: r.osmId,
+      percentage: r.percentage,
+      lastRunDate: new Date().toISOString(),
+    }));
+
+    if (streetUpdates.length > 0) {
+      await updateProjectProgress(project.id, streetUpdates);
+      console.log(
+        `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}" (V2)`
+      );
+    }
+
+    const completed: string[] = [];
+    const improved: Array<{ osmId: string; from: number; to: number }> = [];
+    for (const r of v2Results) {
+      const old = snapshotByOsmId.get(r.osmId);
+      if (r.isComplete && old && !old.completed) completed.push(r.osmId);
+      if (old && r.percentage > old.percentage)
+        improved.push({
+          osmId: r.osmId,
+          from: old.percentage,
+          to: r.percentage,
+        });
+    }
+    const impact: ActivityImpact = { completed, improved };
+
+    const streetProgressInput = v2Results
+      .map((r) => {
+        const snap = snapshotByOsmId.get(r.osmId);
+        if (!snap) return null;
+        return {
+          osmId: r.osmId,
+          name: snap.name,
+          highwayType: snap.highwayType,
+          lengthMeters: snap.lengthMeters,
+          percentage: r.percentage,
+          isComplete: r.isComplete,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+    if (streetProgressInput.length > 0)
+      await upsertStreetProgress(userId, streetProgressInput);
+
+    await saveProjectActivity(project.id, activityId, impact);
+
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      pointsInProject: overlap.pointsInsideCount,
+      streetsCovered: impact.improved.length,
+      streetsCompleted: impact.completed.length,
+      streetsImproved: impact.improved.length,
+      impact,
+    };
+  }
+
+  // V1 or both: use V1 matching (geometries, match, aggregate, calculate impact)
   // Step 2: Get street geometries (for matching)
   const geometries = await getStreetGeometries(
     projectData.centerLat,
@@ -627,7 +692,6 @@ async function processProjectOverlap(
     );
 
     // Step 6b: Update user-level street progress (for map feature)
-    const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
     const streetProgressInput = coverages
       .map((c) => {
         const snap = snapshotByOsmId.get(c.osmId);
@@ -648,7 +712,7 @@ async function processProjectOverlap(
   // Step 7: Save project-activity relationship
   await saveProjectActivity(project.id, activityId, impact);
 
-  if (ENGINE.VERSION === "v2" || ENGINE.VERSION === "both") {
+  if (ENGINE.VERSION === "both") {
     try {
       const runDate = startDate ?? new Date();
       await processActivityV2(userId, coordinates, runDate);

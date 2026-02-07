@@ -28,10 +28,17 @@ export async function processActivityV2(
   }
 
   // Convert v1 GpxPoint[] to v2 format (lat, lng, time: string | null)
+  // timestamp may be Date or ISO string when read from DB JSON
   const points = coordinates.map((p) => ({
     lat: p.lat,
     lng: p.lng,
-    time: p.timestamp?.toISOString() ?? null,
+    time:
+      p.timestamp != null
+        ? (p.timestamp instanceof Date
+            ? p.timestamp
+            : new Date(p.timestamp as string)
+          ).toISOString()
+        : null,
   }));
 
   const matchResult = await matchWithOSRM(points);
