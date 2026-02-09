@@ -22,7 +22,8 @@ import { getUserStreetProgress } from "./user-street-progress.service.js";
 import {
   isUnnamedStreet,
   normalizeStreetName,
-} from "./street-aggregation.service.js";
+} from "../engines/v1/street-aggregation.js";
+import { deriveStreetCompletion } from "../engines/v2/street-completion.js";
 import type { OsmStreet } from "../types/run.types.js";
 import type {
   MapStreet,
@@ -336,6 +337,97 @@ export async function getMapStreets(
   };
 }
 
+/**
+ * Get map streets using V2 (UserEdge) progress.
+ * Same response shape as getMapStreets; progress comes from engine-v2 UserEdge data.
+ */
+export async function getMapStreetsV2(
+  userId: string,
+  lat: number,
+  lng: number,
+  radiusMeters: number
+): Promise<MapStreetsResponse> {
+  const radius = Math.min(
+    Math.max(radiusMeters, MAP.MIN_RADIUS_METERS),
+    MAP.MAX_RADIUS_METERS
+  );
+
+  const [geometries, completion] = await Promise.all([
+    getGeometriesInArea(lat, lng, radius),
+    deriveStreetCompletion(userId),
+  ]);
+
+  const completionByOsmId = new Map(
+    completion.map((s) => [`way/${String(s.wayId)}`, s])
+  );
+
+  const segments: MapStreet[] = [];
+
+  for (const geom of geometries) {
+    if (isUnnamedStreet(geom.name)) continue;
+    const comp = completionByOsmId.get(geom.osmId);
+    if (!comp || comp.edgesTotal === 0) continue;
+
+    const percentage = Math.round(
+      (comp.edgesCompleted / comp.edgesTotal) * 100
+    );
+    const status = comp.isComplete ? "completed" : "partial";
+    const isConnector =
+      geom.lengthMeters <= STREET_AGGREGATION.CONNECTOR_MAX_LENGTH_METERS;
+
+    const stats: MapStreetStats = {
+      runCount: comp.edgesCompleted > 0 ? 1 : 0,
+      completionCount: comp.isComplete ? 1 : 0,
+      firstRunDate: null,
+      lastRunDate: null,
+      totalLengthMeters: geom.lengthMeters,
+      currentPercentage: percentage,
+      everCompleted: comp.isComplete,
+      weightedCompletionRatio: percentage / 100,
+      segmentCount: 1,
+      connectorCount: isConnector ? 1 : 0,
+    };
+
+    segments.push({
+      osmId: geom.osmId,
+      name: geom.name,
+      highwayType: geom.highwayType,
+      lengthMeters: geom.lengthMeters,
+      percentage,
+      status,
+      geometry: geom.geometry,
+      stats,
+    });
+  }
+
+  const streets = aggregateStreetsByName(segments);
+
+  const streetStatusByName = new Map<string, "completed" | "partial">();
+  for (const street of streets) {
+    const key = normalizeStreetName(street.name) || street.osmId;
+    streetStatusByName.set(key, street.status);
+  }
+  for (const segment of segments) {
+    const key = normalizeStreetName(segment.name) || segment.osmId;
+    const aggregatedStatus = streetStatusByName.get(key);
+    if (aggregatedStatus) segment.status = aggregatedStatus;
+  }
+
+  const completedCount = streets.filter((s) => s.status === "completed").length;
+  const partialCount = streets.filter((s) => s.status === "partial").length;
+
+  return {
+    success: true,
+    streets,
+    segments,
+    center: { lat, lng },
+    radiusMeters: radius,
+    totalStreets: streets.length,
+    completedCount,
+    partialCount,
+  };
+}
+
 // ============================================
 // Geometry Helpers
 // ============================================
@@ -385,8 +477,9 @@ function sliceGeometryByInterval(
 /**
  * Get street geometries in the given area
  * Uses geometry cache when possible; otherwise Overpass (all streets including unnamed)
+ * Exported for use by getMapStreetsV2 (engine-v2 map endpoint).
  */
-async function getGeometriesInArea(
+export async function getGeometriesInArea(
   centerLat: number,
   centerLng: number,
   radiusMeters: number

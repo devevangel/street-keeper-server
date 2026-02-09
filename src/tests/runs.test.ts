@@ -231,7 +231,7 @@ describe("Geo Service", () => {
 describe("Street Matching Service", () => {
   it("should match points to streets", async () => {
     const { matchPointsToStreets } = await import(
-      "../services/street-matching.service.js"
+      "../engines/v1/street-matching.js"
     );
 
     // Mock street data
@@ -270,7 +270,7 @@ describe("Street Matching Service", () => {
 
   it("should include Phase 2 geometry coverage fields", async () => {
     const { matchPointsToStreets } = await import(
-      "../services/street-matching.service.js"
+      "../engines/v1/street-matching.js"
     );
 
     const streets = [
@@ -309,7 +309,7 @@ describe("Street Matching Service", () => {
 describe("Street Aggregation Service", () => {
   it("should normalize street names", async () => {
     const { normalizeStreetName } = await import(
-      "../services/street-aggregation.service.js"
+      "../engines/v1/street-aggregation.js"
     );
 
     expect(normalizeStreetName("Main Street")).toBe("main street");
@@ -319,7 +319,7 @@ describe("Street Aggregation Service", () => {
 
   it("should identify unnamed streets", async () => {
     const { isUnnamedStreet } = await import(
-      "../services/street-aggregation.service.js"
+      "../engines/v1/street-aggregation.js"
     );
 
     expect(isUnnamedStreet("Unnamed Road")).toBe(true);
@@ -330,7 +330,7 @@ describe("Street Aggregation Service", () => {
 
   it("should aggregate duplicate street segments", async () => {
     const { aggregateSegmentsIntoLogicalStreets } = await import(
-      "../services/street-aggregation.service.js"
+      "../engines/v1/street-aggregation.js"
     );
 
     // Simulate OSM fragmentation: same street split into 3 segments
@@ -384,7 +384,7 @@ describe("Street Aggregation Service", () => {
 
   it("should clamp coverage ratios to 1.0 for UX", async () => {
     const { aggregateSegmentsIntoLogicalStreets } = await import(
-      "../services/street-aggregation.service.js"
+      "../engines/v1/street-aggregation.js"
     );
 
     // Simulate inflated coverage (runner went back and forth)
@@ -411,7 +411,7 @@ describe("Street Aggregation Service", () => {
 
   it("should bucket unnamed roads by highway type", async () => {
     const { aggregateSegmentsIntoLogicalStreets } = await import(
-      "../services/street-aggregation.service.js"
+      "../engines/v1/street-aggregation.js"
     );
 
     const segments = [
@@ -470,7 +470,7 @@ describe("Street Aggregation Service", () => {
 describe("GPX Analysis Service", () => {
   it("should calculate track quality metrics", async () => {
     const { calculateTrackQuality } = await import(
-      "../services/gpx-analysis.service.js"
+      "../engines/v1/gpx-analysis.js"
     );
 
     const points = [
@@ -489,7 +489,7 @@ describe("GPX Analysis Service", () => {
 
   it("should detect GPS jumps", async () => {
     const { calculateTrackQuality } = await import(
-      "../services/gpx-analysis.service.js"
+      "../engines/v1/gpx-analysis.js"
     );
 
     const points = [
@@ -506,7 +506,7 @@ describe("GPX Analysis Service", () => {
 
   it("should calculate moving vs stopped time", async () => {
     const { calculateMovingStoppedTime } = await import(
-      "../services/gpx-analysis.service.js"
+      "../engines/v1/gpx-analysis.js"
     );
 
     const now = Date.now();

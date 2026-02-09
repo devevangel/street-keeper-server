@@ -7,6 +7,9 @@
  * - Type reference (/docs/types)
  * - Error reference (/docs/errors)
  * - Frontend integration guide (/docs/frontend)
+ * - Engines comparison (/docs/engines)
+ * - How engines work (/docs/how-engines-work)
+ * - Database (/docs/database)
  */
 
 import { Router, Request, Response } from "express";
@@ -64,6 +67,9 @@ const navItems = [
   { href: "/docs/architecture", label: "Architecture", icon: "M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" },
   { href: "/docs/errors", label: "Error Reference", icon: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" },
   { href: "/docs/frontend", label: "Frontend Guide", icon: "M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" },
+  { href: "/docs/engines", label: "Engines", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
+  { href: "/docs/how-engines-work", label: "How Engines Work", icon: "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" },
+  { href: "/docs/database", label: "Database", icon: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" },
 ];
 
 /**
@@ -260,6 +266,7 @@ router.get("/", (req: Request, res: Response) => {
     <div class="text-center mb-12">
       <h1 class="text-4xl font-bold text-white mb-4">Street Keeper API Documentation</h1>
       <p class="text-xl text-gray-400">A fitness tracking API that processes GPS data from Strava to track street coverage for runners.</p>
+      <p class="mt-4"><a href="/docs/index" class="text-blue-400 hover:underline">Full documentation index</a></p>
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
@@ -311,6 +318,36 @@ router.get("/", (req: Request, res: Response) => {
           <h2 class="ml-3 text-xl font-semibold text-white">Frontend Guide</h2>
         </div>
         <p class="text-gray-400">Copy-paste ready code examples for React + TypeScript integration with fetch and axios.</p>
+      </a>
+
+      <a href="/docs/engines" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-cyan-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">Engines (V1 vs V2)</h2>
+        </div>
+        <p class="text-gray-400">Compare the V1 (Overpass + Mapbox) and V2 (node proximity) GPX analysis engines, endpoints, progress storage, and configuration.</p>
+      </a>
+
+      <a href="/docs/how-engines-work" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">How the Engines Work</h2>
+        </div>
+        <p class="text-gray-400">Plain-English guide to GPX, PBF, V1 and V2 pipelines, street matching, and how each layer works from upload to output.</p>
+      </a>
+
+      <a href="/docs/database" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">Database</h2>
+        </div>
+        <p class="text-gray-400">Plain-English guide to all 12 Prisma models: User, Project, Activity, UserStreetProgress, UserNodeHit, WayCache, and more. Relationships, design choices, and analogies.</p>
       </a>
 
       <div class="block p-6 bg-gray-800 rounded-lg border-2 border-dashed border-gray-600">
@@ -368,24 +405,6 @@ router.get("/", (req: Request, res: Response) => {
             </tr>
             <tr class="border-b border-gray-700">
               <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
-              <td class="py-3 px-4 font-mono text-sm">/routes</td>
-              <td class="py-3 px-4">List user's routes</td>
-              <td class="py-3 px-4">Yes</td>
-            </tr>
-            <tr class="border-b border-gray-700">
-              <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
-              <td class="py-3 px-4 font-mono text-sm">/routes</td>
-              <td class="py-3 px-4">Create a new route</td>
-              <td class="py-3 px-4">Yes</td>
-            </tr>
-            <tr class="border-b border-gray-700">
-              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
-              <td class="py-3 px-4 font-mono text-sm">/routes/:id</td>
-              <td class="py-3 px-4">Get route detail with streets</td>
-              <td class="py-3 px-4">Yes</td>
-            </tr>
-            <tr class="border-b border-gray-700">
-              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
               <td class="py-3 px-4 font-mono text-sm">/activities</td>
               <td class="py-3 px-4">List user's activities</td>
               <td class="py-3 px-4">Yes</td>
@@ -393,8 +412,44 @@ router.get("/", (req: Request, res: Response) => {
             <tr class="border-b border-gray-700">
               <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
               <td class="py-3 px-4 font-mono text-sm">/runs/analyze-gpx</td>
-              <td class="py-3 px-4">Upload and analyze GPX file</td>
+              <td class="py-3 px-4">Upload and analyze GPX file (legacy)</td>
               <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v1</td>
+              <td class="py-3 px-4">Engine V1 info</td>
+              <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v1/analyze</td>
+              <td class="py-3 px-4">Analyze GPX (V1)</td>
+              <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2</td>
+              <td class="py-3 px-4">Engine V2 info</td>
+              <td class="py-3 px-4">No</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2/streets</td>
+              <td class="py-3 px-4">User streets (V2)</td>
+              <td class="py-3 px-4">Yes</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-blue-600 text-white px-2 py-1 rounded text-xs">GET</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2/map/streets</td>
+              <td class="py-3 px-4">Map streets (V2)</td>
+              <td class="py-3 px-4">Yes</td>
+            </tr>
+            <tr class="border-b border-gray-700">
+              <td class="py-3 px-4"><span class="bg-green-600 text-white px-2 py-1 rounded text-xs">POST</span></td>
+              <td class="py-3 px-4 font-mono text-sm">/engine-v2/analyze</td>
+              <td class="py-3 px-4">Analyze GPX (V2)</td>
+              <td class="py-3 px-4">No (userId query)</td>
             </tr>
           </tbody>
         </table>
@@ -461,6 +516,45 @@ router.get("/architecture", (req: Request, res: Response) => {
 });
 
 // ============================================
+// Engines Documentation
+// ============================================
+
+/**
+ * GET /docs/engines
+ * V1 vs V2 engine comparison and configuration
+ */
+router.get("/engines", (req: Request, res: Response) => {
+  const content = readMarkdownFile("ENGINE_COMPARISON.md");
+  res.send(wrapInHtml("Engines", content, "/docs/engines"));
+});
+
+// ============================================
+// How Engines Work (plain-English guide)
+// ============================================
+
+/**
+ * GET /docs/how-engines-work
+ * Plain-English guide to GPX, PBF, V1/V2 pipelines, and street matching
+ */
+router.get("/how-engines-work", (req: Request, res: Response) => {
+  const content = readMarkdownFile("HOW_ENGINES_WORK.md");
+  res.send(wrapInHtml("How the Engines Work", content, "/docs/how-engines-work"));
+});
+
+// ============================================
+// Database Documentation
+// ============================================
+
+/**
+ * GET /docs/database
+ * Plain-English guide to all 12 Prisma models, relationships, and design choices
+ */
+router.get("/database", (req: Request, res: Response) => {
+  const content = readMarkdownFile("DATABASE.md");
+  res.send(wrapInHtml("Database", content, "/docs/database"));
+});
+
+// ============================================
 // Type Reference
 // ============================================
 
@@ -497,6 +591,59 @@ router.get("/errors", (req: Request, res: Response) => {
 router.get("/frontend", (req: Request, res: Response) => {
   const content = readMarkdownFile("FRONTEND_GUIDE.md");
   res.send(wrapInHtml("Frontend Integration Guide", content, "/docs/frontend"));
+});
+
+// ============================================
+// Additional documentation routes
+// ============================================
+
+router.get("/index", (req: Request, res: Response) => {
+  const content = readMarkdownFile("INDEX.md");
+  res.send(wrapInHtml("Documentation Index", content, "/docs/index"));
+});
+router.get("/getting-started", (req: Request, res: Response) => {
+  const content = readMarkdownFile("GETTING_STARTED.md");
+  res.send(wrapInHtml("Getting Started", content, "/docs/getting-started"));
+});
+router.get("/api-reference", (req: Request, res: Response) => {
+  const content = readMarkdownFile("API_REFERENCE.md");
+  res.send(wrapInHtml("API Reference", content, "/docs/api-reference"));
+});
+router.get("/gpx-street-analysis", (req: Request, res: Response) => {
+  const content = readMarkdownFile("GPX_STREET_ANALYSIS.md");
+  res.send(wrapInHtml("GPX Street Analysis", content, "/docs/gpx-street-analysis"));
+});
+router.get("/map-feature", (req: Request, res: Response) => {
+  const content = readMarkdownFile("MAP_FEATURE.md");
+  res.send(wrapInHtml("Map Feature", content, "/docs/map-feature"));
+});
+router.get("/strava-integration", (req: Request, res: Response) => {
+  const content = readMarkdownFile("STRAVA_INTEGRATION.md");
+  res.send(wrapInHtml("Strava Integration", content, "/docs/strava-integration"));
+});
+router.get("/background-jobs", (req: Request, res: Response) => {
+  const content = readMarkdownFile("BACKGROUND_JOBS.md");
+  res.send(wrapInHtml("Background Jobs", content, "/docs/background-jobs"));
+});
+router.get("/scripts", (req: Request, res: Response) => {
+  const content = readMarkdownFile("SCRIPTS.md");
+  res.send(wrapInHtml("Scripts", content, "/docs/scripts"));
+});
+router.get("/coding-patterns", (req: Request, res: Response) => {
+  const content = readMarkdownFile("CODING_PATTERNS.md");
+  res.send(wrapInHtml("Coding Patterns", content, "/docs/coding-patterns"));
+});
+router.get("/glossary", (req: Request, res: Response) => {
+  const content = readMarkdownFile("GLOSSARY.md");
+  res.send(wrapInHtml("Glossary", content, "/docs/glossary"));
+});
+router.get("/troubleshooting", (req: Request, res: Response) => {
+  const content = readMarkdownFile("TROUBLESHOOTING.md");
+  res.send(wrapInHtml("Troubleshooting", content, "/docs/troubleshooting"));
+});
+router.get("/engines-overview", (req: Request, res: Response) => {
+  const content = readMarkdownFile("ENGINES.md");
+  res.send(wrapInHtml("Engines Overview", content, "/docs/engines-overview"));
 });
 
 export default router;

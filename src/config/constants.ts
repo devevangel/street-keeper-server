@@ -31,6 +31,11 @@ export const API = {
   PREFIX: "/api/v1",
 } as const;
 
+/** Backend: which pipeline(s) run when processing Strava activities. v1 | v2 | both. Default v1. */
+export const ENGINE = {
+  VERSION: (process.env.GPX_ENGINE_VERSION ?? "v1") as "v1" | "v2" | "both",
+} as const;
+
 // ============================================
 // Frontend URL (for OAuth redirect)
 // ============================================

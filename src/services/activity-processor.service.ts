@@ -101,18 +101,20 @@ import {
   calculateCoverageInterval,
   type CoverageInterval,
 } from "./user-street-progress.service.js";
-import { getCompletionThreshold } from "../config/constants.js";
+import { getCompletionThreshold, ENGINE } from "../config/constants.js";
+import { processActivityV2 } from "../engines/v2/process-activity.js";
+import { deriveProjectProgressV2 } from "../engines/v2/street-completion.js";
 import {
   queryStreetsInRadius,
   queryStreetsInBoundingBox,
 } from "./overpass.service.js";
-import { matchPointsToStreetsHybrid } from "./street-matching.service.js";
+import { matchPointsToStreetsHybrid } from "../engines/v1/street-matching.js";
 import {
   aggregateSegmentsIntoLogicalStreets,
   isUnnamedStreet,
   normalizeStreetNameForMatching,
   streetNamesMatch,
-} from "./street-aggregation.service.js";
+} from "../engines/v1/street-aggregation.js";
 import {
   generateRadiusCacheKey,
   getCachedGeometries,
@@ -224,103 +226,116 @@ function calculateActivityBoundingBox(coordinates: GpxPoint[]): {
 /**
  * Process an activity when the user has no overlapping routes.
  * Queries streets in the activity's bounding box, matches GPS points to streets,
- * and updates UserStreetProgress so the home page map shows streets run on.
+ * and updates UserStreetProgress (v1) and/or UserNodeHit (v2) per ENGINE.VERSION.
  *
  * @param activityId - Internal activity ID (for logging)
  * @param userId - User ID
  * @param coordinates - Activity GPS points
- * @returns Count of streets covered and completed
+ * @param startDate - Activity start date (for v2 runDate)
+ * @returns Count of streets covered and completed (from v1 when applicable)
  */
 async function processStandaloneActivity(
   activityId: string,
   userId: string,
-  coordinates: GpxPoint[]
+  coordinates: GpxPoint[],
+  startDate: Date | null
 ): Promise<{ streetsCovered: number; streetsCompleted: number }> {
-  const bbox = calculateActivityBoundingBox(coordinates);
-  const geometries = await queryStreetsInBoundingBox(bbox);
+  let streetsCovered = 0;
+  let streetsCompleted = 0;
 
-  if (geometries.length === 0) {
-    console.log(
-      `[Processor] Standalone: no streets in bbox for activity ${activityId}`
-    );
-    return { streetsCovered: 0, streetsCompleted: 0 };
+  if (ENGINE.VERSION === "v1" || ENGINE.VERSION === "both") {
+    const bbox = calculateActivityBoundingBox(coordinates);
+    const geometries = await queryStreetsInBoundingBox(bbox);
+
+    if (geometries.length === 0) {
+      console.log(
+        `[Processor] Standalone: no streets in bbox for activity ${activityId}`
+      );
+    } else {
+      const matchedStreets = await matchPointsToStreetsHybrid(
+        coordinates,
+        geometries
+      );
+
+      if (matchedStreets.length === 0) {
+        console.log(
+          `[Processor] Standalone: no street matches for activity ${activityId}`
+        );
+      } else {
+        const filteredStreets = matchedStreets.filter((m) => {
+          const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
+          const percentage = ratio * 100;
+          return (
+            m.matchedPointsCount >= STREET_MATCHING.MIN_POINTS_PER_STREET &&
+            percentage >= STREET_MATCHING.MIN_COVERAGE_PERCENTAGE
+          );
+        });
+
+        if (filteredStreets.length === 0) {
+          console.log(
+            `[Processor] Standalone: no streets passed filter for activity ${activityId}`
+          );
+        } else {
+          const namedStreets = filteredStreets.filter(
+            (m) => !isUnnamedStreet(m.name)
+          );
+
+          if (namedStreets.length === 0) {
+            console.log(
+              `[Processor] Standalone: no named streets for activity ${activityId}`
+            );
+          } else {
+            console.log(
+              `[Processor] Standalone: matched ${matchedStreets.length} streets, ${namedStreets.length} named for activity ${activityId}`
+            );
+
+            const streetProgressInput = namedStreets.map((m) => {
+              const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
+              const percentage = Math.min(100, Math.round(ratio * 100));
+              const threshold = getCompletionThreshold(m.lengthMeters);
+              const isComplete = ratio >= threshold;
+              const coverageInterval: CoverageInterval | undefined =
+                m.coverageInterval ??
+                (percentage > 0 ? [0, percentage] : undefined);
+
+              return {
+                osmId: m.osmId,
+                name: m.name,
+                highwayType: m.highwayType,
+                lengthMeters: m.lengthMeters,
+                percentage,
+                isComplete,
+                coverageInterval,
+              };
+            });
+
+            await upsertStreetProgress(userId, streetProgressInput);
+            streetsCovered = streetProgressInput.length;
+            streetsCompleted = streetProgressInput.filter(
+              (s) => s.isComplete
+            ).length;
+          }
+        }
+      }
+    }
   }
 
-  const matchedStreets = await matchPointsToStreetsHybrid(
-    coordinates,
-    geometries
-  );
-
-  if (matchedStreets.length === 0) {
-    console.log(
-      `[Processor] Standalone: no street matches for activity ${activityId}`
-    );
-    return { streetsCovered: 0, streetsCompleted: 0 };
+  if (ENGINE.VERSION === "v2" || ENGINE.VERSION === "both") {
+    try {
+      const runDate = startDate ?? new Date();
+      const result = await processActivityV2(userId, coordinates, runDate);
+      console.log(
+        `[Processor] Standalone v2: ${result.nodesHit} nodes hit for activity ${activityId}`
+      );
+    } catch (v2Error) {
+      console.warn(
+        `[Processor] V2 pipeline failed for activity ${activityId}:`,
+        v2Error instanceof Error ? v2Error.message : v2Error
+      );
+    }
   }
 
-  const filteredStreets = matchedStreets.filter((m) => {
-    const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
-    const percentage = ratio * 100;
-    return (
-      m.matchedPointsCount >= STREET_MATCHING.MIN_POINTS_PER_STREET &&
-      percentage >= STREET_MATCHING.MIN_COVERAGE_PERCENTAGE
-    );
-  });
-
-  if (filteredStreets.length === 0) {
-    console.log(
-      `[Processor] Standalone: no streets passed filter (min ${STREET_MATCHING.MIN_POINTS_PER_STREET} points, min ${STREET_MATCHING.MIN_COVERAGE_PERCENTAGE}%) for activity ${activityId}`
-    );
-    return { streetsCovered: 0, streetsCompleted: 0 };
-  }
-
-  const namedStreets = filteredStreets.filter((m) => !isUnnamedStreet(m.name));
-
-  if (namedStreets.length === 0) {
-    console.log(
-      `[Processor] Standalone: no named streets (all unnamed filtered out) for activity ${activityId}`
-    );
-    return { streetsCovered: 0, streetsCompleted: 0 };
-  }
-
-  console.log(
-    `[Processor] Standalone: matched ${matchedStreets.length} streets, ${filteredStreets.length} passed filter, ${namedStreets.length} named for activity ${activityId}`
-  );
-
-  const streetProgressInput = namedStreets.map((m) => {
-    const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
-    const percentage = Math.min(100, Math.round(ratio * 100));
-    // Use length-based threshold for completion determination
-    const threshold = getCompletionThreshold(m.lengthMeters);
-    const isComplete = ratio >= threshold;
-
-    // Phase 3: Use actual coverage interval from street matching
-    // This is calculated from GPS point projections onto street geometry
-    // Falls back to [0, percentage] if interval not available (e.g., Mapbox-only matches)
-    const coverageInterval: CoverageInterval | undefined =
-      m.coverageInterval ?? (percentage > 0 ? [0, percentage] : undefined);
-
-    return {
-      osmId: m.osmId,
-      name: m.name,
-      highwayType: m.highwayType,
-      lengthMeters: m.lengthMeters,
-      percentage,
-      isComplete,
-      coverageInterval,
-    };
-  });
-
-  await upsertStreetProgress(userId, streetProgressInput);
-
-  const streetsCompleted = streetProgressInput.filter(
-    (s) => s.isComplete
-  ).length;
-
-  return {
-    streetsCovered: streetProgressInput.length,
-    streetsCompleted,
-  };
+  return { streetsCovered, streetsCompleted };
 }
 
 // ============================================
@@ -397,7 +412,8 @@ export async function processActivity(
       const standalone = await processStandaloneActivity(
         activityId,
         userId,
-        coordinates
+        coordinates,
+        activity.startDate
       );
       await markActivityProcessed(activityId);
       return {
@@ -418,7 +434,8 @@ export async function processActivity(
           activityId,
           userId,
           overlap,
-          coordinates
+          coordinates,
+          activity.startDate
         );
         projectResults.push(result);
       } catch (error) {
@@ -532,20 +549,21 @@ export async function recheckActivityForNewProjects(
 /**
  * Process a single project overlap
  *
- * For a project that overlaps with the activity:
- * 1. Gets the project's current snapshot
- * 2. Queries street geometries (from cache or Overpass)
- * 3. Matches GPS points to streets
- * 4. Calculates coverage for each street
- * 5. Updates project progress
- * 6. Updates user-level street progress (for map feature)
- * 7. Saves the project-activity relationship
+ * When ENGINE.VERSION is v1: Gets snapshot, queries geometries, matches GPS to streets,
+ * calculates coverage, updates project progress and UserStreetProgress, saves ProjectActivity.
+ *
+ * When ENGINE.VERSION is v2: Runs processActivityV2 first (persist UserNodeHit), then
+ * deriveProjectProgressV2 to get percentages from UserNodeHit + WayNode; updates
+ * project progress and UserStreetProgress from that; saves ProjectActivity. No Overpass/Mapbox.
+ *
+ * When ENGINE.VERSION is both: Same as v1, then also runs processActivityV2 for UserNodeHit.
  */
 async function processProjectOverlap(
   activityId: string,
   userId: string,
   overlap: OverlapResult,
-  coordinates: GpxPoint[]
+  coordinates: GpxPoint[],
+  startDate: Date | null
 ): Promise<ProjectProcessingResult> {
   const { project } = overlap;
   console.log(
@@ -568,7 +586,72 @@ async function processProjectOverlap(
   }
 
   const snapshot = projectData.streetsSnapshot as StreetSnapshot;
+  const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
 
+  // When ENGINE.VERSION is v2, use V2 pipeline only: persist node hits then derive progress from UserNodeHit + WayNode.
+  if (ENGINE.VERSION === "v2") {
+    const runDate = startDate ?? new Date();
+    await processActivityV2(userId, coordinates, runDate);
+
+    const v2Results = await deriveProjectProgressV2(userId, snapshot.streets);
+    const streetUpdates = v2Results.map((r) => ({
+      osmId: r.osmId,
+      percentage: r.percentage,
+      lastRunDate: new Date().toISOString(),
+    }));
+
+    if (streetUpdates.length > 0) {
+      await updateProjectProgress(project.id, streetUpdates);
+      console.log(
+        `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}" (V2)`
+      );
+    }
+
+    const completed: string[] = [];
+    const improved: Array<{ osmId: string; from: number; to: number }> = [];
+    for (const r of v2Results) {
+      const old = snapshotByOsmId.get(r.osmId);
+      if (r.isComplete && old && !old.completed) completed.push(r.osmId);
+      if (old && r.percentage > old.percentage)
+        improved.push({
+          osmId: r.osmId,
+          from: old.percentage,
+          to: r.percentage,
+        });
+    }
+    const impact: ActivityImpact = { completed, improved };
+
+    const streetProgressInput = v2Results
+      .map((r) => {
+        const snap = snapshotByOsmId.get(r.osmId);
+        if (!snap) return null;
+        return {
+          osmId: r.osmId,
+          name: snap.name,
+          highwayType: snap.highwayType,
+          lengthMeters: snap.lengthMeters,
+          percentage: r.percentage,
+          isComplete: r.isComplete,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+    if (streetProgressInput.length > 0)
+      await upsertStreetProgress(userId, streetProgressInput);
+
+    await saveProjectActivity(project.id, activityId, impact);
+
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      pointsInProject: overlap.pointsInsideCount,
+      streetsCovered: impact.improved.length,
+      streetsCompleted: impact.completed.length,
+      streetsImproved: impact.improved.length,
+      impact,
+    };
+  }
+
+  // V1 or both: use V1 matching (geometries, match, aggregate, calculate impact)
   // Step 2: Get street geometries (for matching)
   const geometries = await getStreetGeometries(
     projectData.centerLat,
@@ -609,7 +692,6 @@ async function processProjectOverlap(
     );
 
     // Step 6b: Update user-level street progress (for map feature)
-    const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
     const streetProgressInput = coverages
       .map((c) => {
         const snap = snapshotByOsmId.get(c.osmId);
@@ -629,6 +711,18 @@ async function processProjectOverlap(
 
   // Step 7: Save project-activity relationship
   await saveProjectActivity(project.id, activityId, impact);
+
+  if (ENGINE.VERSION === "both") {
+    try {
+      const runDate = startDate ?? new Date();
+      await processActivityV2(userId, coordinates, runDate);
+    } catch (v2Error) {
+      console.warn(
+        `[Processor] V2 pipeline failed for activity ${activityId} (project ${project.name}):`,
+        v2Error instanceof Error ? v2Error.message : v2Error
+      );
+    }
+  }
 
   return {
     projectId: project.id,
