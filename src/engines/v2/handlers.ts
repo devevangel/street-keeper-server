@@ -10,7 +10,8 @@ import { parseGpx, GpxParseError } from "./modules/gpx-parser.js";
 import { markHitNodes } from "./modules/node-proximity.js";
 import { deriveStreetCompletion, groupStreetsByName } from "./street-completion.js";
 import { getMapStreetsV2 } from "../../services/map.service.js";
-import { MAP } from "../../config/constants.js";
+import { MAP, ERROR_CODES } from "../../config/constants.js";
+import prisma from "../../lib/prisma.js";
 
 /**
  * GET /api/v1/engine-v2
@@ -134,6 +135,16 @@ export async function analyzeGpx(
         success: false,
         error: "userId query parameter is required for node hit persistence.",
         code: "USER_ID_MISSING",
+      });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: "User not found. Provide a valid userId (e.g. create a user first or use an existing user id).",
+        code: ERROR_CODES.NOT_FOUND,
       });
       return;
     }
