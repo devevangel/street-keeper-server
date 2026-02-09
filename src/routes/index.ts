@@ -13,7 +13,7 @@
  * | activities | /activities | Activity listing and management      |
  * | map         | /map         | Map view (streets with progress)     |
  * | engine-v1   | /engine-v1   | V1 engine (Overpass + Mapbox)         |
- * | engine-v2   | /engine-v2   | V2 engine (OSRM edge-based)           |
+ * | engine-v2   | /engine-v2   | V2 engine (node proximity)            |
  */
 
 import { Router } from "express";

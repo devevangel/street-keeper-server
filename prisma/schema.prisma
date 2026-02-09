@@ -34,6 +34,7 @@ model User {
   activities      Activity[]
   streetProgress  UserStreetProgress[]
   edges           UserEdge[]
+  nodeHits        UserNodeHit[]
 }
 
 // ============================================
@@ -261,8 +262,55 @@ model WayCache {
 
 model WayTotalEdges {
   wayId       BigInt   @id  // OSM way ID
-  totalEdges  Int            // nodes.length - 1 for this way
+  totalEdges  Int            // nodes.length - 1 for this way (legacy)
+  totalNodes  Int      @default(0)  // node count per way (CityStrides-style completion)
   name        String?         // Denormalized for display
   highwayType String         // e.g. residential, footway
   createdAt   DateTime @default(now())
+}
+
+// ============================================
+// User Node Hit (CityStrides-Style: Node Proximity)
+// ============================================
+// Tracks which OSM nodes a user has been within 25m of. One row per user per node (cumulative).
+
+model UserNodeHit {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nodeId    BigInt
+  hitAt     DateTime @default(now())
+
+  @@unique([userId, nodeId])
+  @@index([userId])
+  @@index([nodeId])
+}
+
+// ============================================
+// Way Node (CityStrides-Style: Way-to-Node Mapping)
+// ============================================
+// Maps each way to its constituent nodes. Populated by seed script for completion queries.
+
+model WayNode {
+  wayId   BigInt
+  nodeId  BigInt
+
+  @@id([wayId, nodeId])
+  @@index([nodeId])
+}
+
+// ============================================
+// Node Cache (Local Map-Matcher: Node Coordinates)
+// ============================================
+// Stores node coordinates from PBF for local map-matching.
+// Only stores nodes that belong to runnable ways (referenced by ways).
+// Used by node proximity (25m snap) and previously by local map-matcher.
+
+model NodeCache {
+  nodeId    BigInt   @id  // OSM node ID
+  lat       Float          // Latitude
+  lon       Float          // Longitude
+  createdAt DateTime @default(now())
+
+  @@index([lat, lon])  // For bounding box queries (city-level is sufficient)
 }

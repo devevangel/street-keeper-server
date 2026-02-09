@@ -19,10 +19,10 @@ import {
 import {
   matchPointsToStreets,
   matchPointsToStreetsHybrid,
-} from "../../services/street-matching.service.js";
-import { buildComprehensiveAnalysis } from "../../services/gpx-analysis.service.js";
-import { isMapboxConfigured, MapboxError } from "../../services/mapbox.service.js";
-import { aggregateSegmentsIntoLogicalStreets } from "../../services/street-aggregation.service.js";
+} from "./street-matching.js";
+import { buildComprehensiveAnalysis } from "./gpx-analysis.js";
+import { isMapboxConfigured, MapboxError } from "./mapbox.js";
+import { aggregateSegmentsIntoLogicalStreets } from "./street-aggregation.js";
 import { ERROR_CODES, STREET_MATCHING } from "../../config/constants.js";
 import type {
   EnhancedAnalyzeGpxResponse,

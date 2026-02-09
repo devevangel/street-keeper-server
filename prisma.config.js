@@ -17,7 +17,9 @@ exports.default = (0, config_1.defineConfig)({
                 throw new Error("DATABASE_URL is not set in environment variables");
             }
             // Add SSL parameters for Supabase connections if not already present
-            if (url.includes("supabase") && !url.includes("sslmode") && !url.includes("ssl=true")) {
+            if (url.includes("supabase") &&
+                !url.includes("sslmode") &&
+                !url.includes("ssl=true")) {
                 const separator = url.includes("?") ? "&" : "?";
                 return `${url}${separator}sslmode=require`;
             }
@@ -25,3 +27,4 @@ exports.default = (0, config_1.defineConfig)({
         })(),
     },
 });
+//npm run reset:processed-activities

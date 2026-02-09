@@ -1,22 +1,35 @@
 /**
- * V2 street completion from UserEdge
+ * V2 street completion from UserNodeHit + WayNode (CityStrides-style).
  * Exported for use by handlers and map.service (v2 map endpoint).
  */
 
 import prisma from "../../lib/prisma.js";
 import type { StreetCompletion, GroupedStreet } from "./types.js";
+import { NODE_PROXIMITY_CONFIG } from "./config.js";
+
+const SHORT_THRESHOLD = NODE_PROXIMITY_CONFIG.shortStreetNodeThreshold;
+const STANDARD_THRESHOLD = NODE_PROXIMITY_CONFIG.standardCompletionThreshold;
 
 /**
- * Convert project snapshot osmId (e.g. "way/12345") to WayTotalEdges/UserEdge wayId (BigInt).
+ * Convert project snapshot osmId (e.g. "way/12345") to wayId (BigInt).
  */
 export function osmIdToWayId(osmId: string): bigint {
   return BigInt(osmId.replace("way/", ""));
 }
 
 /**
- * Derive project progress from UserEdge + WayTotalEdges for a given set of project streets.
- * Used when ENGINE.VERSION=v2 to compute percentages for updateProjectProgress (no V1 matching).
- * Streets with no WayTotalEdges entry get percentage 0.
+ * Whether a way is complete given hit nodes and total nodes (90% rule).
+ * Short streets (<=10 nodes): 100% required. Longer: 90% required.
+ */
+function isWayComplete(hitNodes: number, totalNodes: number): boolean {
+  if (totalNodes <= 0) return false;
+  if (totalNodes <= SHORT_THRESHOLD) return hitNodes === totalNodes;
+  return hitNodes / totalNodes >= STANDARD_THRESHOLD;
+}
+
+/**
+ * Derive project progress from UserNodeHit + WayNode + WayTotalEdges for a given set of project streets.
+ * Used when ENGINE.VERSION=v2 to compute percentages for updateProjectProgress.
  */
 export async function deriveProjectProgressV2(
   userId: string,
@@ -32,35 +45,53 @@ export async function deriveProjectProgressV2(
 
   const wayIds = projectStreets.map((s) => osmIdToWayId(s.osmId));
 
-  const [userEdges, wayTotals] = await Promise.all([
-    prisma.userEdge.findMany({
-      where: { userId, wayId: { in: wayIds } },
-      select: { edgeId: true, wayId: true },
+  const [userHits, wayTotals] = await Promise.all([
+    prisma.userNodeHit.findMany({
+      where: { userId },
+      select: { nodeId: true },
     }),
     prisma.wayTotalEdges.findMany({
       where: { wayId: { in: wayIds } },
     }),
   ]);
 
-  const edgesByWay = new Map<bigint, Set<string>>();
-  for (const edge of userEdges) {
-    const set = edgesByWay.get(edge.wayId) ?? new Set();
-    set.add(edge.edgeId);
-    edgesByWay.set(edge.wayId, set);
+  const hitNodeIds = new Set(userHits.map((r) => r.nodeId));
+  if (hitNodeIds.size === 0) {
+    return projectStreets.map((street) => ({
+      osmId: street.osmId,
+      percentage: 0,
+      isComplete: false,
+    }));
   }
+
+  const wayNodes = await prisma.wayNode.findMany({
+    where: {
+      wayId: { in: wayIds },
+      nodeId: { in: [...hitNodeIds] },
+    },
+    select: { wayId: true, nodeId: true },
+  });
+
+  const hitCountByWay = new Map<bigint, number>();
+  for (const row of wayNodes) {
+    if (hitNodeIds.has(row.nodeId)) {
+      hitCountByWay.set(row.wayId, (hitCountByWay.get(row.wayId) ?? 0) + 1);
+    }
+  }
+
   const totalByWay = new Map(
-    wayTotals.map((row) => [row.wayId, row.totalEdges])
+    wayTotals.map((row) => [row.wayId, row.totalNodes])
   );
 
   return projectStreets.map((street) => {
     const wayId = osmIdToWayId(street.osmId);
-    const edgesCompleted = edgesByWay.get(wayId)?.size ?? 0;
-    const edgesTotal = totalByWay.get(wayId) ?? 0;
+    const nodesHit = hitCountByWay.get(wayId) ?? 0;
+    const totalNodes = totalByWay.get(wayId) ?? 0;
     const percentage =
-      edgesTotal > 0
-        ? Math.min(100, Math.round((edgesCompleted / edgesTotal) * 100))
+      totalNodes > 0
+        ? Math.min(100, Math.round((nodesHit / totalNodes) * 100))
         : 0;
-    const isComplete = edgesTotal > 0 && edgesCompleted >= edgesTotal;
+    const isComplete = isWayComplete(nodesHit, totalNodes);
     return {
       osmId: street.osmId,
       percentage,
@@ -70,65 +101,54 @@ export async function deriveProjectProgressV2(
 }
 
 /**
- * Derive street completion from ALL stored UserEdge rows (cumulative progress).
- * Groups by wayId, counts unique edgeIds, looks up totalEdges from WayTotalEdges.
+ * Derive street completion from UserNodeHit + WayNode + WayTotalEdges (cumulative progress).
+ * Only includes ways where the user has at least one node hit.
  */
 export async function deriveStreetCompletion(
   userId: string
 ): Promise<StreetCompletion[]> {
-  const userEdges = await prisma.userEdge.findMany({
+  const userHits = await prisma.userNodeHit.findMany({
     where: { userId },
-    select: { edgeId: true, wayId: true, wayName: true },
+    select: { nodeId: true },
   });
 
-  if (userEdges.length === 0) return [];
+  if (userHits.length === 0) return [];
 
-  const edgesByWay = new Map<
-    bigint,
-    { name: string | null; uniqueEdges: Set<string> }
-  >();
+  const hitNodeIds = new Set(userHits.map((r) => r.nodeId));
+  const wayNodes = await prisma.wayNode.findMany({
+    where: { nodeId: { in: [...hitNodeIds] } },
+    select: { wayId: true, nodeId: true },
+  });
 
-  for (const edge of userEdges) {
-    const existing = edgesByWay.get(edge.wayId);
-    if (existing) {
-      existing.uniqueEdges.add(edge.edgeId);
-    } else {
-      edgesByWay.set(edge.wayId, {
-        name: edge.wayName,
-        uniqueEdges: new Set([edge.edgeId]),
-      });
+  const hitCountByWay = new Map<bigint, number>();
+  for (const row of wayNodes) {
+    if (hitNodeIds.has(row.nodeId)) {
+      hitCountByWay.set(row.wayId, (hitCountByWay.get(row.wayId) ?? 0) + 1);
     }
   }
 
-  const wayIds = [...edgesByWay.keys()];
-  const wayTotals =
-    wayIds.length > 0
-      ? await prisma.wayTotalEdges.findMany({
-          where: { wayId: { in: wayIds } },
-        })
-      : [];
+  const wayIds = [...hitCountByWay.keys()];
+  if (wayIds.length === 0) return [];
+
+  const wayTotals = await prisma.wayTotalEdges.findMany({
+    where: { wayId: { in: wayIds } },
+  });
   const totalByWay = new Map(
-    wayTotals.map((row) => [row.wayId, row.totalEdges])
+    wayTotals.map((row) => [row.wayId, row.totalNodes])
   );
 
   const streets: StreetCompletion[] = [];
 
-  for (const [wayId, data] of edgesByWay.entries()) {
-    const edgesCompleted = data.uniqueEdges.size;
-    const edgesTotal = totalByWay.get(wayId) ?? edgesCompleted;
-    const isComplete = edgesTotal > 0 && edgesCompleted >= edgesTotal;
-
-    if (edgesCompleted > edgesTotal) {
-      console.warn(
-        `[deriveStreetCompletion] Data drift: wayId ${wayId} has edgesCompleted=${edgesCompleted} > edgesTotal=${edgesTotal}`
-      );
-    }
-
+  for (const [wayId, nodesHit] of hitCountByWay.entries()) {
+    const totalNodes = totalByWay.get(wayId) ?? 0;
+    const row = wayTotals.find((r) => r.wayId === wayId);
+    const name = row?.name ?? null;
+    const isComplete = isWayComplete(nodesHit, totalNodes);
     streets.push({
       wayId,
-      name: data.name,
-      edgesTotal,
-      edgesCompleted,
+      name,
+      edgesTotal: totalNodes,
+      edgesCompleted: nodesHit,
       isComplete,
     });
   }

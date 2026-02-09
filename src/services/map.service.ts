@@ -22,7 +22,7 @@ import { getUserStreetProgress } from "./user-street-progress.service.js";
 import {
   isUnnamedStreet,
   normalizeStreetName,
-} from "./street-aggregation.service.js";
+} from "../engines/v1/street-aggregation.js";
 import { deriveStreetCompletion } from "../engines/v2/street-completion.js";
 import type { OsmStreet } from "../types/run.types.js";
 import type {

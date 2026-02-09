@@ -108,13 +108,13 @@ import {
   queryStreetsInRadius,
   queryStreetsInBoundingBox,
 } from "./overpass.service.js";
-import { matchPointsToStreetsHybrid } from "./street-matching.service.js";
+import { matchPointsToStreetsHybrid } from "../engines/v1/street-matching.js";
 import {
   aggregateSegmentsIntoLogicalStreets,
   isUnnamedStreet,
   normalizeStreetNameForMatching,
   streetNamesMatch,
-} from "./street-aggregation.service.js";
+} from "../engines/v1/street-aggregation.js";
 import {
   generateRadiusCacheKey,
   getCachedGeometries,
@@ -226,7 +226,7 @@ function calculateActivityBoundingBox(coordinates: GpxPoint[]): {
 /**
  * Process an activity when the user has no overlapping routes.
  * Queries streets in the activity's bounding box, matches GPS points to streets,
- * and updates UserStreetProgress (v1) and/or UserEdge (v2) per ENGINE.VERSION.
+ * and updates UserStreetProgress (v1) and/or UserNodeHit (v2) per ENGINE.VERSION.
  *
  * @param activityId - Internal activity ID (for logging)
  * @param userId - User ID
@@ -325,7 +325,7 @@ async function processStandaloneActivity(
       const runDate = startDate ?? new Date();
       const result = await processActivityV2(userId, coordinates, runDate);
       console.log(
-        `[Processor] Standalone v2: ${result.edgesValid} edges persisted for activity ${activityId}`
+        `[Processor] Standalone v2: ${result.nodesHit} nodes hit for activity ${activityId}`
       );
     } catch (v2Error) {
       console.warn(
@@ -552,11 +552,11 @@ export async function recheckActivityForNewProjects(
  * When ENGINE.VERSION is v1: Gets snapshot, queries geometries, matches GPS to streets,
  * calculates coverage, updates project progress and UserStreetProgress, saves ProjectActivity.
  *
- * When ENGINE.VERSION is v2: Runs processActivityV2 first (persist UserEdge), then
- * deriveProjectProgressV2 to get percentages from UserEdge + WayTotalEdges; updates
+ * When ENGINE.VERSION is v2: Runs processActivityV2 first (persist UserNodeHit), then
+ * deriveProjectProgressV2 to get percentages from UserNodeHit + WayNode; updates
  * project progress and UserStreetProgress from that; saves ProjectActivity. No Overpass/Mapbox.
  *
- * When ENGINE.VERSION is both: Same as v1, then also runs processActivityV2 for UserEdge.
+ * When ENGINE.VERSION is both: Same as v1, then also runs processActivityV2 for UserNodeHit.
  */
 async function processProjectOverlap(
   activityId: string,
@@ -588,7 +588,7 @@ async function processProjectOverlap(
   const snapshot = projectData.streetsSnapshot as StreetSnapshot;
   const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
 
-  // When ENGINE.VERSION is v2, use V2 pipeline only: persist edges then derive progress from UserEdge + WayTotalEdges.
+  // When ENGINE.VERSION is v2, use V2 pipeline only: persist node hits then derive progress from UserNodeHit + WayNode.
   if (ENGINE.VERSION === "v2") {
     const runDate = startDate ?? new Date();
     await processActivityV2(userId, coordinates, runDate);

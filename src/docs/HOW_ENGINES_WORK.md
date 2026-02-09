@@ -57,13 +57,13 @@ Street Keeper does not draw the map itself. We use other services to know where 
 | **OpenStreetMap (OSM)** | A free, crowd-sourced map of the world. | Our source of truth for "what streets exist" and their shape. |
 | **Overpass API** | A search engine for OSM data. | We ask it: "Give me all streets inside this area" (a box around your run). |
 | **Mapbox Map Matching** | A paid service that corrects GPS tracks. | It "snaps" your messy points onto the road network — like autocorrect for GPS. Used only in Engine V1 when configured. |
-| **OSRM** (Open Source Routing Machine) | A free, self-hostable service. | Also snaps GPS to roads, but returns **OSM node IDs** — the exact dots that make up each street. Used in Engine V2. |
+| **Node proximity (V2)** | CityStrides-style matching. | For each GPS point, find OSM nodes within 25 m (NodeCache); mark those nodes as "hit" in **UserNodeHit**. No external matching API. Street completion is derived at query time from node hit counts (90% rule). |
 
 **Summary:**
 
 - **Overpass** = "What streets are in this area?"
 - **Mapbox** = "Fix my wobbly GPS line and put it on the right roads" (V1, optional).
-- **OSRM** = "Turn my GPS line into a list of map nodes I passed through" (V2).
+- **Node proximity (V2)** = "Which map nodes did my GPS path get within 25 m of?" We record those as hits (UserNodeHit) and derive street completion from (nodes hit / total nodes per way) with a 90% threshold.
 
 ---
 
@@ -73,10 +73,10 @@ Street Keeper does not draw the map itself. We use other services to know where 
 |------|----------------|---------|
 | **Node** | A single point on the map. Every intersection and bend in a road has a node. | Like a pin on Google Maps. |
 | **Way** | A line that connects nodes — one stretch of road in the map database. A street name can be shared by several ways. | One "segment" of a road as stored in the map. |
-| **Edge** | The connection between two consecutive nodes on a way. The smallest "piece" of a street we track in Engine V2. | One link in a chain; we count how many links you have run. |
+| **Edge** | The connection between two consecutive nodes on a way. (Legacy V2 used edges; current V2 uses node hits.) | One link in a chain. |
 | **Segment** | One matched section of a street from a single run. Used in Engine V1. | One "piece" of a street we say you ran on in this run. |
 | **WayCache** | A local database that stores "which nodes belong to which ways." We fill it so we do not have to ask Overpass every time. | A local copy of the map index so we can look up streets without calling the server. |
-| **UserEdge** | A record meaning "User X has run this edge at least once." Engine V2 stores these. | One checkmark: "You have run this tiny piece of street." |
+| **UserNodeHit** | A record meaning "User X has been within 25 m of this OSM node at least once." Engine V2 stores these. | One checkmark: "You passed near this map dot." |
 | **UserStreetProgress** | A record meaning "User X has covered Z% of this street." Engine V1 uses this. | "You have run 72% of High Street." |
 | **PBF file** | A compressed snapshot of OSM map data for a region (e.g. a country or state). | A downloaded "map pack" for an area so we can work offline. |
 | **Map matching** | The process of snapping your GPS breadcrumbs to the nearest roads on the map. | Correcting your wobbly line so it follows the real streets. |
@@ -191,71 +191,52 @@ flowchart LR
 
 ---
 
-## 7. Engine V2 — How it works, step by step
+## 7. Engine V2 — How it works, step by step (CityStrides-style node proximity)
 
-Engine V2 is **path-first**: we follow your path node by node and record every small "edge" of street you crossed. Edges are then stored and reused forever.
+Engine V2 is **node-based**: for each GPS point we ask "which OSM nodes are within 25 metres?" and mark those nodes as "hit." Street completion is **derived** at query time: for each way, (nodes hit / total nodes) with a 90% threshold (100% for streets with ≤10 nodes).
 
-### Step 1: Parse the GPX file
+### Step 1: Parse the GPX or get coordinates
 
-**What happens:** Same as V1 — we read the file and get a list of GPS points.
+**What happens:** Same as V1 — we read the GPX (or use `Activity.coordinates` from Strava) and get a list of GPS points (lat, lng).
 
-**In:** GPX file.  
+**In:** GPX file or JSON coordinates.  
 **Out:** List of GPS points (breadcrumbs).
 
 ---
 
-### Step 2: OSRM map matching
+### Step 2: Mark hit nodes (25-metre proximity)
 
-**What happens:** We send your GPS points to OSRM. OSRM snaps them to the road network and returns the **exact OSM node IDs** you passed through, in order. So we get a sequence of nodes (e.g. node 123 → 124 → 125 …) instead of raw coordinates.
+**What happens:** For **each GPS point** we do not call any external API. We:
 
-**In:** GPS points.  
-**Out:** A list of OSM node IDs in order, plus a smoothed path (for display). Optional: confidence score (we use it for display only; we still save edges).
+1. Build a small **bounding box** around the point (e.g. 25 m in each direction).
+2. Query **NodeCache** for all nodes whose (lat, lon) fall inside that box.
+3. For each candidate node, compute the **haversine distance** from the GPS point to the node.
+4. If the distance is **≤ 25 metres**, we record that node as "hit" for this user.
 
-**Analogy:** OSRM is like a guide who walks your route and writes down the official "checkpoint" numbers you passed.
+We then **upsert** into **UserNodeHit**: one row per (userId, nodeId). If the user already hit that node, we do not duplicate; the unique constraint keeps one row per user per node.
 
----
+**In:** User ID + list of GPS points.  
+**Out:** Database updated with new UserNodeHit rows; we return how many nodes were hit in this run.
 
-### Step 3: Resolve ways
+**Analogy:** Imagine drawing a 25-metre circle around every breadcrumb of your run. Every map "dot" (node) that falls inside any of those circles gets a checkmark. We save those checkmarks. No phone call to a server — we use our local copy of the map (NodeCache).
 
-**What happens:** For each pair of consecutive nodes (e.g. 123–124), we ask: "Which street (way) does this pair belong to?" We look this up in the **WayCache** first. If we do not have it, we ask Overpass (unless we have set "skip Overpass" and rely only on a pre-loaded PBF). We get back the way ID, street name, and length for each pair.
-
-**In:** List of OSM node IDs.  
-**Out:** List of "resolved edges" — each node pair with its way, name, and length.
-
-**Analogy:** For each step you took, looking up in the map index: "This step was on which street?"
+**Why 25 metres?** It is a "Goldilocks" distance: big enough to allow for GPS drift and running on the pavement instead of the centre of the road, but small enough that running down a parallel alley usually does not trigger nodes on the main street.
 
 ---
 
-### Step 4: Build and validate edges
+### Step 3: Derive street completion (at query time)
 
-**What happens:** We turn each resolved pair into an **edge** (with a stable ID like "nodeA-nodeB"). Then we apply simple rules and reject bad ones:
+**What happens:** We do **not** store completion per street in a table. Whenever we need "how complete is this street for this user?" we:
 
-- Too short (e.g. under 5 m) — often noise.
-- Wrong road type (e.g. driveway, parking aisle) — we can exclude these.
-- Impossible speed — if we have timestamps and the implied speed is unrealistically high, we reject it.
+1. Look up all **nodeIds** for that way in **WayNode**.
+2. Look up **totalNodes** for that way in **WayTotalEdges**.
+3. Count how many of those nodeIds appear in **UserNodeHit** for this user (= nodes hit).
+4. Compute: **nodesHit / totalNodes**. If the street has **≤ 10 nodes**, we require **100%** (you must hit every node). If it has **> 10 nodes**, we require **≥ 90%** to consider the street "complete."
 
-**In:** Resolved edges + original node order + optional timestamps.  
-**Out:** Two lists: **valid edges** (kept) and **rejected edges** (discarded), plus counts.
+**In:** User ID + list of ways (e.g. from a project snapshot or map bounds).  
+**Out:** For each way: percentage and whether it is complete (boolean).
 
----
-
-### Step 5: Save edges to the database
-
-**What happens:** Each valid edge is saved in the **UserEdge** table: one row per user per edge. If you run the same edge again, we do not duplicate it; we might just update a "run count." So over time we have a cumulative list: "This user has run these edges at least once."
-
-**In:** User ID + list of valid edges + run date.  
-**Out:** Database updated (no direct output to the user in this step).
-
-**Analogy:** Putting a checkmark next to every link of the chain you ran; the checklist is saved and never lost.
-
----
-
-### Step 6: Derive street completion
-
-**What happens:** For each street (way), we count how many distinct edges you have run vs. how many edges that street has in total. That gives a completion percentage per street. We can also group by street name (like V1) so "High Street" appears as one line with one percentage.
-
-**In:** All UserEdge rows for this user.  
-**Out:** List of streets with "X out of Y edges" or "Z% complete," and the same kind of street list the app can show.
+**Worked example:** User runs a 3 km route. The GPX has 180 points. The run passes through 4 streets. Street A has 15 nodes; 14 are within 25 m of the GPS path → 14/15 ≈ 93% → **complete**. Street B has 8 nodes; 7 are hit → 7/8 = 87.5%, but since 8 ≤ 10 we require 100% → **incomplete**.
 
 ---
 
@@ -264,36 +245,32 @@ Engine V2 is **path-first**: we follow your path node by node and record every s
 ```mermaid
 flowchart LR
   subgraph input [Input]
-    GPX2[GPX File]
+    GPX2[GPX or coordinates]
   end
   subgraph steps [Steps]
-    Parse2[1. Parse GPX]
-    OSRM[2. OSRM match]
-    Resolve[3. Resolve ways]
-    Validate[4. Build and validate edges]
-    Save[5. Save to UserEdge]
-    Derive[6. Derive street completion]
+    Parse2[1. Parse / get points]
+    MarkHits[2. Mark hit nodes 25m]
+    Persist[3. Upsert UserNodeHit]
+    Derive[4. Derive completion at query]
   end
   GPX2 --> Parse2
-  Parse2 --> OSRM
-  OSRM --> Resolve
-  Resolve --> Validate
-  Validate --> Save
-  Save --> Derive
+  Parse2 --> MarkHits
+  MarkHits --> Persist
+  Persist --> Derive
 ```
 
 ---
 
-## 8. PBF and WayCache — the offline shortcut
+## 8. PBF and local caches — the offline shortcut
 
 **What is a PBF file?**  
 A **PBF** (Protocol Buffer Binary) file is a compressed download of OpenStreetMap data for a region (e.g. a country or state). It contains the same nodes, ways, and geometry we would get from Overpass, but for a whole area at once.
 
 **Why we use it:**  
-We can load that data into our **WayCache** once. Then, when Engine V2 needs to know "which way does node pair A–B belong to?", we look it up locally. We do not need to call Overpass at all. That means faster runs and the ability to work without the Overpass API (e.g. offline or in restricted environments).
+We run a seed script that loads the PBF into **NodeCache** (node coordinates), **WayCache** (node→way mapping), **WayNode** (way→node list), and **WayTotalEdges** (total nodes per way). Then Engine V2 can answer "which nodes are near this GPS point?" and "how many nodes does this street have?" entirely from the database. No Overpass (or any external API) is needed for matching.
 
 **How to seed it:**  
-We have a script that reads a PBF file and fills the WayCache (and related tables). After that, you can set `SKIP_OVERPASS=true` so V2 never calls Overpass.
+Run the script (e.g. `npm run seed:way-cache -- path/to/region.pbf`). It fills NodeCache, WayCache, WayNode, and WayTotalEdges. You can use flags like `--node-cache-only` or `--way-nodes-only` to run in stages. After seeding, set `SKIP_OVERPASS=true` so V2 does not call Overpass.
 
 **Analogy:** Instead of asking the librarian every time you need a book, you download the whole catalog to your laptop and search there.
 
@@ -303,13 +280,13 @@ We have a script that reads a PBF file and fills the WayCache (and related table
 
 | Aspect | V1 | V2 |
 |--------|----|----|
-| **What we store** | **UserStreetProgress** — one row per user per street with a **percentage** (e.g. 72% of High Street). | **UserEdge** — one row per user per **edge** (tiny piece of street). Completion is "you ran 8 of 11 edges on High Street." |
-| **Updates** | Each run can change the percentage (recalculated from matched segments). | Each run adds new edges; we never "undo" an edge. Counts only go up. |
-| **Determinism** | Percentage can vary slightly run to run (different matching, different segments). | Edge-based: either you ran an edge or you did not. No percentage rounding. |
-| **Cumulative** | Yes, but expressed as a percentage. | Yes: the list of edges you have run is the single source of truth. |
+| **What we store** | **UserStreetProgress** — one row per user per street with a **percentage** (e.g. 72% of High Street). | **UserNodeHit** — one row per user per **node** that was within 25 m of a GPS point. Completion is **derived**: (nodes hit / total nodes) per way, with 90% rule. |
+| **Updates** | Each run can change the percentage (recalculated from matched segments). | Each run adds new node hits; we never remove a hit. Cumulative. |
+| **Determinism** | Percentage can vary slightly run to run (different matching, different segments). | Node-based: either you were within 25 m of a node or you were not. Completion is derived at query time. |
+| **Cumulative** | Yes, but expressed as a percentage. | Yes: the list of nodes you have "hit" is the source of truth; street completion is computed from it. |
 
-**Why edge-based is more deterministic:**  
-With V2 we only ask "did you run this exact piece (edge)?" So we get a clear yes/no. With V1 we ask "how much of this street did you cover?" and express it as a percentage, which can wobble a bit depending on how points were matched.
+**Why node-based is simple and robust:**  
+We only ask "was this GPS point within 25 m of this map node?" So we get a clear yes/no per node. Street completion is then (nodes hit / total nodes) with a fixed rule (90% or 100% for short streets). No HMM or edge coverage filter — just distance and counting.
 
 ---
 
@@ -328,21 +305,21 @@ With V2 we only ask "did you run this exact piece (edge)?" So we get a clear yes
 
 | Drawback | Explanation |
 |----------|-------------|
-| Depends on OSRM | You need an OSRM instance (usually self-hosted) for production. |
-| WayCache setup | For best behavior (or offline), you need to seed the WayCache (e.g. from a PBF). |
-| Edge validation can reject good data | Very short streets or connectors can be rejected by the "minimum length" or other rules. |
-| Harder to debug | You think in nodes, edges, and ways; logs and data are more granular. |
+| PBF seed required | You need to run the seed script (NodeCache, WayNode, WayTotalEdges, WayCache) for the region you care about. Can be slow and memory-heavy for large areas. |
+| One query per GPS point | For each point we query NodeCache (e.g. by bbox); many points mean many queries. Batched/optimized in practice. |
+| 90% rule edge cases | Short streets (≤10 nodes) require 100%; one missed node (e.g. bad GPS at a corner) leaves the street incomplete. |
+| Harder to debug | You think in nodes and ways; completion is derived at query time, not stored per street. |
 
 ### Side-by-side comparison
 
 | | V1 | V2 |
 |-|----|----|
-| **Cost** | Free (Overpass) + optional Mapbox (paid). | Free if you self-host OSRM; no Mapbox. |
-| **Accuracy** | ~98% with Mapbox, ~85% without. | Depends on OSRM quality; typically high when the map is good. |
-| **Speed** | Can be slower (Overpass + optional Mapbox per run). | Can be faster once WayCache is warm; OSRM is usually quick. |
-| **Complexity** | Simpler: area → match → percentage. | More complex: nodes → edges → persistence → derivation. |
-| **Persistence** | UserStreetProgress (percentage). | UserEdge (list of edges). |
-| **Offline** | Needs Overpass (and Mapbox if used). | Can run fully offline with PBF-seeded WayCache and local OSRM. |
+| **Cost** | Free (Overpass) + optional Mapbox (paid). | Free: node proximity + PBF seed; no external matching API. |
+| **Accuracy** | ~98% with Mapbox, ~85% without. | CityStrides-style: 25 m snap + 90% node rule; stable and comparable to CityStrides. |
+| **Speed** | Can be slower (Overpass + optional Mapbox per run). | No external matching call; depends on DB (NodeCache lookups per point). |
+| **Complexity** | Simpler: area → match → percentage. | Simple pipeline: points → mark nodes within 25 m → UserNodeHit; completion derived at query time. |
+| **Persistence** | UserStreetProgress (percentage). | UserNodeHit (node hits); completion derived from UserNodeHit + WayNode + WayTotalEdges. |
+| **Offline** | Needs Overpass (and Mapbox if used). | Can run fully offline after PBF seed (NodeCache, WayNode, WayTotalEdges, WayCache). |
 
 ---
 
@@ -361,6 +338,6 @@ For technical details (which endpoints, how to pass user ID, etc.), see the **En
 ## 12. Summary
 
 - **V1 (area-first):** "Ask the map what streets are nearby, then check which ones you touched." We get a list of streets and a percentage covered for each. Progress is stored as percentages in UserStreetProgress.
-- **V2 (path-first):** "Follow your footsteps node by node and record every piece of street you crossed." We get a list of edges, save them in UserEdge, and derive street completion from that. Progress is stored as edges and is cumulative and deterministic.
+- **V2 (node proximity):** "For each GPS point, which map nodes are within 25 m? Mark those as hit." We save node hits in UserNodeHit and derive street completion at query time: (nodes hit / total nodes) per way, with a 90% threshold (100% for streets with ≤10 nodes). Progress is stored as node hits and is cumulative.
 
-**Both engines** answer the same question: *Which streets did you run, and how complete is each one?* They just get there in different ways — one by area and percentages, one by path and edges.
+**Both engines** answer the same question: *Which streets did you run, and how complete is each one?* They just get there in different ways — one by area and percentages, one by node proximity and a fixed completion rule.

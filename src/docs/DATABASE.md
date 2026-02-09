@@ -13,15 +13,20 @@ erDiagram
   User ||--o{ Project : "owns"
   User ||--o{ Activity : "has"
   User ||--o{ UserStreetProgress : "has"
-  User ||--o{ UserEdge : "has"
+  User ||--o{ UserEdge : "legacy"
+  User ||--o{ UserNodeHit : "has"
   Project ||--o{ ProjectActivity : "links"
   Activity ||--o{ ProjectActivity : "links"
   Project }o--|| ProjectActivity : "projectId"
   Activity }o--|| ProjectActivity : "activityId"
-  WayCache ||--o| WayTotalEdges : "references by wayId"
+  WayTotalEdges ||--o{ WayNode : "wayId"
+  NodeCache ||--o{ UserNodeHit : "nodeId"
+  WayNode }o--|| NodeCache : "nodeId"
+  WayCache : standalone cache
+  GeometryCache : standalone cache
   UserStreetProgress }o--|| User : "userId"
   UserEdge }o--|| User : "userId"
-  GeometryCache : standalone cache
+  UserNodeHit }o--|| User : "userId"
 ```
 
 ---
@@ -45,7 +50,7 @@ erDiagram
 | `stravaTokenExpiresAt` | datetime (optional) | When the access token expires | We refresh before this time so sync keeps working |
 | `createdAt` / `updatedAt` | datetime | When the row was created or last updated | Auditing and debugging |
 
-**Relations:** A user **owns** many Projects, has many Activities, has many UserStreetProgress rows (V1 map), and has many UserEdge rows (V2 map). If a user is deleted, all of those are deleted too (cascade).
+**Relations:** A user **owns** many Projects, has many Activities, has many UserStreetProgress rows (V1 map), has many UserNodeHit rows (V2 map — node proximity), and has many UserEdge rows (legacy; no longer written by V2). If a user is deleted, all of those are deleted too (cascade).
 
 **Design choice:** We store Strava tokens so we can sync your activities in the background and when you tap "Sync." Without storing them, you would have to log in with Strava every time.
 
@@ -164,37 +169,77 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 
 ---
 
-## 7. UserEdge (V2 map)
+## 7. UserEdge (legacy — not used by current V2)
 
-**What it is:** One row per user per **edge**. An edge is the smallest piece of a street (between two consecutive map nodes). The V2 engine stores "you have run this edge" and we derive street completion by counting edges.
+**What it is:** One row per user per **edge**. An edge is the smallest piece of a street (between two consecutive map nodes). This table was used by an older V2 pipeline that stored edges; the **current V2 engine** uses **UserNodeHit** (node proximity) instead. This table is kept for schema compatibility and is no longer written to by V2.
 
-**Analogy:** Instead of "High Street 72%," we store "you have run link 1, link 2, … link 8 of High Street (11 links total)." So 8 of 11 = completion. Each row is one link.
+**Analogy:** A legacy checklist: "You have run link 1, link 2, … link 8 of High Street." The new system counts **node hits** instead.
 
 | Column | Type | What it stores | Why |
 |--------|------|----------------|-----|
 | `id` | UUID | Unique identifier | Primary key |
 | `userId` | UUID | Which user | Foreign key to User |
-| `edgeId` | string | Normalized edge ID, e.g. `"123456-123457"` (nodeA-nodeB, small first) | So the same physical edge always has the same ID; we never store "123457-123456" |
-| `nodeA` / `nodeB` | BigInt | The two OSM node IDs that form this edge (nodeA &lt; nodeB) | OpenStreetMap uses big integers for node IDs; we normalize so nodeA is always the smaller one |
-| `wayId` | BigInt | Which street (way) this edge belongs to | So we can group edges by street and count "8 of 11" |
+| `edgeId` | string | Normalized edge ID, e.g. `"123456-123457"` (nodeA-nodeB, small first) | So the same physical edge always has the same ID |
+| `nodeA` / `nodeB` | BigInt | The two OSM node IDs that form this edge (nodeA &lt; nodeB) | OpenStreetMap uses big integers for node IDs |
+| `wayId` | BigInt | Which street (way) this edge belongs to | For grouping edges by street |
 | `wayName` | string (optional) | Street name | Denormalized for display |
 | `highwayType` | string | e.g. residential, footway | For filtering |
 | `lengthMeters` | float | Length of this edge | For stats |
 | `firstRunAt` | datetime | When you first ran this edge | For "first run" display |
-| `runCount` | int | How many times you have run this edge | We upsert: if the edge exists we increment this; we never duplicate the same edge for the same user |
+| `runCount` | int | How many times you have run this edge | Upsert: same edge increments count |
 | `createdAt` / `updatedAt` | datetime | Row created / updated | Auditing |
 
-**Unique constraint:** One row per (userId, edgeId). So the same user cannot have two rows for the same edge — we just increment `runCount` if they run it again.
+**Unique constraint:** One row per (userId, edgeId).
 
 **Relations:** Belongs to User. Cascade delete when user is deleted.
 
-**Design choice:** Edges are the **source of truth** in V2. Street completion is derived (count edges per way, compare to WayTotalEdges). We use BigInt for node/way IDs because OSM IDs can be very large. Normalizing nodeA &lt; nodeB keeps edgeId stable and avoids duplicate edges in different order.
+**Design choice:** The current V2 engine uses **UserNodeHit** + **WayNode** + **WayTotalEdges** for CityStrides-style completion (90% node rule). UserEdge remains in the schema but is legacy.
 
 ---
 
-## 8. WayCache
+## 8. UserNodeHit (V2 core — node proximity)
 
-**What it is:** A cache that answers "which streets (ways) does this map node belong to?" So when V2 has a list of node IDs from OSRM, we can look up the way for each segment without calling the Overpass API every time.
+**What it is:** One row per user per OSM **node** that the user has been within 25 metres of. The V2 engine marks "hit" when a GPS point falls within the snap radius of a node. Street completion is **derived** at query time: for each way, count how many of its nodes (from WayNode) appear in UserNodeHit for this user, then compare to WayTotalEdges.totalNodes using the 90% rule.
+
+**Analogy:** A checklist of "map dots" you have passed near: "You have been within 25 m of node 12345, 12346, …" Streets are complete when you have hit enough of their nodes.
+
+| Column | Type | What it stores | Why |
+|--------|------|----------------|-----|
+| `id` | UUID | Unique identifier | Primary key |
+| `userId` | UUID | Which user | Foreign key to User |
+| `nodeId` | BigInt | OSM node ID that was "hit" | The node that fell within 25 m of a GPS point |
+| `hitAt` | datetime | When the hit was recorded | Defaults to now(); used for auditing |
+
+**Unique constraint:** One row per (userId, nodeId). Running the same street again does not duplicate; we just have one row per node per user.
+
+**Relations:** Belongs to User. Cascade delete when user is deleted.
+
+**Design choice:** Storing node hits (not edges) matches the CityStrides-style model: completion = (nodes hit / total nodes) with a 90% threshold (100% for streets with ≤10 nodes).
+
+---
+
+## 9. WayNode (V2 core — way-to-node mapping)
+
+**What it is:** A mapping table: which nodes belong to which way (street). One row per (wayId, nodeId). Populated by the PBF seed script. Used with UserNodeHit and WayTotalEdges to derive street completion: for a way, get all nodeIds from WayNode, count how many are in UserNodeHit for the user, divide by totalNodes from WayTotalEdges.
+
+**Analogy:** The index that says "High Street (way 12345) consists of nodes 101, 102, 103, … 115."
+
+| Column | Type | What it stores | Why |
+|--------|------|----------------|-----|
+| `wayId` | BigInt | OSM way ID | Part of composite primary key (wayId, nodeId) |
+| `nodeId` | BigInt | OSM node ID | The node that belongs to this way; indexed for "which ways contain this node?" |
+
+**Primary key:** (wayId, nodeId). **Index** on nodeId for reverse lookups.
+
+**Relations:** No Prisma relation to WayTotalEdges; looked up by wayId to get all nodes for a way. NodeCache holds coordinates for each nodeId.
+
+**Design choice:** WayNode is the bridge between "which nodes did the user hit?" (UserNodeHit) and "how many nodes does each street have?" (WayTotalEdges.totalNodes).
+
+---
+
+## 10. WayCache
+
+**What it is:** A cache that answers "which streets (ways) does this map node belong to?" Keyed by node ID; stores the list of way IDs that contain that node and metadata (name, highwayType, node sequence). Populated by the PBF seed script. Used to resolve node-to-way mappings without calling the Overpass API.
 
 **Analogy:** A phone book: given a node number, we look up "this node is on way 12345 and 12346" (a node can be at an intersection of two ways).
 
@@ -213,27 +258,49 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 
 ---
 
-## 9. WayTotalEdges
+## 11. WayTotalEdges
 
-**What it is:** One row per street (way). Stores "how many edges does this street have?" (i.e. number of nodes minus one). Used by V2 to compute completion: you have run 8 edges, this street has 11 edges total → 8/11 ≈ 73%.
+**What it is:** One row per street (way). Stores total **edge** count (nodes.length − 1) and total **node** count for this way. Used by V2 to derive completion: (nodes hit for this user / totalNodes) with the 90% rule (100% for streets with ≤10 nodes).
 
-**Analogy:** The "total possible" column: "High Street has 11 links; you have run 8."
+**Analogy:** The "total possible" column: "High Street has 15 nodes; you have hit 14 → 93% → complete."
 
 | Column | Type | What it stores | Why |
 |--------|------|----------------|-----|
 | `wayId` | BigInt | OSM way ID (primary key) | Identifies the street |
-| `totalEdges` | int | Number of edges (nodes.length − 1) for this way | So we can compute percentage: edgesCompleted / totalEdges |
+| `totalEdges` | int | Number of edges (nodes.length − 1) for this way | Legacy; used for edge-based derivation if needed |
+| `totalNodes` | int | Number of nodes in this way | Used by V2: completion = nodesHit / totalNodes (90% rule) |
 | `name` | string (optional) | Street name | Denormalized for display |
 | `highwayType` | string | e.g. residential, footway | For display/filtering |
-| `createdAt` | datetime | When we added this row | Usually when we seed from a PBF or first resolve this way |
+| `createdAt` | datetime | When we added this row | Set by PBF seed script |
 
-**Relations:** None. Other code looks up by wayId.
+**Relations:** None. Looked up by wayId. WayNode holds the list of nodeIds per way.
 
-**Design choice:** We need the total number of edges per way to know when a street is "100% complete." This table is filled by the PBF seed script or when we resolve ways during V2 processing.
+**Design choice:** totalNodes is the source of truth for CityStrides-style completion. Filled by the PBF seed script.
 
 ---
 
-## 10. GeometryCache
+## 12. NodeCache
+
+**What it is:** A cache of OSM node coordinates (lat/lon) for nodes that belong to runnable ways. Used by the V2 **node proximity** engine: for each GPS point, we query nodes within a 25-metre bounding box, then compute haversine distance; nodes within 25 m are marked as "hit" in UserNodeHit.
+
+**Analogy:** A lookup table: "Node 12345 is at (50.78, -1.09)." We use it to find "which nodes are near this GPS point?"
+
+| Column | Type | What it stores | Why |
+|--------|------|----------------|-----|
+| `nodeId` | BigInt (primary key) | OSM node ID | The key we look up |
+| `lat` | float | Latitude | For bbox and distance queries |
+| `lon` | float | Longitude | For bbox and distance queries |
+| `createdAt` | datetime | When we cached it | Auditing |
+
+**Index:** `(lat, lon)` for bounding-box queries (e.g. 25 m around a GPS point).
+
+**Relations:** None. Standalone cache. Populated by the PBF seed script.
+
+**Design choice:** NodeCache is the only spatial data V2 needs for matching; no Overpass or OSRM. Seeded from the same PBF as WayCache and WayNode.
+
+---
+
+## 13. GeometryCache
 
 **What it is:** Cached street geometries (the actual lines on the map) for a given area. Keyed by a cache key like "radius:50.78:-1.09:2000" so we do not re-query Overpass every time the map loads.
 
@@ -253,27 +320,28 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 
 ---
 
-## 11. Relationships Summary
+## 14. Relationships Summary
 
 | From | To | Relation | Cascade |
 |------|-----|----------|---------|
 | User | Project | One user has many projects | Delete user → delete their projects |
 | User | Activity | One user has many activities | Delete user → delete their activities |
 | User | UserStreetProgress | One user has many progress rows | Delete user → delete their progress |
-| User | UserEdge | One user has many edges | Delete user → delete their edges |
+| User | UserEdge | One user has many edges (legacy) | Delete user → delete their edges |
+| User | UserNodeHit | One user has many node hits (V2) | Delete user → delete their node hits |
 | Project | ProjectActivity | One project has many links to activities | Delete project → delete those links |
 | Activity | ProjectActivity | One activity can link to many projects | Delete activity → delete those links |
 | ProjectActivity | Project | Many-to-one | Delete project → delete ProjectActivity rows |
 | ProjectActivity | Activity | Many-to-one | Delete activity → delete ProjectActivity rows |
 
-WayCache, WayTotalEdges, and GeometryCache have no foreign keys; they are lookup/cache tables.
+WayCache, WayTotalEdges, WayNode, NodeCache, and GeometryCache have no foreign keys; they are lookup/cache tables.
 
 ---
 
-## 12. Design Choices in Short
+## 15. Design Choices in Short
 
 - **JSON for snapshots (Project.streetsSnapshot):** One place to store the full street list and progress for a project. Avoids a separate table and many joins when loading a project.
 - **Denormalized fields (e.g. wayName on UserEdge, name on UserStreetProgress):** We duplicate the street name (and sometimes length/type) so that list and map views do not need extra lookups. Writes are a bit heavier; reads are simpler and faster.
 - **BigInt for OSM node/way IDs:** OpenStreetMap uses large integers; JavaScript number would lose precision. BigInt is exact.
 - **Spatial coverage (intervals) in UserStreetProgress:** More accurate than a single percentage when you have run different parts of a street at different times. We merge intervals so "0–50% and 75–100%" means 75% total.
-- **V1 vs V2 storage:** V1 stores **percentage per street** (UserStreetProgress). V2 stores **edges** (UserEdge) and derives street completion. Both feed the app; which one the map uses is controlled by the frontend and backend engine version. Projects can now be updated from either V1 matching or V2-derived completion depending on `GPX_ENGINE_VERSION`.
+- **V1 vs V2 storage:** V1 stores **percentage per street** (UserStreetProgress). V2 stores **node hits** (UserNodeHit) and derives street completion at query time from UserNodeHit + WayNode + WayTotalEdges using the 90% node rule. UserEdge is legacy (no longer written by V2). Which engine the map uses is controlled by `GPX_ENGINE_VERSION`.

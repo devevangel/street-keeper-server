@@ -149,6 +149,13 @@ The codebase follows a strict three-layer architecture:
 - **Fallback servers:** Multiple servers for reliability
 - **Rate limits:** Best effort, with retries
 
+### Engine V2 (CityStrides-style node proximity)
+
+- **Purpose:** GPS-to-street matching using node proximity (no external matching service)
+- **Used for:** Marking which OSM nodes a user has been within 25 metres of; street completion is derived from node hit counts
+- **Implementation:** For each GPS point, query **NodeCache** for nodes within a 25-metre radius; mark hits in **UserNodeHit**. Street completion is derived at query time from **UserNodeHit** + **WayNode** + **WayTotalEdges** using a 90% node completion rule (100% for streets with ≤10 nodes).
+- **No external APIs for matching:** V2 uses only pre-seeded local data (NodeCache, WayNode, WayTotalEdges) after running the PBF seed script.
+
 ---
 
 ## Design Decisions

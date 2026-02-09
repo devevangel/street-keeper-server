@@ -52,7 +52,6 @@ marked.use({ renderer });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const docsDir = path.join(__dirname, "..", "docs");
-const enginesDir = path.join(__dirname, "..", "engines");
 
 // ============================================
 // HTML Template Helpers
@@ -267,6 +266,7 @@ router.get("/", (req: Request, res: Response) => {
     <div class="text-center mb-12">
       <h1 class="text-4xl font-bold text-white mb-4">Street Keeper API Documentation</h1>
       <p class="text-xl text-gray-400">A fitness tracking API that processes GPS data from Strava to track street coverage for runners.</p>
+      <p class="mt-4"><a href="/docs/index" class="text-blue-400 hover:underline">Full documentation index</a></p>
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
@@ -327,7 +327,7 @@ router.get("/", (req: Request, res: Response) => {
           </svg>
           <h2 class="ml-3 text-xl font-semibold text-white">Engines (V1 vs V2)</h2>
         </div>
-        <p class="text-gray-400">Compare the V1 (Overpass + Mapbox) and V2 (OSRM edge-based) GPX analysis engines, endpoints, progress storage, and configuration.</p>
+        <p class="text-gray-400">Compare the V1 (Overpass + Mapbox) and V2 (node proximity) GPX analysis engines, endpoints, progress storage, and configuration.</p>
       </a>
 
       <a href="/docs/how-engines-work" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
@@ -347,7 +347,7 @@ router.get("/", (req: Request, res: Response) => {
           </svg>
           <h2 class="ml-3 text-xl font-semibold text-white">Database</h2>
         </div>
-        <p class="text-gray-400">Plain-English guide to all 9 Prisma models: User, Project, Activity, UserEdge, WayCache, and more. Relationships, design choices, and analogies.</p>
+        <p class="text-gray-400">Plain-English guide to all 12 Prisma models: User, Project, Activity, UserStreetProgress, UserNodeHit, WayCache, and more. Relationships, design choices, and analogies.</p>
       </a>
 
       <div class="block p-6 bg-gray-800 rounded-lg border-2 border-dashed border-gray-600">
@@ -524,10 +524,7 @@ router.get("/architecture", (req: Request, res: Response) => {
  * V1 vs V2 engine comparison and configuration
  */
 router.get("/engines", (req: Request, res: Response) => {
-  const filePath = path.join(enginesDir, "ENGINE_COMPARISON.md");
-  const content = fs.existsSync(filePath)
-    ? (marked.parse(fs.readFileSync(filePath, "utf-8")) as string)
-    : '<p class="text-red-400">Engine docs not found</p>';
+  const content = readMarkdownFile("ENGINE_COMPARISON.md");
   res.send(wrapInHtml("Engines", content, "/docs/engines"));
 });
 
@@ -550,7 +547,7 @@ router.get("/how-engines-work", (req: Request, res: Response) => {
 
 /**
  * GET /docs/database
- * Plain-English guide to all 9 Prisma models, relationships, and design choices
+ * Plain-English guide to all 12 Prisma models, relationships, and design choices
  */
 router.get("/database", (req: Request, res: Response) => {
   const content = readMarkdownFile("DATABASE.md");
@@ -594,6 +591,59 @@ router.get("/errors", (req: Request, res: Response) => {
 router.get("/frontend", (req: Request, res: Response) => {
   const content = readMarkdownFile("FRONTEND_GUIDE.md");
   res.send(wrapInHtml("Frontend Integration Guide", content, "/docs/frontend"));
+});
+
+// ============================================
+// Additional documentation routes
+// ============================================
+
+router.get("/index", (req: Request, res: Response) => {
+  const content = readMarkdownFile("INDEX.md");
+  res.send(wrapInHtml("Documentation Index", content, "/docs/index"));
+});
+router.get("/getting-started", (req: Request, res: Response) => {
+  const content = readMarkdownFile("GETTING_STARTED.md");
+  res.send(wrapInHtml("Getting Started", content, "/docs/getting-started"));
+});
+router.get("/api-reference", (req: Request, res: Response) => {
+  const content = readMarkdownFile("API_REFERENCE.md");
+  res.send(wrapInHtml("API Reference", content, "/docs/api-reference"));
+});
+router.get("/gpx-street-analysis", (req: Request, res: Response) => {
+  const content = readMarkdownFile("GPX_STREET_ANALYSIS.md");
+  res.send(wrapInHtml("GPX Street Analysis", content, "/docs/gpx-street-analysis"));
+});
+router.get("/map-feature", (req: Request, res: Response) => {
+  const content = readMarkdownFile("MAP_FEATURE.md");
+  res.send(wrapInHtml("Map Feature", content, "/docs/map-feature"));
+});
+router.get("/strava-integration", (req: Request, res: Response) => {
+  const content = readMarkdownFile("STRAVA_INTEGRATION.md");
+  res.send(wrapInHtml("Strava Integration", content, "/docs/strava-integration"));
+});
+router.get("/background-jobs", (req: Request, res: Response) => {
+  const content = readMarkdownFile("BACKGROUND_JOBS.md");
+  res.send(wrapInHtml("Background Jobs", content, "/docs/background-jobs"));
+});
+router.get("/scripts", (req: Request, res: Response) => {
+  const content = readMarkdownFile("SCRIPTS.md");
+  res.send(wrapInHtml("Scripts", content, "/docs/scripts"));
+});
+router.get("/coding-patterns", (req: Request, res: Response) => {
+  const content = readMarkdownFile("CODING_PATTERNS.md");
+  res.send(wrapInHtml("Coding Patterns", content, "/docs/coding-patterns"));
+});
+router.get("/glossary", (req: Request, res: Response) => {
+  const content = readMarkdownFile("GLOSSARY.md");
+  res.send(wrapInHtml("Glossary", content, "/docs/glossary"));
+});
+router.get("/troubleshooting", (req: Request, res: Response) => {
+  const content = readMarkdownFile("TROUBLESHOOTING.md");
+  res.send(wrapInHtml("Troubleshooting", content, "/docs/troubleshooting"));
+});
+router.get("/engines-overview", (req: Request, res: Response) => {
+  const content = readMarkdownFile("ENGINES.md");
+  res.send(wrapInHtml("Engines Overview", content, "/docs/engines-overview"));
 });
 
 export default router;

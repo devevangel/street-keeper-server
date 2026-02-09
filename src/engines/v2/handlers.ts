@@ -1,18 +1,14 @@
 /**
  * V2 engine handlers
  *
- * Edge-based street coverage system.
- * 4-step pipeline: Parse GPX -> OSRM Match -> Resolve Ways -> Build Edges
+ * CityStrides-style node proximity: parse GPX, mark hit nodes (25m), derive street completion.
  */
 
 import type { Request, Response } from "express";
-import type { AnalyzeGpxResponse, GroupedStreet } from "./types.js";
+import type { AnalyzeGpxResponse } from "./types.js";
 import { parseGpx, GpxParseError } from "./modules/gpx-parser.js";
-import { matchWithOSRM } from "./modules/osrm-matcher.js";
-import { resolveWays } from "./modules/way-resolver.js";
-import { buildAndValidateEdges } from "./modules/edge-builder.js";
+import { markHitNodes } from "./modules/node-proximity.js";
 import { deriveStreetCompletion, groupStreetsByName } from "./street-completion.js";
-import { persistUserEdges } from "./edge-persistence.js";
 import { getMapStreetsV2 } from "../../services/map.service.js";
 import { MAP } from "../../config/constants.js";
 
@@ -22,7 +18,7 @@ import { MAP } from "../../config/constants.js";
  */
 export function getInfo(_req: Request, res: Response): void {
   res.json({
-    message: "GPX Parser Test Engine - Edge-Based System",
+    message: "GPX Parser Test Engine - CityStrides-Style Node Proximity",
     version: "3.0.0",
     endpoints: {
       analyze: "POST /api/v1/engine-v2/analyze",
@@ -30,13 +26,13 @@ export function getInfo(_req: Request, res: Response): void {
       mapStreets: "GET /api/v1/engine-v2/map/streets",
     },
     description:
-      "Upload a GPX file to analyze street coverage using OSRM edge-based matching. Returns matched path, edges, and street completion status.",
+      "Upload a GPX file to mark nodes within 25m as hit and derive street completion (90% rule). Returns nodes hit and street list.",
   });
 }
 
 /**
  * GET /api/v1/engine-v2/streets
- * Returns the user's street list (cumulative from UserEdge). Requires auth; userId from req.user.
+ * Returns the user's street list (cumulative from UserNodeHit). Requires auth.
  */
 export async function getStreets(req: Request, res: Response): Promise<void> {
   const userId = (req as Request & { user?: { id: string } }).user?.id;
@@ -64,8 +60,7 @@ export async function getStreets(req: Request, res: Response): Promise<void> {
 
 /**
  * GET /api/v1/engine-v2/map/streets
- * Returns map streets with geometry and V2 (UserEdge) progress. Same shape as GET /map/streets.
- * Query: lat, lng, radius (optional, default MAP default).
+ * Returns map streets with geometry and V2 (UserNodeHit) progress. Same shape as GET /map/streets.
  */
 export async function getMapStreets(
   req: Request,
@@ -117,23 +112,13 @@ export async function getMapStreets(
 
 /**
  * POST /api/v1/engine-v2/analyze
- * Analyzes a GPX file and returns edge-based street coverage analysis.
- *
- * Query params:
- *   - userId: User ID (required for persistence)
- *   - debug=true: Include additional debug information
- *
- * Body:
- *   - gpxFile: GPX file (multipart/form-data)
- *
- * Response: AnalyzeGpxResponse
+ * Parses GPX, marks nodes within 25m as hit, persists to UserNodeHit, returns street completion.
  */
 export async function analyzeGpx(
   req: Request,
   res: Response
 ): Promise<void> {
   try {
-    // Check if file was uploaded
     if (!req.file) {
       res.status(400).json({
         success: false,
@@ -143,86 +128,38 @@ export async function analyzeGpx(
       return;
     }
 
-    // Get userId from query params (required for persistence)
     const userId = req.query.userId as string | undefined;
     if (!userId) {
       res.status(400).json({
         success: false,
-        error: "userId query parameter is required for edge persistence.",
+        error: "userId query parameter is required for node hit persistence.",
         code: "USER_ID_MISSING",
       });
       return;
     }
 
-    const startTime = Date.now();
-
-    // Step 1: Parse GPX
     const parsedGpx = parseGpx(req.file.buffer);
-
-    // Step 2: OSRM Map Match
-    const matchResult = await matchWithOSRM(parsedGpx.points);
-
-    // Step 3: Resolve Ways
-    const wayResult = await resolveWays(matchResult.nodes);
-
-    // Step 4: Build and Validate Edges
-    const timestamps = parsedGpx.points.map((p) => p.time);
-    const edgeResult = buildAndValidateEdges(
-      wayResult.resolvedEdges,
-      matchResult.nodes,
-      timestamps
-    );
-
-    // Step 5: Persist valid edges to UserEdge table (cumulative tracking)
-    const runDate = parsedGpx.points[0]?.time
-      ? new Date(parsedGpx.points[0].time)
-      : new Date();
-    await persistUserEdges(userId, edgeResult.validEdges, runDate);
-
-    // Step 6: Derive street completion from ALL stored edges (cumulative progress)
+    const points = parsedGpx.points.map((p) => ({ lat: p.lat, lng: p.lng }));
+    const { nodesHit } = await markHitNodes(userId, points);
     const streetCompletion = await deriveStreetCompletion(userId);
-
-    // Group streets by name for client-friendly display
     const groupedStreets = groupStreetsByName(streetCompletion);
 
-    // Build response
     const response: AnalyzeGpxResponse = {
       success: true,
       run: {
         name: parsedGpx.name,
         date: parsedGpx.points[0]?.time || new Date().toISOString(),
         totalPoints: parsedGpx.totalPoints,
-        matchedPoints: matchResult.nodes.length,
-        matchConfidence: matchResult.confidence,
-        distanceMeters: Math.round(matchResult.distance * 100) / 100,
-      },
-      path: {
-        type: "LineString",
-        coordinates: matchResult.geometry.coordinates,
-      },
-      edges: {
-        total: edgeResult.statistics.totalEdges,
-        valid: edgeResult.statistics.validCount,
-        rejected: edgeResult.statistics.rejectedCount,
-        list: edgeResult.validEdges.map((edge) => ({
-          edgeId: edge.edgeId,
-          wayId: String(edge.wayId),
-          wayName: edge.wayName,
-          lengthMeters: Math.round(edge.lengthMeters * 100) / 100,
-        })),
+        nodesHit,
       },
       streets: groupedStreets,
-      warnings: [
-        ...matchResult.warnings,
-        ...wayResult.warnings,
-      ],
+      warnings: [],
     };
 
     res.json(response);
   } catch (error) {
     console.error("Error analyzing GPX:", error);
 
-    // Handle specific error types
     if (error instanceof GpxParseError) {
       res.status(400).json({
         success: false,
@@ -232,7 +169,6 @@ export async function analyzeGpx(
       return;
     }
 
-    // Generic error
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : "Internal server error",
@@ -240,4 +176,3 @@ export async function analyzeGpx(
     });
   }
 }
-

@@ -216,9 +216,45 @@ Unnamed roads grouped by highway type. Kept separate to avoid cluttering the mai
 
 ---
 
+## Engine V2 GPX Analysis
+
+The **V2 engine** provides a separate analyze endpoint that uses **node proximity** (CityStrides-style) instead of Overpass + Mapbox.
+
+**Endpoint:** `POST /api/v1/engine-v2/analyze`  
+**Query param:** `userId` (required) — the user ID so node hits can be persisted to **UserNodeHit**.
+
+### How V2 analysis works
+
+1. **Parse GPX** — Same as above: extract GPS points (lat, lng) from the uploaded file.
+2. **Mark hit nodes** — For each GPS point, query **NodeCache** for nodes within a 25-metre radius; compute haversine distance; for each node within 25 m, upsert a row in **UserNodeHit** (userId, nodeId). No Overpass or Mapbox calls.
+3. **Derive street completion** — For the bounding box of the run (or all streets the user has progress on), compute completion per way: (nodes hit / totalNodes) from **UserNodeHit**, **WayNode**, and **WayTotalEdges**. Apply the 90% rule (100% for streets with ≤10 nodes).
+4. **Build response** — Return run summary (distance, point count, nodes hit) and a list of streets with percentage and completion status, in a shape similar to the legacy response so the frontend can display it the same way.
+
+### V2 response shape
+
+The V2 analyze response includes:
+
+- **nodesHit** — Number of distinct nodes marked as hit in this run.
+- **streets** — List of streets with `osmId`, `name`, `percentage`, `isComplete`, etc., derived from node hit counts (not from segment coverage).
+- **analysis** — High-level stats (e.g. points count, total distance).
+
+### When to use V1 vs V2 analyze
+
+| | V1 (`POST /runs/analyze-gpx` or `/engine-v1/analyze`) | V2 (`POST /engine-v2/analyze`) |
+|--|------------------------------------------------------|-------------------------------|
+| **Data source** | Overpass + optional Mapbox | Pre-seeded NodeCache, WayNode, WayTotalEdges |
+| **Persistence** | No (one-off analysis unless activity processor runs) | Yes — node hits are saved to UserNodeHit for the given userId |
+| **Setup** | No seed required | Requires PBF seed for the region |
+| **Accuracy model** | Segment coverage percentage | Node hit count with 90% threshold |
+
+See [How Engines Work](/docs/how-engines-work) for the full V2 pipeline and [Engine Comparison](/docs/engines) for a side-by-side comparison.
+
+---
+
 ## Accuracy Comparison
 
 | Approach | Accuracy | Intersection Handling | GPS Drift |
 |----------|----------|----------------------|-----------|
-| Mapbox + Overpass (hybrid) | ~98% | Excellent | Excellent |
-| Overpass only (fallback) | ~85% | Poor | Basic |
+| Mapbox + Overpass (V1 hybrid) | ~98% | Excellent | Excellent |
+| Overpass only (V1 fallback) | ~85% | Poor | Basic |
+| Node proximity (V2, 25 m snap) | CityStrides-style | Good (90% node rule) | 25 m buffer helps |

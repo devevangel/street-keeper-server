@@ -67,7 +67,7 @@ In production, authentication is handled via Strava OAuth.
       },
       {
         name: "Engine V2",
-        description: "V2 engine: OSRM edge-based street coverage with UserEdge persistence",
+        description: "V2 engine: local map matcher (HMM/Viterbi) + per-edge coverage filter; UserEdge persistence",
       },
     ],
     components: {

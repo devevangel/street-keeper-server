@@ -16,7 +16,7 @@ const router = Router();
  *   get:
  *     tags: [Engine V2]
  *     summary: V2 engine info
- *     description: Returns engine metadata and available endpoints (OSRM edge-based, UserEdge persistence).
+ *     description: Returns engine metadata and available endpoints (node proximity, UserNodeHit persistence).
  *     responses:
  *       200:
  *         description: Engine info
@@ -37,8 +37,8 @@ router.get("/", getInfo);
  * /engine-v2/streets:
  *   get:
  *     tags: [Engine V2]
- *     summary: User street list from UserEdge
- *     description: Returns the user's street list (cumulative from UserEdge). Requires authentication.
+*     summary: User street list from UserNodeHit
+*     description: Returns the user's street list (cumulative from UserNodeHit). Requires authentication.
  *     security:
  *       - DevAuth: []
  *     responses:
@@ -70,7 +70,7 @@ router.get("/streets", requireAuth, getStreets);
  *   get:
  *     tags: [Engine V2]
  *     summary: Map streets with V2 progress
- *     description: Returns streets with geometry and V2 (UserEdge) progress for map rendering. Same shape as GET /map/streets.
+ *     description: Returns streets with geometry and V2 (UserNodeHit) progress for map rendering. Same shape as GET /map/streets.
  *     security:
  *       - DevAuth: []
  *     parameters:
@@ -116,7 +116,7 @@ router.get("/map/streets", requireAuth, getMapStreets);
  *   post:
  *     tags: [Engine V2]
  *     summary: Analyze GPX and persist edges
- *     description: Upload a GPX file for analysis. Persists edges to UserEdge for the given userId. Query param userId required.
+ *     description: Upload a GPX file for analysis. Marks nodes as hit in UserNodeHit for the given userId. Query param userId required.
  *     parameters:
  *       - in: query
  *         name: userId

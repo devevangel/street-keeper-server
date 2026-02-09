@@ -69,7 +69,10 @@ backend/
 │   │   ├── index.ts      # Route aggregator
 │   │   └── *.routes.ts   # Feature-specific routes
 │   │
-│   ├── services/         # Business logic layer
+│   ├── engines/          # Engine-specific logic (V1 and V2)
+│   │   ├── v1/           # V1: street-matching, street-aggregation, mapbox, gpx-analysis (re-exported from services/*.service.ts)
+│   │   └── v2/           # V2: local matcher, way resolver, edge builder, coverage filter
+│   ├── services/         # Business logic layer (shared + re-exports for engine modules)
 │   │   └── *.service.ts  # Feature-specific services
 │   │
 │   ├── tests/            # Test files
@@ -96,7 +99,8 @@ backend/
 | `lib/`        | Shared singletons and utilities | Database clients, common helpers            |
 | `middleware/` | Request/response interceptors   | Auth, validation, logging middleware        |
 | `routes/`     | HTTP endpoint definitions       | Route handlers (thin, delegate to services) |
-| `services/`   | Business logic                  | Core application logic, external API calls  |
+| `engines/`    | Engine-specific pipelines       | V1 (Overpass/Mapbox), V2 (local matcher, edges) |
+| `services/`   | Business logic                  | Core application logic, external API calls; some re-export from engines/v1 |
 | `types/`      | TypeScript interfaces           | Request/response types, domain models       |
 | `tests/`      | Automated tests                 | Unit and integration tests                  |
 
