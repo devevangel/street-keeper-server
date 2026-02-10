@@ -48,6 +48,11 @@ router.use(requireAuth);
  *         required: false
  *         schema: { type: integer, default: 2000 }
  *         description: Radius in meters (100-10000)
+ *       - in: query
+ *         name: minProgress
+ *         required: false
+ *         schema: { type: number, minimum: 0, maximum: 100, default: 45 }
+ *         description: Only return streets with progress >= this percentage (0-100). Default 45 for homepage; use 0 for all streets with any progress.
  *     responses:
  *       200:
  *         description: Map streets with geometry and stats
@@ -81,6 +86,18 @@ router.get("/streets", async (req: Request, res: Response): Promise<void> => {
         : Number(radiusRaw)
       : MAP.DEFAULT_RADIUS_METERS;
 
+  const minProgressRaw = req.query.minProgress;
+  const minProgress =
+    minProgressRaw !== undefined
+      ? typeof minProgressRaw === "string"
+        ? parseFloat(minProgressRaw)
+        : Number(minProgressRaw)
+      : 45;
+  const minPercentage =
+    Number.isNaN(minProgress) || minProgress < 0 || minProgress > 100
+      ? 45
+      : minProgress;
+
   if (Number.isNaN(lat) || lat < -90 || lat > 90) {
     res.status(400).json({
       success: false,
@@ -113,7 +130,7 @@ router.get("/streets", async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    const result = await getMapStreets(userId, lat, lng, radius);
+    const result = await getMapStreets(userId, lat, lng, radius, minPercentage);
     res.json(result);
   } catch (error) {
     console.error("[Map] Error fetching map streets:", error);

@@ -88,6 +88,10 @@ router.get("/streets", requireAuth, getStreets);
  *         name: radius
  *         schema: { type: integer, default: 5000 }
  *         description: Radius in meters
+ *       - in: query
+ *         name: minProgress
+ *         schema: { type: number, minimum: 0, maximum: 100, default: 45 }
+ *         description: Only return streets with progress >= this percentage. Default 45 for homepage; use 0 for all.
  *     responses:
  *       200:
  *         description: Map streets with geometry and progress

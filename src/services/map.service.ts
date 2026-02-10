@@ -201,13 +201,15 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
  * @param lat - Center latitude
  * @param lng - Center longitude
  * @param radiusMeters - Radius in meters (clamped to MAP config)
+ * @param minPercentage - Only include streets with progress >= this (0-100). Default 0. Use 30 for homepage to reduce payload.
  * @returns MapStreetsResponse with streets, counts, and center/radius
  */
 export async function getMapStreets(
   userId: string,
   lat: number,
   lng: number,
-  radiusMeters: number
+  radiusMeters: number,
+  minPercentage: number = 0
 ): Promise<MapStreetsResponse> {
   // Clamp radius to allowed range
   const radius = Math.min(
@@ -232,10 +234,10 @@ export async function getMapStreets(
     };
   }
 
-  // 2. Get user progress for streets in this area (any progress > 0)
+  // 2. Get user progress for streets in this area (filter by minPercentage)
   const progressList = await getUserStreetProgress(userId, {
     osmIds: osmIdsInArea,
-    minPercentage: 0.01,
+    minPercentage: Math.max(0.01, minPercentage),
   });
 
   const geometryByOsmId = new Map(geometries.map((g) => [g.osmId, g]));
@@ -338,14 +340,17 @@ export async function getMapStreets(
 }
 
 /**
- * Get map streets using V2 (UserEdge) progress.
- * Same response shape as getMapStreets; progress comes from engine-v2 UserEdge data.
+ * Get map streets using V2 (UserNodeHit) progress.
+ * Same response shape as getMapStreets; progress comes from engine-v2 node completion.
+ *
+ * @param minPercentage - Only include streets with progress >= this (0-100). Default 0. Use 30 for homepage.
  */
 export async function getMapStreetsV2(
   userId: string,
   lat: number,
   lng: number,
-  radiusMeters: number
+  radiusMeters: number,
+  minPercentage: number = 0
 ): Promise<MapStreetsResponse> {
   const radius = Math.min(
     Math.max(radiusMeters, MAP.MIN_RADIUS_METERS),
@@ -371,6 +376,8 @@ export async function getMapStreetsV2(
     const percentage = Math.round(
       (comp.edgesCompleted / comp.edgesTotal) * 100
     );
+    if (percentage < minPercentage) continue;
+
     const status = comp.isComplete ? "completed" : "partial";
     const isConnector =
       geom.lengthMeters <= STREET_AGGREGATION.CONNECTOR_MAX_LENGTH_METERS;

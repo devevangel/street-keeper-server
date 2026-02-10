@@ -89,6 +89,18 @@ export async function getMapStreets(
         : Number(radiusRaw)
       : MAP.DEFAULT_RADIUS_METERS;
 
+  const minProgressRaw = req.query.minProgress;
+  const minProgress =
+    minProgressRaw !== undefined
+      ? typeof minProgressRaw === "string"
+        ? parseFloat(minProgressRaw)
+        : Number(minProgressRaw)
+      : 45;
+  const minPercentage =
+    Number.isNaN(minProgress) || minProgress < 0 || minProgress > 100
+      ? 45
+      : minProgress;
+
   if (Number.isNaN(lat) || Number.isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
     res.status(400).json({
       success: false,
@@ -99,7 +111,7 @@ export async function getMapStreets(
   }
 
   try {
-    const result = await getMapStreetsV2(userId, lat, lng, radius);
+    const result = await getMapStreetsV2(userId, lat, lng, radius, minPercentage);
     res.json(result);
   } catch (error) {
     console.error("[engine-v2] getMapStreets error:", error);
