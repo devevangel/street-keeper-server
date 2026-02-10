@@ -40,12 +40,13 @@ const MILESTONES = [25, 50, 75, 100];
 const ALMOST_COMPLETE_MIN = 50;
 const ALMOST_COMPLETE_MAX = 94;
 const CLUSTER_RADIUS_METERS = 500;
+const MILESTONE_PREVIEW_MAX = 8;
 
 function haversineMeters(
   lat1: number,
   lng1: number,
   lat2: number,
-  lng2: number
+  lng2: number,
 ): number {
   const R = 6371000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -60,12 +61,17 @@ function haversineMeters(
   return R * c;
 }
 
-function streetToGeometry(street: ProjectMapStreet): Array<{ lat: number; lng: number }> {
+function streetToGeometry(
+  street: ProjectMapStreet,
+): Array<{ lat: number; lng: number }> {
   const coords = street.geometry?.coordinates ?? [];
   return coords.map(([lng, lat]) => ({ lat, lng }));
 }
 
-function streetCentroid(street: ProjectMapStreet): { lat: number; lng: number } {
+function streetCentroid(street: ProjectMapStreet): {
+  lat: number;
+  lng: number;
+} {
   const coords = street.geometry?.coordinates ?? [];
   if (coords.length === 0) return { lat: 0, lng: 0 };
   const sumLat = coords.reduce((s, c) => s + c[1], 0);
@@ -79,7 +85,7 @@ function streetCentroid(street: ProjectMapStreet): { lat: number; lng: number } 
 function toSuggestion(
   street: ProjectMapStreet,
   reason: string,
-  extra?: { remainingMeters?: number; distanceFromPoint?: number }
+  extra?: { remainingMeters?: number; distanceFromPoint?: number },
 ): StreetSuggestion {
   return {
     osmId: street.osmId,
@@ -102,7 +108,7 @@ export async function getSuggestions(
     maxResults?: number;
     lat?: number;
     lng?: number;
-  }
+  },
 ): Promise<SuggestionsResponse> {
   const maxResults = options?.maxResults ?? DEFAULT_MAX_PER_TYPE;
   const refLat = options?.lat ?? undefined;
@@ -129,14 +135,15 @@ export async function getSuggestions(
   const streetsNeeded =
     nextTarget != null && project.totalStreets > 0
       ? Math.ceil(
-          ((nextTarget - currentProgressPct) / 100) * project.totalStreets
+          ((nextTarget - currentProgressPct) / 100) * project.totalStreets,
         )
       : 0;
 
   const almostComplete: StreetSuggestion[] = streets
     .filter(
       (s) =>
-        s.percentage >= ALMOST_COMPLETE_MIN && s.percentage <= ALMOST_COMPLETE_MAX
+        s.percentage >= ALMOST_COMPLETE_MIN &&
+        s.percentage <= ALMOST_COMPLETE_MAX,
     )
     .sort((a, b) => b.percentage - a.percentage)
     .slice(0, maxResults)
@@ -145,7 +152,7 @@ export async function getSuggestions(
       return toSuggestion(
         s,
         `${Math.round(s.percentage)}% complete — just ${Math.round(remaining)}m left!`,
-        { remainingMeters: remaining }
+        { remainingMeters: remaining },
       );
     });
 
@@ -162,20 +169,20 @@ export async function getSuggestions(
       toSuggestion(
         street,
         `${Math.round(dist)}m from ${useRef ? "you" : "center"}`,
-        { distanceFromPoint: dist }
-      )
+        { distanceFromPoint: dist },
+      ),
     );
 
   const milestoneStreets: StreetSuggestion[] =
     nextTarget != null && streetsNeeded > 0
       ? unrun
           .sort((a, b) => a.lengthMeters - b.lengthMeters)
-          .slice(0, streetsNeeded)
+          .slice(0, Math.min(streetsNeeded, MILESTONE_PREVIEW_MAX))
           .map((s) =>
             toSuggestion(
               s,
-              `Complete ${streetsNeeded} street(s) to reach ${nextTarget}%`
-            )
+              `Complete ${streetsNeeded} street(s) to reach ${nextTarget}%`,
+            ),
           )
       : [];
 
@@ -206,7 +213,7 @@ export async function getSuggestions(
           centroid.lat,
           centroid.lng,
           other.centroid.lat,
-          other.centroid.lng
+          other.centroid.lng,
         );
         if (d <= CLUSTER_RADIUS_METERS) {
           group.push(other.street);
@@ -221,12 +228,14 @@ export async function getSuggestions(
           group.reduce((s, st) => s + streetCentroid(st).lng, 0) / group.length;
         clusters.push({
           centroid: { lat: avgLat, lng: avgLng },
-          streets: group.slice(0, maxResults).map((st) =>
-            toSuggestion(
-              st,
-              `${group.length} unrun streets in this area (${(totalLength / 1000).toFixed(1)} km)`
-            )
-          ),
+          streets: group
+            .slice(0, maxResults)
+            .map((st) =>
+              toSuggestion(
+                st,
+                `${group.length} unrun streets in this area (${(totalLength / 1000).toFixed(1)} km)`,
+              ),
+            ),
           totalLength,
           streetCount: group.length,
         });

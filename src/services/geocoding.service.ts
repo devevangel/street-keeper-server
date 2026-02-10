@@ -45,7 +45,7 @@ export async function searchLocation(
     limit?: number;
     countrycodes?: string;
     viewbox?: [number, number, number, number]; // [south, north, west, east]
-  }
+  },
 ): Promise<GeocodingResult[]> {
   const trimmed = query.trim();
   if (!trimmed || trimmed.length < 2) {
@@ -72,8 +72,11 @@ export async function searchLocation(
   const url = `${NOMINATIM_BASE}/search?${params.toString()}`;
   const response = await fetch(url, {
     headers: {
-      "User-Agent": "StreetKeeper/1.0 (https://github.com/street-keeper; contact@example.com)",
+      "User-Agent":
+        "StreetKeeper/1.0 (https://street-keeper.app; dev@street-keeper.app)",
+      Referer: "https://street-keeper.app/",
       Accept: "application/json",
+      "Accept-Language": "en",
     },
   });
 
