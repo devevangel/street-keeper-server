@@ -23,6 +23,7 @@ import webhooksRoutes from "./webhooks.routes.js";
 import projectsRoutes from "./projects.routes.js";
 import activitiesRoutes from "./activities.routes.js";
 import mapRoutes from "./map.routes.js";
+import geocodeRoutes from "./geocode.routes.js";
 import { v1Routes } from "../engines/v1/index.js";
 import { v2Routes } from "../engines/v2/index.js";
 
@@ -35,6 +36,7 @@ router.use("/webhooks", webhooksRoutes);
 router.use("/projects", projectsRoutes);
 router.use("/activities", activitiesRoutes);
 router.use("/map", mapRoutes);
+router.use("/geocode", geocodeRoutes);
 router.use("/engine-v1", v1Routes);
 router.use("/engine-v2", v2Routes);
 

@@ -39,6 +39,13 @@ export interface StreetSnapshot {
 // ============================================
 
 /**
+ * Boundary mode: which streets to include in the project area.
+ * - centroid: include if street centroid is inside circle (default, more inclusive)
+ * - strict: include only if entire street geometry is inside circle
+ */
+export type BoundaryMode = "centroid" | "strict";
+
+/**
  * Input for creating a new project
  */
 export interface CreateProjectInput {
@@ -46,6 +53,7 @@ export interface CreateProjectInput {
   centerLat: number;
   centerLng: number;
   radiusMeters: number; // Must be in PROJECTS.ALLOWED_RADII
+  boundaryMode?: BoundaryMode; // Default "centroid"
   deadline?: string; // ISO date string (optional)
 }
 
@@ -68,6 +76,20 @@ export interface ProjectListItem {
   updatedAt: string;
 }
 
+/** Next milestone (25, 50, 75, 100) and streets needed to reach it */
+export interface NextMilestone {
+  target: number;
+  streetsNeeded: number;
+  currentProgress: number;
+}
+
+/** Street count by highway type for bar chart */
+export interface StreetsByTypeItem {
+  type: string;
+  total: number;
+  completed: number;
+}
+
 /**
  * Full project detail with street data
  */
@@ -78,6 +100,13 @@ export interface ProjectDetail extends ProjectListItem {
   // Computed stats
   inProgressCount: number; // Streets with 1-89% coverage
   notStartedCount: number; // Streets with 0% coverage
+
+  // High-impact stats
+  distanceCoveredMeters: number; // Sum of completed street lengths
+  activityCount: number; // Activities that touched this project
+  lastActivityDate: string | null; // Most recent activity in project (ISO)
+  nextMilestone: NextMilestone | null;
+  streetsByType: StreetsByTypeItem[];
 
   // Refresh info
   refreshNeeded: boolean;
@@ -172,6 +201,26 @@ export interface CreateProjectResponse {
 export interface ProjectMapResponse {
   success: true;
   map: ProjectMapData;
+}
+
+/**
+ * Heatmap point: [lat, lng, intensity]
+ */
+export type HeatmapPoint = [number, number, number];
+
+export interface ProjectHeatmapData {
+  points: HeatmapPoint[];
+  bounds: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  };
+}
+
+export interface ProjectHeatmapResponse {
+  success: true;
+  heatmap: ProjectHeatmapData;
 }
 
 /**

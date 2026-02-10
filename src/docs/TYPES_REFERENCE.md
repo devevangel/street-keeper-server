@@ -212,6 +212,21 @@ interface ProjectDetail extends ProjectListItem {
   /** Number of streets with 0% coverage */
   notStartedCount: number;
 
+  /** Sum of completed street lengths (meters) */
+  distanceCoveredMeters: number;
+
+  /** Number of activities that touched this project */
+  activityCount: number;
+
+  /** ISO date of most recent activity in project */
+  lastActivityDate: string | null;
+
+  /** Next milestone (25/50/75/100) and streets needed */
+  nextMilestone: NextMilestone | null;
+
+  /** Street counts by highway type (for charts) */
+  streetsByType: StreetsByTypeItem[];
+
   /** Whether refresh is recommended (snapshot > 30 days old) */
   refreshNeeded: boolean;
 
@@ -220,6 +235,26 @@ interface ProjectDetail extends ProjectListItem {
 
   /** Number of new streets detected (after refresh) */
   newStreetsDetected?: number;
+}
+```
+
+### NextMilestone
+
+```typescript
+interface NextMilestone {
+  target: number;        // 25, 50, 75, or 100
+  streetsNeeded: number;
+  currentProgress: number;
+}
+```
+
+### StreetsByTypeItem
+
+```typescript
+interface StreetsByTypeItem {
+  type: string;   // e.g. "residential", "primary"
+  total: number;
+  completed: number;
 }
 ```
 
@@ -281,6 +316,84 @@ interface CreateProjectRequest {
 
   /** Optional cache key from preview (speeds up creation) */
   cacheKey?: string;
+
+  /** Boundary mode: "centroid" (default) or "strict" */
+  boundaryMode?: "centroid" | "strict";
+}
+```
+
+### ProjectMapData, ProjectMapStreet
+
+Map data for project map view (GET `/projects/:id/map`).
+
+```typescript
+interface ProjectMapStreet {
+  osmId: string;
+  name: string;
+  highwayType: string;
+  lengthMeters: number;
+  percentage: number;
+  status: "completed" | "partial" | "not_started";
+  geometry: { type: "LineString"; coordinates: [number, number][] };
+}
+
+interface ProjectMapData {
+  id: string;
+  name: string;
+  centerLat: number;
+  centerLng: number;
+  radiusMeters: number;
+  progress: number;
+  boundary: { type: "circle"; center: { lat: number; lng: number }; radiusMeters: number };
+  stats: { totalStreets: number; completedStreets: number; partialStreets: number; notRunStreets: number; completionPercentage: number };
+  streets: ProjectMapStreet[];
+  geometryCacheHit: boolean;
+}
+```
+
+### ProjectHeatmapData
+
+Heatmap data (GET `/projects/:id/heatmap`).
+
+```typescript
+interface ProjectHeatmapData {
+  /** [lat, lng, intensity] per point */
+  points: [number, number, number][];
+  bounds: { north: number; south: number; east: number; west: number };
+}
+```
+
+### StreetSuggestion, SuggestionsResponse
+
+Next-run suggestions (GET `/projects/:id/suggestions`).
+
+```typescript
+interface StreetSuggestion {
+  osmId: string;
+  name: string;
+  lengthMeters: number;
+  currentProgress: number;
+  remainingMeters?: number;
+  distanceFromPoint?: number;
+  reason: string;
+  geometry: Array<{ lat: number; lng: number }>;
+}
+
+interface SuggestionsResponse {
+  almostComplete: StreetSuggestion[];
+  nearest: StreetSuggestion[];
+  milestone: {
+    target: number;
+    currentProgress: number;
+    streetsNeeded: number;
+    streets: StreetSuggestion[];
+  } | null;
+  clusters: Array<{
+    centroid: { lat: number; lng: number };
+    streets: StreetSuggestion[];
+    totalLength: number;
+    streetCount: number;
+  }>;
 }
 ```
 

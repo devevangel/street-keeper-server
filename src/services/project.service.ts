@@ -32,6 +32,7 @@ import {
   setCachedGeometries,
   findLargerCachedRadius,
   filterStreetsToRadius,
+  filterStreetsToRadiusStrict,
 } from "./geometry-cache.service.js";
 import type { OsmStreet } from "../types/run.types.js";
 import type {
@@ -41,10 +42,13 @@ import type {
   ProjectDetail,
   ProjectMapData,
   ProjectMapStreet,
+  ProjectHeatmapData,
+  HeatmapPoint,
   SnapshotStreet,
   StreetSnapshot,
   SnapshotDiff,
 } from "../types/project.types.js";
+import type { GpxPoint } from "../types/run.types.js";
 
 // ============================================
 // Project Preview (Before Creation)
@@ -68,7 +72,8 @@ import type {
 export async function previewProject(
   centerLat: number,
   centerLng: number,
-  radiusMeters: number
+  radiusMeters: number,
+  boundaryMode: "centroid" | "strict" = "centroid"
 ): Promise<ProjectPreview> {
   // Get streets with smart caching
   const { streets, cacheKey, cachedRadius } = await getStreetsWithCache(
@@ -77,10 +82,15 @@ export async function previewProject(
     radiusMeters
   );
 
-  // Filter to requested radius if cache was larger
+  const filterFn =
+    boundaryMode === "strict"
+      ? filterStreetsToRadiusStrict
+      : filterStreetsToRadius;
+
+  // Filter to requested radius (and boundary mode) if cache was larger or we need strict
   const filteredStreets =
-    cachedRadius > radiusMeters
-      ? filterStreetsToRadius(streets, centerLat, centerLng, radiusMeters)
+    cachedRadius > radiusMeters || boundaryMode === "strict"
+      ? filterFn(streets, centerLat, centerLng, radiusMeters)
       : streets;
 
   // Build summary statistics
@@ -168,7 +178,14 @@ export async function createProject(
   input: CreateProjectInput,
   cacheKey?: string
 ): Promise<ProjectListItem> {
-  const { name, centerLat, centerLng, radiusMeters, deadline } = input;
+  const {
+    name,
+    centerLat,
+    centerLng,
+    radiusMeters,
+    boundaryMode = "centroid",
+    deadline,
+  } = input;
 
   if (
     !PROJECTS.ALLOWED_RADII.includes(
@@ -182,19 +199,20 @@ export async function createProject(
 
   let streets: OsmStreet[];
 
+  const filterFn =
+    boundaryMode === "strict"
+      ? filterStreetsToRadiusStrict
+      : filterStreetsToRadius;
+
   if (cacheKey) {
     const cached = await getCachedGeometries(cacheKey);
     if (cached) {
-      streets = filterStreetsToRadius(
-        cached,
-        centerLat,
-        centerLng,
-        radiusMeters
-      );
+      streets = filterFn(cached, centerLat, centerLng, radiusMeters);
       console.log(`[Project] Using cached data from: ${cacheKey}`);
     } else {
       console.log(`[Project] Cache key invalid/expired, querying Overpass`);
       streets = await queryStreetsInRadius(centerLat, centerLng, radiusMeters);
+      streets = filterFn(streets, centerLat, centerLng, radiusMeters);
     }
   } else {
     const result = await getStreetsWithCache(
@@ -203,13 +221,8 @@ export async function createProject(
       radiusMeters
     );
     streets =
-      result.cachedRadius > radiusMeters
-        ? filterStreetsToRadius(
-            result.streets,
-            centerLat,
-            centerLng,
-            radiusMeters
-          )
+      result.cachedRadius > radiusMeters || boundaryMode === "strict"
+        ? filterFn(result.streets, centerLat, centerLng, radiusMeters)
         : result.streets;
   }
 
@@ -229,6 +242,7 @@ export async function createProject(
       centerLat,
       centerLng,
       radiusMeters,
+      boundaryMode,
       streetsSnapshot: snapshot as object,
       snapshotDate: new Date(),
       totalStreets: streets.length,
@@ -300,12 +314,64 @@ export async function getProjectById(
   ).length;
   const newStreetsDetected = snapshot.streets.filter((s) => s.isNew).length;
 
+  const distanceCoveredMeters = snapshot.streets
+    .filter((s) => s.percentage >= 90)
+    .reduce((sum, s) => sum + s.lengthMeters, 0);
+
+  const [activityCount, lastActivityDate] = await Promise.all([
+    prisma.projectActivity.count({ where: { projectId } }),
+    prisma.projectActivity
+      .findFirst({
+        where: { projectId },
+        orderBy: { activity: { startDate: "desc" } },
+        select: { activity: { select: { startDate: true } } },
+      })
+      .then((pa) => pa?.activity?.startDate?.toISOString() ?? null),
+  ]);
+
+  const currentProgressPct =
+    project.totalStreets > 0
+      ? (project.completedStreets / project.totalStreets) * 100
+      : 0;
+  const milestones = [25, 50, 75, 100];
+  const nextTarget = milestones.find((m) => m > currentProgressPct);
+  const nextMilestone =
+    nextTarget != null && project.totalStreets > 0
+      ? {
+          target: nextTarget,
+          streetsNeeded: Math.ceil(
+            ((nextTarget - currentProgressPct) / 100) * project.totalStreets
+          ),
+          currentProgress: Math.round(currentProgressPct * 100) / 100,
+        }
+      : null;
+
+  const streetsByTypeMap = new Map<
+    string,
+    { total: number; completed: number }
+  >();
+  for (const s of snapshot.streets) {
+    const key = s.highwayType || "unknown";
+    const cur = streetsByTypeMap.get(key) ?? { total: 0, completed: 0 };
+    cur.total += 1;
+    if (s.percentage >= 90) cur.completed += 1;
+    streetsByTypeMap.set(key, cur);
+  }
+  const streetsByType = Array.from(streetsByTypeMap.entries()).map(
+    ([type, v]) => ({ type, total: v.total, completed: v.completed })
+  );
+
   const projectDetail: ProjectDetail = {
     ...mapProjectToListItem(project),
     streets: snapshot.streets,
     snapshotDate: snapshot.snapshotDate,
     inProgressCount,
     notStartedCount,
+    distanceCoveredMeters: Math.round(distanceCoveredMeters * 100) / 100,
+    activityCount,
+    lastActivityDate,
+    nextMilestone,
+    streetsByType,
     refreshNeeded,
     daysSinceRefresh,
     ...(newStreetsDetected > 0 ? { newStreetsDetected } : {}),
@@ -357,6 +423,14 @@ export async function getProjectMapData(
   const progressByOsmId = new Map(
     snapshot.streets.map((s) => [s.osmId, { percentage: s.percentage }])
   );
+  const snapshotOsmIds = new Set(snapshot.streets.map((s) => s.osmId));
+
+  const boundaryMode =
+    (project as { boundaryMode?: string }).boundaryMode ?? "centroid";
+  const filterFn =
+    boundaryMode === "strict"
+      ? filterStreetsToRadiusStrict
+      : filterStreetsToRadius;
 
   let streetsWithGeometry: OsmStreet[];
   let geometryCacheHit: boolean;
@@ -369,7 +443,12 @@ export async function getProjectMapData(
   const exactCache = await getCachedGeometries(exactKey);
 
   if (exactCache) {
-    streetsWithGeometry = exactCache;
+    streetsWithGeometry = filterFn(
+      exactCache,
+      project.centerLat,
+      project.centerLng,
+      project.radiusMeters
+    );
     geometryCacheHit = true;
   } else {
     const larger = await findLargerCachedRadius(
@@ -378,7 +457,7 @@ export async function getProjectMapData(
       project.radiusMeters
     );
     if (larger) {
-      streetsWithGeometry = filterStreetsToRadius(
+      streetsWithGeometry = filterFn(
         larger.streets,
         project.centerLat,
         project.centerLng,
@@ -391,10 +470,21 @@ export async function getProjectMapData(
         project.centerLng,
         project.radiusMeters
       );
+      streetsWithGeometry = filterFn(
+        streetsWithGeometry,
+        project.centerLat,
+        project.centerLng,
+        project.radiusMeters
+      );
       await setCachedGeometries(exactKey, streetsWithGeometry);
       geometryCacheHit = false;
     }
   }
+
+  // Only show streets that are in the project snapshot (handles strict vs centroid)
+  streetsWithGeometry = streetsWithGeometry.filter((s) =>
+    snapshotOsmIds.has(s.osmId)
+  );
 
   let completedCount = 0;
   let partialCount = 0;
@@ -455,6 +545,95 @@ export async function getProjectMapData(
   };
 
   return mapData;
+}
+
+/** Haversine distance in meters (for heatmap point filter) */
+function haversineMeters(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+): number {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+const HEATMAP_MAX_POINTS = 3000;
+const HEATMAP_SAMPLE_STEP = 3;
+
+/**
+ * Get heatmap data for a project: GPS points from activities within the project boundary.
+ * Returns points as [lat, lng, intensity] for use with leaflet.heat.
+ */
+export async function getProjectHeatmapData(
+  projectId: string,
+  userId: string
+): Promise<ProjectHeatmapData> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+  });
+
+  if (!project) {
+    throw new ProjectNotFoundError(projectId);
+  }
+
+  if (project.userId !== userId) {
+    throw new ProjectAccessDeniedError(projectId);
+  }
+
+  const centerLat = project.centerLat;
+  const centerLng = project.centerLng;
+  const radiusMeters = project.radiusMeters;
+
+  const projectActivities = await prisma.projectActivity.findMany({
+    where: { projectId },
+    include: {
+      activity: {
+        select: { coordinates: true },
+      },
+    },
+  });
+
+  const allPoints: HeatmapPoint[] = [];
+  for (const pa of projectActivities) {
+    const coords = pa.activity?.coordinates as GpxPoint[] | undefined;
+    if (!Array.isArray(coords)) continue;
+    for (let i = 0; i < coords.length; i += HEATMAP_SAMPLE_STEP) {
+      const p = coords[i];
+      const lat = typeof p?.lat === "number" ? p.lat : undefined;
+      const lng = typeof p?.lng === "number" ? p.lng : undefined;
+      if (lat == null || lng == null) continue;
+      const dist = haversineMeters(centerLat, centerLng, lat, lng);
+      if (dist <= radiusMeters) {
+        allPoints.push([lat, lng, 1]);
+      }
+    }
+  }
+
+  const points =
+    allPoints.length <= HEATMAP_MAX_POINTS
+      ? allPoints
+      : allPoints.filter((_, i) => i % Math.ceil(allPoints.length / HEATMAP_MAX_POINTS) === 0);
+
+  const latList = points.map((p) => p[0]);
+  const lngList = points.map((p) => p[1]);
+  const bounds = {
+    north: latList.length ? Math.max(...latList) : centerLat + 0.01,
+    south: latList.length ? Math.min(...latList) : centerLat - 0.01,
+    east: lngList.length ? Math.max(...lngList) : centerLng + 0.01,
+    west: lngList.length ? Math.min(...lngList) : centerLng - 0.01,
+  };
+
+  return { points, bounds };
 }
 
 // ============================================

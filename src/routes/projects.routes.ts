@@ -46,11 +46,13 @@ import {
   listProjects,
   getProjectById,
   getProjectMapData,
+  getProjectHeatmapData,
   archiveProject,
   refreshProjectSnapshot,
   ProjectNotFoundError,
   ProjectAccessDeniedError,
 } from "../services/project.service.js";
+import { getSuggestions } from "../services/suggestion.service.js";
 import { listActivitiesForProject } from "../services/activity.service.js";
 import { ERROR_CODES, PROJECTS } from "../config/constants.js";
 import { OverpassError } from "../services/overpass.service.js";
@@ -184,8 +186,11 @@ router.get("/preview", async (req: Request, res: Response) => {
     return;
   }
 
+  const boundaryMode =
+    req.query.boundaryMode === "strict" ? "strict" : "centroid";
+
   try {
-    const preview = await previewProject(lat, lng, radius);
+    const preview = await previewProject(lat, lng, radius, boundaryMode);
 
     res.status(200).json({
       success: true,
@@ -329,8 +334,15 @@ router.post("/", async (req: Request, res: Response) => {
   const userId = req.user!.id;
 
   // Validate request body
-  const { name, centerLat, centerLng, radiusMeters, deadline, cacheKey } =
-    req.body;
+  const {
+    name,
+    centerLat,
+    centerLng,
+    radiusMeters,
+    boundaryMode: bodyBoundaryMode,
+    deadline,
+    cacheKey,
+  } = req.body;
 
   if (!name || typeof name !== "string" || name.trim().length === 0) {
     res.status(400).json({
@@ -374,12 +386,16 @@ router.post("/", async (req: Request, res: Response) => {
     return;
   }
 
+  const boundaryMode =
+    bodyBoundaryMode === "strict" ? "strict" : "centroid";
+
   try {
     const input: CreateProjectInput = {
       name: name.trim(),
       centerLat,
       centerLng,
       radiusMeters,
+      boundaryMode,
       deadline,
     };
 
@@ -588,6 +604,108 @@ router.get("/:id/map", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Map data error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Heatmap Data
+// ============================================
+
+router.get("/:id/heatmap", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    const heatmap = await getProjectHeatmapData(projectId, userId);
+
+    res.status(200).json({
+      success: true,
+      heatmap,
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    console.error("[Projects] Heatmap error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Suggestions (Next Run)
+// ============================================
+
+router.get("/:id/suggestions", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+  const lat = req.query.lat != null ? parseFloat(req.query.lat as string) : undefined;
+  const lng = req.query.lng != null ? parseFloat(req.query.lng as string) : undefined;
+  const maxResults =
+    req.query.maxResults != null
+      ? parseInt(req.query.maxResults as string, 10)
+      : undefined;
+  const limit =
+    typeof maxResults === "number" &&
+    Number.isInteger(maxResults) &&
+    maxResults > 0
+      ? maxResults
+      : undefined;
+
+  try {
+    const suggestions = await getSuggestions(projectId, userId, {
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lng: Number.isFinite(lng) ? lng : undefined,
+      maxResults: limit,
+    });
+
+    res.status(200).json({
+      success: true,
+      suggestions,
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    console.error("[Projects] Suggestions error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

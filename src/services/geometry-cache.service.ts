@@ -277,6 +277,38 @@ export function filterStreetsToRadius(
   });
 }
 
+/**
+ * Filter streets to only those entirely inside the circle (strict mode).
+ * Every coordinate of the street geometry must be within radius of center.
+ *
+ * @param streets - Streets from Overpass/cache
+ * @param centerLat - Center latitude
+ * @param centerLng - Center longitude
+ * @param radiusMeters - Radius in meters
+ * @returns Streets with all points inside the circle
+ */
+export function filterStreetsToRadiusStrict(
+  streets: OsmStreet[],
+  centerLat: number,
+  centerLng: number,
+  radiusMeters: number
+): OsmStreet[] {
+  return streets.filter((street) => {
+    const coords = street.geometry.coordinates;
+    if (coords.length === 0) return false;
+    for (const [streetLng, streetLat] of coords) {
+      const distance = haversineDistance(
+        centerLat,
+        centerLng,
+        streetLat,
+        streetLng
+      );
+      if (distance > radiusMeters) return false;
+    }
+    return true;
+  });
+}
+
 // ============================================
 // Cache Maintenance
 // ============================================

@@ -29,17 +29,28 @@ All activity routes require authentication.
 
 ---
 
+## Geocode (`/api/v1/geocode`)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/geocode` | Yes | Search locations (addresses, places, POIs). Query: `q` (search string), optional `limit` (default 5), optional `countrycodes` (e.g. `gb`). Uses Nominatim (OSM). |
+
+---
+
 ## Projects (`/api/v1/projects`)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/projects` | Yes | List user's projects. Query: `archived` (boolean). |
-| GET | `/projects/preview` | Yes | Preview streets in a circle. Query: `lat`, `lng`, `radiusMeters`. Returns street count and cacheKey. |
-| POST | `/projects` | Yes | Create project. Body: name, centerLat, centerLng, radiusMeters, cacheKey (from preview), optional deadline. |
-| GET | `/projects/:id` | Yes | Get project by ID (including streetsSnapshot, progress). |
-| PATCH | `/projects/:id` | Yes | Update project (name, deadline, isArchived). |
-| DELETE | `/projects/:id` | Yes | Delete project. |
+| GET | `/projects` | Yes | List user's projects. Query: `includeArchived` (boolean). |
+| GET | `/projects/preview` | Yes | Preview streets in a circle. Query: `lat`, `lng`, `radius`, optional `boundaryMode` (`centroid` \| `strict`). Returns street count, total length, cacheKey. |
+| POST | `/projects` | Yes | Create project. Body: name, centerLat, centerLng, radiusMeters, optional boundaryMode, optional cacheKey, optional deadline. |
+| GET | `/projects/:id` | Yes | Get project by ID (detail with streets, distanceCoveredMeters, activityCount, lastActivityDate, nextMilestone, streetsByType). |
+| GET | `/projects/:id/map` | Yes | Get project map data (streets with geometry and status for map rendering). |
+| GET | `/projects/:id/heatmap` | Yes | Get heatmap data (points [lat, lng, intensity] and bounds) from activity GPS within project. |
+| GET | `/projects/:id/suggestions` | Yes | Get next-run suggestions. Query: optional `lat`, `lng` (for "nearest" ref), optional `maxResults` per type. Returns almostComplete, nearest, milestone, clusters. |
+| DELETE | `/projects/:id` | Yes | Archive project (soft delete). |
 | POST | `/projects/:id/refresh` | Yes | Refresh project street list and progress from geometry cache / Overpass. |
+| GET | `/projects/:id/activities` | Yes | List activities that contributed to this project. |
 
 ---
 

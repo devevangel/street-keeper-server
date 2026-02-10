@@ -14,7 +14,8 @@
     "cleanup:unnamed": "tsx src/scripts/cleanup-unnamed-street-progress.ts",
     "reset:processed-activities": "tsx src/scripts/reset-processed-activities.ts",
     "seed:way-cache": "tsx src/scripts/seed-way-cache-from-pbf.ts",
-    "wipe:and-resync": "tsx src/scripts/wipe-and-resync.ts"
+    "wipe:and-resync": "tsx src/scripts/wipe-and-resync.ts",
+    "seed:demo-project": "tsx src/scripts/seed-demo-project.ts"
   },
   "keywords": [],
   "author": "",

@@ -13,6 +13,7 @@ This guide provides copy-paste ready code examples for integrating a React + Typ
 7. [Component Examples](#component-examples)
 8. [Error Handling](#error-handling)
 9. [Setup Checklist](#setup-checklist)
+10. [Pages, routes and new features](#pages-routes-and-new-features)
 
 ---
 
@@ -1402,3 +1403,37 @@ import { authService } from "./services/auth.service";
 // Set a test user ID (get from database)
 authService.setDevUser("your-test-user-uuid");
 ```
+
+---
+
+## Pages, routes and new features
+
+See **PRODUCT_ROADMAP.md** for business rationale and design decisions.
+
+### Routes
+
+| Path | Page | Description |
+|------|------|-------------|
+| `/projects` | ProjectsPage | List projects |
+| `/projects/new` | ProjectCreatePage | Create project (universal search, radius, auto-preview) |
+| `/projects/:id` | ProjectDetailPage | Dashboard: progress hero, stat cards, charts, SuggestionsPanel, map thumbnail |
+| `/projects/:id/map` | ProjectMapPage | Full-page street status map |
+| `/projects/:id/heatmap` | ProjectHeatmapPage | Full-page activity density heatmap |
+| `/projects/:id/suggestions` | ProjectSuggestionsMapPage | Full-page map with suggested streets highlighted |
+
+### Services
+
+- **geocoding.service** — `GET /geocode?q=...` (Nominatim) for location search.
+- **projects.service** — `getMap(id)`, `getHeatmap(id)`, `preview(..., boundaryMode)`, `create({ ..., boundaryMode })`.
+- **suggestions.service** — `getSuggestions(projectId, { lat?, lng?, maxResults? })` → `GET /projects/:id/suggestions`.
+
+### Components (projects)
+
+- **UniversalSearchInput** — Debounced location search with dropdown.
+- **ProgressHero** — Large progress % and milestone hint.
+- **StatCards** — Completed, in progress, not started, distance covered.
+- **CompletionPieChart**, **StreetTypeBarChart** — Recharts donut and horizontal bars.
+- **MapThumbnail** — Clickable preview linking to full map.
+- **SuggestionsPanel** — "Your next run" (almost complete, nearest, milestone) and link to suggestions map.
+- **ProjectMap** — Optional `suggestedOsmIds` and `showSuggestedLegend` for suggestions view.
+- **ProjectHeatmap** — Leaflet heat layer for activity points.

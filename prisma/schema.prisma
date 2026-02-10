@@ -50,7 +50,8 @@ model Project {
   centerLat       Float
   centerLng       Float
   radiusMeters    Int       // Allowed: 500, 1000, 2000, 5000, 10000
-  
+  boundaryMode    String    @default("centroid")  // "centroid" = include if centroid in circle; "strict" = only if entire street in circle
+
   // Street snapshot stored as JSON
   // Structure: { streets: SnapshotStreet[], snapshotDate: string }
   streetsSnapshot Json
