@@ -15,12 +15,19 @@
     "reset:processed-activities": "tsx src/scripts/reset-processed-activities.ts",
     "seed:way-cache": "tsx src/scripts/seed-way-cache-from-pbf.ts",
     "wipe:and-resync": "tsx src/scripts/wipe-and-resync.ts",
-    "seed:demo-project": "tsx src/scripts/seed-demo-project.ts"
+    "seed:demo-project": "tsx src/scripts/seed-demo-project.ts",
+    "seed:milestone-types": "tsx src/scripts/seed-milestone-types.ts",
+    "clear:app-data": "tsx src/scripts/clear-app-data.ts",
+    "recompute:project-progress": "tsx src/scripts/recompute-project-progress.ts",
+    "delete:archived-project-data": "tsx src/scripts/delete-archived-project-data.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "dependencies": {
     "@prisma/adapter-pg": "^7.2.0",
     "@prisma/client": "^7.2.0",
