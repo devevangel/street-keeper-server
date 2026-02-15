@@ -49,6 +49,8 @@ import {
   getProjectHeatmapData,
   archiveProject,
   refreshProjectSnapshot,
+  resizeProject,
+  recomputeProjectProgressFromV2,
   ProjectNotFoundError,
   ProjectAccessDeniedError,
 } from "../services/project.service.js";
@@ -486,9 +488,14 @@ router.post("/", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   const userId = req.user!.id;
   const projectId = req.params.id;
+  const includeStreets =
+    typeof req.query.include === "string" &&
+    req.query.include.split(",").includes("streets");
 
   try {
-    const { project, warning } = await getProjectById(projectId, userId);
+    const { project, warning } = await getProjectById(projectId, userId, {
+      includeStreets,
+    });
 
     res.status(200).json({
       success: true,
@@ -515,6 +522,63 @@ router.get("/:id", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Get detail error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// PATCH Project (resize radius)
+// ============================================
+
+router.patch("/:id", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+  const body = req.body as { radiusMeters?: number };
+
+  const radiusMeters = body?.radiusMeters;
+  if (
+    typeof radiusMeters !== "number" ||
+    !Number.isInteger(radiusMeters) ||
+    !PROJECTS.ALLOWED_RADII.includes(
+      radiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number],
+    )
+  ) {
+    res.status(400).json({
+      success: false,
+      error: `Invalid radiusMeters. Must be one of: ${PROJECTS.ALLOWED_RADII.join(", ")}`,
+      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
+    });
+    return;
+  }
+
+  try {
+    const project = await resizeProject(projectId, userId, radiusMeters);
+    res.status(200).json({
+      success: true,
+      project,
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+    console.error("[Projects] Resize error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -935,6 +999,47 @@ router.post("/:id/refresh", async (req: Request, res: Response) => {
       error: "Internal server error",
       code: ERROR_CODES.INTERNAL_ERROR,
     });
+  }
+});
+
+/**
+ * POST /routes/:id/recompute-progress
+ * Recompute project progress from V2 engine (only runs on or after project creation).
+ * Use to fix false completions from runs that happened before the project existed.
+ */
+router.post("/:id/recompute-progress", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    await recomputeProjectProgressFromV2(projectId, userId);
+    const { project } = await getProjectById(projectId, userId, {
+      includeStreets: true,
+    });
+    res.status(200).json({
+      success: true,
+      project,
+      message:
+        "Project progress recomputed from runs on or after project creation.",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+    throw error;
   }
 });
 

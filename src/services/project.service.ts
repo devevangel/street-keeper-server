@@ -47,8 +47,10 @@ import type {
   SnapshotStreet,
   StreetSnapshot,
   SnapshotDiff,
+  CompletionBins,
 } from "../types/project.types.js";
 import type { GpxPoint } from "../types/run.types.js";
+import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.js";
 
 // ============================================
 // Project Preview (Before Creation)
@@ -283,12 +285,15 @@ export async function listProjects(
 }
 
 /**
- * Get project detail by ID
+ * Get project detail by ID.
+ * @param options.includeStreets - If false (default), streets array is empty to reduce payload. Use ?include=streets to get full list.
  */
 export async function getProjectById(
   projectId: string,
-  userId: string
+  userId: string,
+  options?: { includeStreets?: boolean },
 ): Promise<{ project: ProjectDetail; warning?: string }> {
+  const includeStreets = options?.includeStreets ?? false;
   const project = await prisma.project.findUnique({
     where: { id: projectId },
   });
@@ -318,7 +323,7 @@ export async function getProjectById(
     .filter((s) => s.percentage >= 90)
     .reduce((sum, s) => sum + s.lengthMeters, 0);
 
-  const [activityCount, lastActivityDate] = await Promise.all([
+  const [activityCount, lastActivityDate, activityDates] = await Promise.all([
     prisma.projectActivity.count({ where: { projectId } }),
     prisma.projectActivity
       .findFirst({
@@ -327,7 +332,25 @@ export async function getProjectById(
         select: { activity: { select: { startDate: true } } },
       })
       .then((pa) => pa?.activity?.startDate?.toISOString() ?? null),
+    prisma.projectActivity.findMany({
+      where: { projectId },
+      select: { activity: { select: { startDate: true } } },
+      orderBy: { activity: { startDate: "asc" } },
+    }),
   ]);
+
+  const uniqueDates = Array.from(
+    new Set(
+      activityDates
+        .filter((pa) => pa.activity != null)
+        .map((pa) => {
+          const d = (pa.activity as { startDate: Date }).startDate;
+          return new Date(d).toISOString().slice(0, 10);
+        }),
+    ),
+  ).sort();
+
+  const { currentStreak, longestStreak } = computeStreaks(uniqueDates);
 
   const currentProgressPct =
     project.totalStreets > 0
@@ -361,10 +384,38 @@ export async function getProjectById(
     ([type, v]) => ({ type, total: v.total, completed: v.completed })
   );
 
+  const {
+    totalStreetNames,
+    completedStreetNames,
+    completionBins,
+  } = groupSnapshotByStreetName(snapshot);
+
+  // Safe pace and projected finish (avoid near-zero week span bug)
+  const now = new Date();
+  const createdAt = project.createdAt;
+  const weeksActiveMs = now.getTime() - createdAt.getTime();
+  const weeksActive = Math.max(
+    weeksActiveMs / (7 * 24 * 60 * 60 * 1000),
+    1,
+  );
+  const streetsPerWeek = project.completedStreets / weeksActive;
+  const remaining = project.totalStreets - project.completedStreets;
+  const weeksLeft =
+    streetsPerWeek > 0 && remaining > 0 ? remaining / streetsPerWeek : null;
+  const projectedFinishDate =
+    weeksLeft != null
+      ? new Date(
+          now.getTime() + weeksLeft * 7 * 24 * 60 * 60 * 1000,
+        ).toISOString()
+      : null;
+
   const projectDetail: ProjectDetail = {
     ...mapProjectToListItem(project),
-    streets: snapshot.streets,
+    streets: includeStreets ? snapshot.streets : [],
     snapshotDate: snapshot.snapshotDate,
+    completionBins,
+    totalStreetNames,
+    completedStreetNames,
     inProgressCount,
     notStartedCount,
     distanceCoveredMeters: Math.round(distanceCoveredMeters * 100) / 100,
@@ -374,6 +425,10 @@ export async function getProjectById(
     streetsByType,
     refreshNeeded,
     daysSinceRefresh,
+    streetsPerWeek: Math.round(streetsPerWeek * 100) / 100,
+    projectedFinishDate,
+    currentStreak,
+    longestStreak,
     ...(newStreetsDetected > 0 ? { newStreetsDetected } : {}),
   };
 
@@ -521,6 +576,21 @@ export async function getProjectMapData(
   const completionPercentage =
     totalStreets > 0 ? (completedCount / totalStreets) * 100 : 0;
 
+  // Name-grouped counts so map header matches list ("X streets completed")
+  const byName = new Map<string, { completed: number; total: number }>();
+  for (const st of mapStreets) {
+    const key = st.name || "Unnamed";
+    const cur = byName.get(key) ?? { completed: 0, total: 0 };
+    cur.total += 1;
+    if (st.status === "completed") cur.completed += 1;
+    byName.set(key, cur);
+  }
+  let completedStreetNames = 0;
+  for (const v of byName.values()) {
+    if (v.total > 0 && v.completed === v.total) completedStreetNames += 1;
+  }
+  const totalStreetNames = byName.size;
+
   const mapData: ProjectMapData = {
     id: project.id,
     name: project.name,
@@ -539,6 +609,8 @@ export async function getProjectMapData(
       partialStreets: partialCount,
       notRunStreets: notRunCount,
       completionPercentage: Math.round(completionPercentage * 100) / 100,
+      totalStreetNames,
+      completedStreetNames,
     },
     streets: mapStreets,
     geometryCacheHit,
@@ -696,7 +768,9 @@ export async function refreshProjectSnapshot(
     `[Project] Refreshed project "${project.name}": +${diff.added.length} added, -${diff.removed.length} removed`
   );
 
-  const { project: projectDetail } = await getProjectById(projectId, userId);
+  const { project: projectDetail } = await getProjectById(projectId, userId, {
+    includeStreets: true,
+  });
 
   return { project: projectDetail, changes: diff };
 }
@@ -706,7 +780,11 @@ export async function refreshProjectSnapshot(
 // ============================================
 
 /**
- * Archive a project (soft delete)
+ * Archive a project (soft delete).
+ * Only sets isArchived = true. Does not delete ProjectActivity, Activity, or any
+ * other data; overlap detection uses includeArchived: false so new runs never
+ * attach to archived projects. Use the delete-archived-project-data script to
+ * remove related rows (ProjectActivity, UserMilestone) for archived projects.
  */
 export async function archiveProject(
   projectId: string,
@@ -733,7 +811,103 @@ export async function archiveProject(
 }
 
 /**
- * Update project progress after activity processing
+ * Resize project radius. Re-queries streets for the new radius and merges
+ * with existing snapshot, preserving progress for streets that remain inside.
+ */
+export async function resizeProject(
+  projectId: string,
+  userId: string,
+  newRadiusMeters: number,
+): Promise<ProjectDetail> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+  });
+
+  if (!project) {
+    throw new ProjectNotFoundError(projectId);
+  }
+
+  if (project.userId !== userId) {
+    throw new ProjectAccessDeniedError(projectId);
+  }
+
+  if (
+    !PROJECTS.ALLOWED_RADII.includes(
+      newRadiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number],
+    )
+  ) {
+    throw new Error(
+      `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(", ")}`,
+    );
+  }
+
+  if (project.radiusMeters === newRadiusMeters) {
+    const { project: detail } = await getProjectById(projectId, userId, {
+      includeStreets: true,
+    });
+    return detail;
+  }
+
+  const boundaryMode =
+    ((project as { boundaryMode?: string }).boundaryMode as
+      | "centroid"
+      | "strict") ?? "centroid";
+  const filterFn =
+    boundaryMode === "strict"
+      ? filterStreetsToRadiusStrict
+      : filterStreetsToRadius;
+
+  const { streets: rawStreets } = await getStreetsWithCache(
+    project.centerLat,
+    project.centerLng,
+    newRadiusMeters,
+  );
+  const freshStreets = filterFn(
+    rawStreets,
+    project.centerLat,
+    project.centerLng,
+    newRadiusMeters,
+  );
+
+  const oldSnapshot = project.streetsSnapshot as StreetSnapshot;
+  const { newSnapshot } = mergeSnapshots(oldSnapshot, freshStreets);
+
+  const totalLengthMeters = newSnapshot.streets.reduce(
+    (sum, s) => sum + s.lengthMeters,
+    0,
+  );
+  const completedStreets = newSnapshot.streets.filter((s) => s.completed).length;
+  const progress =
+    newSnapshot.streets.length > 0
+      ? (completedStreets / newSnapshot.streets.length) * 100
+      : 0;
+
+  await prisma.project.update({
+    where: { id: projectId },
+    data: {
+      radiusMeters: newRadiusMeters,
+      streetsSnapshot: newSnapshot as object,
+      snapshotDate: new Date(),
+      totalStreets: newSnapshot.streets.length,
+      totalLengthMeters,
+      completedStreets,
+      progress,
+    },
+  });
+
+  console.log(
+    `[Project] Resized project "${project.name}" to ${newRadiusMeters}m`,
+  );
+
+  const { project: projectDetail } = await getProjectById(projectId, userId, {
+    includeStreets: true,
+  });
+  return projectDetail;
+}
+
+/**
+ * Update project progress after activity processing.
+ * By default only increases percentage; pass forceUpdate: true to overwrite (e.g. recompute from V2 scoped).
  */
 export async function updateProjectProgress(
   projectId: string,
@@ -741,7 +915,8 @@ export async function updateProjectProgress(
     osmId: string;
     percentage: number;
     lastRunDate: string;
-  }>
+  }>,
+  options?: { forceUpdate?: boolean }
 ): Promise<void> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
@@ -752,11 +927,14 @@ export async function updateProjectProgress(
   }
 
   const snapshot = project.streetsSnapshot as StreetSnapshot;
+  const forceUpdate = options?.forceUpdate === true;
 
   for (const update of streetUpdates) {
     const street = snapshot.streets.find((s) => s.osmId === update.osmId);
     if (street) {
-      if (update.percentage > street.percentage) {
+      const shouldUpdate =
+        forceUpdate || update.percentage > street.percentage;
+      if (shouldUpdate) {
         street.percentage = update.percentage;
         street.lastRunDate = update.lastRunDate;
         street.completed = update.percentage >= 90;
@@ -780,9 +958,109 @@ export async function updateProjectProgress(
   });
 }
 
+/**
+ * Recompute project progress from V2 scoped to runs on or after project creation.
+ * Use this to fix false completions (streets that were run before the project existed).
+ * Overwrites snapshot percentages and completed flags from UserNodeHit (hitAt >= project.createdAt).
+ */
+export async function recomputeProjectProgressFromV2(
+  projectId: string,
+  userId: string
+): Promise<void> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { userId: true, createdAt: true, streetsSnapshot: true },
+  });
+
+  if (!project) {
+    throw new ProjectNotFoundError(projectId);
+  }
+
+  if (project.userId !== userId) {
+    throw new ProjectAccessDeniedError(projectId);
+  }
+
+  const snapshot = project.streetsSnapshot as StreetSnapshot;
+  if (!snapshot?.streets?.length) {
+    return;
+  }
+
+  const v2Results = await deriveProjectProgressV2Scoped(
+    userId,
+    snapshot.streets.map((s) => ({
+      osmId: s.osmId,
+      lengthMeters: s.lengthMeters ?? 0,
+    })),
+    project.createdAt
+  );
+
+  const snapshotByOsmId = new Map(
+    snapshot.streets.map((s) => [s.osmId, s])
+  );
+  const streetUpdates = v2Results.map((r) => ({
+    osmId: r.osmId,
+    percentage: r.percentage,
+    lastRunDate:
+      snapshotByOsmId.get(r.osmId)?.lastRunDate ?? new Date().toISOString(),
+  }));
+
+  await updateProjectProgress(projectId, streetUpdates, {
+    forceUpdate: true,
+  });
+
+  console.log(
+    `[Project] Recomputed V2 scoped progress for project ${projectId}: ${streetUpdates.length} streets`
+  );
+}
+
 // ============================================
 // Helper Functions
 // ============================================
+
+/** Group snapshot streets by name; return counts and bins so UI matches "street" (name) not segment. */
+function groupSnapshotByStreetName(snapshot: StreetSnapshot): {
+  totalStreetNames: number;
+  completedStreetNames: number;
+  completionBins: CompletionBins;
+} {
+  const byName = new Map<string, SnapshotStreet[]>();
+  for (const s of snapshot.streets) {
+    const key = s.name || "Unnamed";
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key)!.push(s);
+  }
+  let completed = 0;
+  let almostThere = 0;
+  let inProgress = 0;
+  let notStarted = 0;
+  for (const ways of byName.values()) {
+    const totalLength = ways.reduce((sum, w) => sum + w.lengthMeters, 0);
+    const weightedPct =
+      totalLength > 0
+        ? ways.reduce((sum, w) => sum + w.percentage * w.lengthMeters, 0) /
+          totalLength
+        : 0;
+    if (ways.every((w) => w.completed)) {
+      completed += 1;
+    } else if (weightedPct >= 50 && weightedPct < 90) {
+      almostThere += 1;
+    } else if (weightedPct > 0 && weightedPct < 50) {
+      inProgress += 1;
+    } else {
+      notStarted += 1;
+    }
+  }
+  return {
+    totalStreetNames: byName.size,
+    completedStreetNames: completed,
+    completionBins: {
+      completed,
+      almostThere,
+      inProgress,
+      notStarted,
+    },
+  };
+}
 
 function buildStreetSnapshot(streets: OsmStreet[]): StreetSnapshot {
   const snapshotStreets: SnapshotStreet[] = streets.map((street) => ({
@@ -925,6 +1203,59 @@ function getDaysSinceDate(date: Date): number {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Compute current streak (consecutive days ending today or yesterday) and longest streak.
+ * @param uniqueDates - Sorted array of "YYYY-MM-DD" date strings
+ */
+function computeStreaks(
+  uniqueDates: string[],
+): { currentStreak: number; longestStreak: number } {
+  if (uniqueDates.length === 0) {
+    return { currentStreak: 0, longestStreak: 0 };
+  }
+
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+  const set = new Set(uniqueDates);
+
+  let currentStreak = 0;
+  let checkDate = today;
+  if (set.has(today)) {
+    checkDate = today;
+  } else if (set.has(yesterdayStr)) {
+    checkDate = yesterdayStr;
+  } else {
+    checkDate = "";
+  }
+  if (checkDate) {
+    let d = new Date(checkDate + "T12:00:00Z");
+    while (set.has(d.toISOString().slice(0, 10))) {
+      currentStreak++;
+      d.setDate(d.getDate() - 1);
+    }
+  }
+
+  let longestStreak = 1;
+  let run = 1;
+  for (let i = 1; i < uniqueDates.length; i++) {
+    const prev = new Date(uniqueDates[i - 1]! + "T12:00:00Z").getTime();
+    const curr = new Date(uniqueDates[i]! + "T12:00:00Z").getTime();
+    const oneDay = 24 * 60 * 60 * 1000;
+    if (curr - prev === oneDay) {
+      run++;
+      longestStreak = Math.max(longestStreak, run);
+    } else {
+      run = 1;
+    }
+  }
+
+  return { currentStreak, longestStreak };
 }
 
 // ============================================

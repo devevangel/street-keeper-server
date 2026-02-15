@@ -23,7 +23,10 @@ import {
   isUnnamedStreet,
   normalizeStreetName,
 } from "../engines/v1/street-aggregation.js";
-import { deriveStreetCompletion } from "../engines/v2/street-completion.js";
+import {
+  deriveStreetCompletionForArea,
+  osmIdToWayId,
+} from "../engines/v2/street-completion.js";
 import type { OsmStreet } from "../types/run.types.js";
 import type {
   MapStreet,
@@ -357,10 +360,9 @@ export async function getMapStreetsV2(
     MAP.MAX_RADIUS_METERS
   );
 
-  const [geometries, completion] = await Promise.all([
-    getGeometriesInArea(lat, lng, radius),
-    deriveStreetCompletion(userId),
-  ]);
+  const geometries = await getGeometriesInArea(lat, lng, radius);
+  const wayIds = geometries.map((g) => osmIdToWayId(g.osmId));
+  const completion = await deriveStreetCompletionForArea(userId, wayIds);
 
   const completionByOsmId = new Map(
     completion.map((s) => [`way/${String(s.wayId)}`, s])
@@ -382,9 +384,10 @@ export async function getMapStreetsV2(
     const isConnector =
       geom.lengthMeters <= STREET_AGGREGATION.CONNECTOR_MAX_LENGTH_METERS;
 
+    // V2: do not set runCount/completionCount (node-based progress, not activity count)
     const stats: MapStreetStats = {
-      runCount: comp.edgesCompleted > 0 ? 1 : 0,
-      completionCount: comp.isComplete ? 1 : 0,
+      runCount: 0,
+      completionCount: 0,
       firstRunDate: null,
       lastRunDate: null,
       totalLengthMeters: geom.lengthMeters,

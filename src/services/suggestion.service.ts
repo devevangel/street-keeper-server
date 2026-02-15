@@ -1,11 +1,39 @@
 /**
  * Suggestion Service
  * Next-run suggestions: almost complete, nearest gaps, milestone, clusters.
- * Reads project snapshot and map data to suggest streets for the user to run.
+ * Homepage: one primary + alternates with cooldownKey, reason, focus (bbox, streetIds, startPoint).
  */
 
+import prisma from "../lib/prisma.js";
 import { getProjectById, getProjectMapData } from "./project.service.js";
 import type { ProjectMapStreet } from "../types/project.types.js";
+import type { StreakData } from "./streak.service.js";
+import type { MilestoneWithProgress } from "../types/milestone.types.js";
+
+/** Homepage suggestion shape (one primary action + alternates) */
+export interface HomepageSuggestion {
+  type:
+    | "quick_win"
+    | "nearby_cluster"
+    | "explore"
+    | "milestone_push"
+    | "streak_saver"
+    | "cluster";
+  title: string;
+  shortCopy: string;
+  cooldownKey: string;
+  reason: string;
+  focus: {
+    bbox: [number, number, number, number];
+    streetIds?: number[];
+    startPoint?: { lat: number; lng: number };
+  };
+}
+
+export interface HomepageSuggestionsResult {
+  primary: HomepageSuggestion | null;
+  alternates: HomepageSuggestion[];
+}
 
 export interface StreetSuggestion {
   osmId: string;
@@ -250,4 +278,210 @@ export async function getSuggestions(
     milestone,
     clusters: clusters.slice(0, 3),
   };
+}
+
+// ============================================
+// Homepage suggestions (primary + alternates, cooldown, focus)
+// ============================================
+
+const PADDING_DEGREES = 0.0001;
+const COOLDOWN_DAYS_PRIMARY = 4;
+const COOLDOWN_DAYS_ALTERNATE = 2;
+
+function bboxFromGeometry(
+  coords: Array<[number, number]>,
+  padding = PADDING_DEGREES
+): [number, number, number, number] {
+  if (coords.length === 0)
+    return [0, 0, 0, 0];
+  let minLat = coords[0][1];
+  let maxLat = coords[0][1];
+  let minLng = coords[0][0];
+  let maxLng = coords[0][0];
+  for (const [lng, lat] of coords) {
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+  }
+  return [
+    minLat - padding,
+    minLng - padding,
+    maxLat + padding,
+    maxLng + padding,
+  ];
+}
+
+function osmIdToNum(osmId: string): number {
+  const n = parseInt(osmId, 10);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+async function isOnCooldown(
+  userId: string,
+  cooldownKey: string,
+  days: number
+): Promise<boolean> {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const row = await prisma.suggestionCooldown.findUnique({
+    where: { userId_cooldownKey: { userId, cooldownKey } },
+  });
+  return row != null && row.expiresAt > cutoff;
+}
+
+async function setCooldown(
+  userId: string,
+  cooldownKey: string,
+  days: number
+): Promise<void> {
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + days);
+  await prisma.suggestionCooldown.upsert({
+    where: { userId_cooldownKey: { userId, cooldownKey } },
+    create: { userId, cooldownKey, expiresAt },
+    update: { expiresAt },
+  });
+}
+
+/**
+ * Get homepage suggestions: one primary + up to 2 alternates.
+ * Fallback ladder: streak_saver > quick_win > milestone_push > explore > null.
+ * Respects cooldown; when no project context returns null (search-first).
+ */
+export async function getHomepageSuggestions(
+  userId: string,
+  context: {
+    projectId?: string;
+    lat?: number;
+    lng?: number;
+    radius?: number;
+  },
+  streakData: StreakData,
+  nextMilestone: MilestoneWithProgress | null
+): Promise<HomepageSuggestionsResult> {
+  if (!context.projectId) {
+    return { primary: null, alternates: [] };
+  }
+
+  const response = await getSuggestions(context.projectId, userId, {
+    lat: context.lat,
+    lng: context.lng,
+    maxResults: 5,
+  });
+
+  const candidates: HomepageSuggestion[] = [];
+
+  if (streakData.isAtRisk && streakData.currentWeeks > 0) {
+    const nearest = response.nearest[0];
+    if (nearest) {
+      const coords = (nearest as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry;
+      const bbox = coords?.length
+        ? bboxFromGeometry(coords.map((c) => [c.lng, c.lat]))
+        : ([0, 0, 0, 0] as [number, number, number, number]);
+      candidates.push({
+        type: "streak_saver",
+        title: "One short run keeps your streak",
+        shortCopy: `~${(nearest.lengthMeters / 1000).toFixed(1)} km — ${nearest.name}`,
+        cooldownKey: "streak_saver",
+        reason: "Streak at risk this week",
+        focus: {
+          bbox,
+          streetIds: [osmIdToNum(nearest.osmId)],
+          startPoint: coords?.[0] ? { lat: coords[0].lat, lng: coords[0].lng } : undefined,
+        },
+      });
+    }
+  }
+
+  const almostOne = response.almostComplete[0];
+  if (almostOne && almostOne.currentProgress >= 85) {
+    const geom = (almostOne as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry;
+    const bbox = geom?.length
+      ? bboxFromGeometry(geom.map((c) => [c.lng, c.lat]))
+      : ([0, 0, 0, 0] as [number, number, number, number]);
+    candidates.push({
+      type: "quick_win",
+      title: `Finish ${almostOne.name}`,
+      shortCopy: `~5 min to complete it — you're at ${Math.round(almostOne.currentProgress)}%`,
+      cooldownKey: `quick_win:street:${almostOne.osmId}`,
+      reason: `You're at ${Math.round(almostOne.currentProgress)}% on ${almostOne.name}`,
+      focus: {
+        bbox,
+        streetIds: [osmIdToNum(almostOne.osmId)],
+        startPoint: geom?.[0] ? { lat: geom[0].lat, lng: geom[0].lng } : undefined,
+      },
+    });
+  }
+
+  if (nextMilestone && response.milestone && response.milestone.streets.length > 0) {
+    const streets = response.milestone.streets;
+    const allCoords = streets.flatMap((s) =>
+      (s as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry ?? []
+    );
+    const bbox =
+      allCoords.length > 0
+        ? bboxFromGeometry(allCoords.map((c) => [c.lng, c.lat]))
+        : ([0, 0, 0, 0] as [number, number, number, number]);
+    candidates.push({
+      type: "milestone_push",
+      title: `${response.milestone.streetsNeeded} streets to ${nextMilestone.name}`,
+      shortCopy: `${response.milestone.streetsNeeded} street(s) to reach ${response.milestone.target}%`,
+      cooldownKey: `milestone_push:milestone:${nextMilestone.id}`,
+      reason: `${response.milestone.streetsNeeded} streets to your ${response.milestone.name} milestone`,
+      focus: {
+        bbox,
+        streetIds: streets.map((s) => osmIdToNum(s.osmId)),
+      },
+    });
+  }
+
+  if (response.nearest.length >= 1 && !candidates.some((c) => c.type === "streak_saver")) {
+    const n = response.nearest[0];
+    const geom = (n as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry;
+    const bbox = geom?.length
+      ? bboxFromGeometry(geom.map((c) => [c.lng, c.lat]))
+      : ([0, 0, 0, 0] as [number, number, number, number]);
+    candidates.push({
+      type: "explore",
+      title: `Run ${n.name}`,
+      shortCopy: `New street — ${(n.lengthMeters / 1000).toFixed(1)} km`,
+      cooldownKey: `explore:street:${n.osmId}`,
+      reason: `Discover ${n.name}`,
+      focus: {
+        bbox,
+        streetIds: [osmIdToNum(n.osmId)],
+        startPoint: geom?.[0] ? { lat: geom[0].lat, lng: geom[0].lng } : undefined,
+      },
+    });
+  }
+
+  const filtered: HomepageSuggestion[] = [];
+  for (const c of candidates) {
+    const onCd = await isOnCooldown(userId, c.cooldownKey, COOLDOWN_DAYS_PRIMARY);
+    if (!onCd) filtered.push(c);
+  }
+
+  const primary =
+    filtered.length > 0
+      ? (() => {
+          if (streakData.isAtRisk && filtered.some((c) => c.type === "streak_saver"))
+            return filtered.find((c) => c.type === "streak_saver")!;
+          if (filtered.some((c) => c.type === "quick_win"))
+            return filtered.find((c) => c.type === "quick_win")!;
+          if (filtered.some((c) => c.type === "milestone_push"))
+            return filtered.find((c) => c.type === "milestone_push")!;
+          return filtered[0];
+        })()
+      : null;
+
+  if (primary) {
+    await setCooldown(userId, primary.cooldownKey, COOLDOWN_DAYS_PRIMARY);
+  }
+
+  const alternates = filtered
+    .filter((c) => c.cooldownKey !== primary?.cooldownKey)
+    .slice(0, 2);
+
+  return { primary, alternates };
 }

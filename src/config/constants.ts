@@ -313,13 +313,14 @@ export const PROJECTS = {
   /**
    * Allowed radius values in meters
    * Limited set prevents excessively large or small projects
+   * - 100m, 200m: Very small area (quick wins)
    * - 500m: Small neighborhood
    * - 1000m: Large neighborhood
-   * - 2000m: Small town area (default)
+   * - 2000m: Small town area
    * - 5000m: Town/city district
    * - 10000m: Large city area
    */
-  ALLOWED_RADII: [500, 1000, 2000, 5000, 10000] as const,
+  ALLOWED_RADII: [100, 200, 500, 1000, 2000, 5000, 10000] as const,
 
   /**
    * Days before project snapshot is considered stale
@@ -416,9 +417,9 @@ export const GEOMETRY_CACHE = {
 
   /**
    * Number of decimal places for coordinate rounding in cache keys
-   * 4 decimal places = ~11m accuracy (sufficient for caching)
+   * 3 decimal places = ~111m accuracy (improves cache hit rate, fewer Overpass calls)
    */
-  COORD_PRECISION: 4,
+  COORD_PRECISION: 3,
 } as const;
 
 // ============================================

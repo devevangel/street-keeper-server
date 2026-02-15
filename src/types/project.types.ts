@@ -90,12 +90,29 @@ export interface StreetsByTypeItem {
   completed: number;
 }
 
+/** Completion bins for dashboard (replaces client-side CompletionFunnel computation) */
+export interface CompletionBins {
+  completed: number;
+  almostThere: number;
+  inProgress: number;
+  notStarted: number;
+}
+
 /**
  * Full project detail with street data
+ * When fetched without ?include=streets, streets array is empty to reduce payload.
  */
 export interface ProjectDetail extends ProjectListItem {
   streets: SnapshotStreet[];
   snapshotDate: string;
+
+  // Server-computed completion bins (by street name, so pills match the street list)
+  completionBins: CompletionBins;
+
+  /** Total distinct street names (for "X of Y streets completed" display). */
+  totalStreetNames: number;
+  /** Street names where every segment is completed (matches list/map). */
+  completedStreetNames: number;
 
   // Computed stats
   inProgressCount: number; // Streets with 1-89% coverage
@@ -111,6 +128,14 @@ export interface ProjectDetail extends ProjectListItem {
   // Refresh info
   refreshNeeded: boolean;
   daysSinceRefresh: number;
+
+  // Pace and projection (server-computed, safe math)
+  streetsPerWeek: number;
+  projectedFinishDate: string | null; // ISO or null
+
+  // Engagement
+  currentStreak: number; // Consecutive days with a run (ending today or yesterday)
+  longestStreak: number;
 
   // Warnings
   newStreetsDetected?: number;
@@ -139,13 +164,17 @@ export interface ProjectMapBoundary {
   radiusMeters: number;
 }
 
-/** Stats for project map view */
+/** Stats for project map view (segment counts; use *StreetNames for display consistency with list). */
 export interface ProjectMapStats {
   totalStreets: number;
   completedStreets: number;
   partialStreets: number;
   notRunStreets: number;
   completionPercentage: number;
+  /** Distinct street names in this view (for "X of Y streets completed"). */
+  totalStreetNames: number;
+  /** Street names where every segment is completed. */
+  completedStreetNames: number;
 }
 
 export interface ProjectMapData {

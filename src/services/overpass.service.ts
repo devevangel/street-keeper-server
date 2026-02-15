@@ -29,6 +29,7 @@ import type {
 } from "../types/run.types.js";
 import { OVERPASS } from "../config/constants.js";
 import { calculateLineLength } from "./geo.service.js";
+import { throttledOverpassQuery } from "./overpass-throttle.service.js";
 
 // ============================================
 // Main Query Function
@@ -380,8 +381,8 @@ export async function queryStreetsInRadius(
     out body geom;
   `;
 
-  // Use the same server list and retry logic
-  return executeOverpassQuery(query);
+  // Use the same server list and retry logic (throttled to avoid rate limits)
+  return throttledOverpassQuery(() => executeOverpassQuery(query));
 }
 
 /**
@@ -410,7 +411,7 @@ export async function queryAllStreetsInRadius(
     out body geom;
   `;
 
-  return executeOverpassQuery(query);
+  return throttledOverpassQuery(() => executeOverpassQuery(query));
 }
 
 /**
@@ -457,6 +458,13 @@ async function executeOverpassQuery(query: string): Promise<OsmStreet[]> {
       } catch (error) {
         const errorMessage = getErrorMessage(error, serverUrl, attempt);
         errors.push(errorMessage);
+
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        if (status === 429) {
+          console.warn("[Overpass] Rate limited, waiting 60s before retry");
+          await new Promise((r) => setTimeout(r, 60000));
+          continue;
+        }
 
         if (!isRetryableError(error)) {
           throw new OverpassError(errorMessage);

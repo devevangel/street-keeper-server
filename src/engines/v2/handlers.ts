@@ -8,7 +8,11 @@ import type { Request, Response } from "express";
 import type { AnalyzeGpxResponse } from "./types.js";
 import { parseGpx, GpxParseError } from "./modules/gpx-parser.js";
 import { markHitNodes } from "./modules/node-proximity.js";
-import { deriveStreetCompletion, groupStreetsByName } from "./street-completion.js";
+import {
+  deriveStreetCompletion,
+  deriveStreetCompletionForRun,
+  groupStreetsByName,
+} from "./street-completion.js";
 import { getMapStreetsV2 } from "../../services/map.service.js";
 import { MAP, ERROR_CODES } from "../../config/constants.js";
 import prisma from "../../lib/prisma.js";
@@ -65,7 +69,7 @@ export async function getStreets(req: Request, res: Response): Promise<void> {
  */
 export async function getMapStreets(
   req: Request,
-  res: Response
+  res: Response,
 ): Promise<void> {
   const userId = (req as Request & { user?: { id: string } }).user?.id;
   if (!userId) {
@@ -101,7 +105,14 @@ export async function getMapStreets(
       ? 45
       : minProgress;
 
-  if (Number.isNaN(lat) || Number.isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+  if (
+    Number.isNaN(lat) ||
+    Number.isNaN(lng) ||
+    lat < -90 ||
+    lat > 90 ||
+    lng < -180 ||
+    lng > 180
+  ) {
     res.status(400).json({
       success: false,
       error: "Valid lat and lng are required",
@@ -111,7 +122,13 @@ export async function getMapStreets(
   }
 
   try {
-    const result = await getMapStreetsV2(userId, lat, lng, radius, minPercentage);
+    const result = await getMapStreetsV2(
+      userId,
+      lat,
+      lng,
+      radius,
+      minPercentage,
+    );
     res.json(result);
   } catch (error) {
     console.error("[engine-v2] getMapStreets error:", error);
@@ -127,10 +144,7 @@ export async function getMapStreets(
  * POST /api/v1/engine-v2/analyze
  * Parses GPX, marks nodes within 25m as hit, persists to UserNodeHit, returns street completion.
  */
-export async function analyzeGpx(
-  req: Request,
-  res: Response
-): Promise<void> {
+export async function analyzeGpx(req: Request, res: Response): Promise<void> {
   try {
     if (!req.file) {
       res.status(400).json({
@@ -155,7 +169,8 @@ export async function analyzeGpx(
     if (!user) {
       res.status(404).json({
         success: false,
-        error: "User not found. Provide a valid userId (e.g. create a user first or use an existing user id).",
+        error:
+          "User not found. Provide a valid userId (e.g. create a user first or use an existing user id).",
         code: ERROR_CODES.NOT_FOUND,
       });
       return;
@@ -163,8 +178,12 @@ export async function analyzeGpx(
 
     const parsedGpx = parseGpx(req.file.buffer);
     const points = parsedGpx.points.map((p) => ({ lat: p.lat, lng: p.lng }));
-    const { nodesHit } = await markHitNodes(userId, points);
-    const streetCompletion = await deriveStreetCompletion(userId);
+    const runDate =
+      parsedGpx.points[0]?.time != null
+        ? new Date(parsedGpx.points[0].time)
+        : new Date();
+    const { nodesHit, nodeIds } = await markHitNodes(userId, points, runDate);
+    const streetCompletion = await deriveStreetCompletionForRun(nodeIds);
     const groupedStreets = groupStreetsByName(streetCompletion);
 
     const response: AnalyzeGpxResponse = {

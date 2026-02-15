@@ -103,7 +103,7 @@ import {
 } from "./user-street-progress.service.js";
 import { getCompletionThreshold, ENGINE } from "../config/constants.js";
 import { processActivityV2 } from "../engines/v2/process-activity.js";
-import { deriveProjectProgressV2 } from "../engines/v2/street-completion.js";
+import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.js";
 import {
   queryStreetsInRadius,
   queryStreetsInBoundingBox,
@@ -530,7 +530,13 @@ export async function recheckActivityForNewProjects(
     if (existing) continue;
 
     try {
-      await processProjectOverlap(activityId, userId, overlap, coordinates);
+      await processProjectOverlap(
+        activityId,
+        userId,
+        overlap,
+        coordinates,
+        activity.startDate,
+      );
       updated++;
     } catch (error) {
       console.error(
@@ -570,7 +576,7 @@ async function processProjectOverlap(
     `[Processor] Processing project "${project.name}" (${project.id})`
   );
 
-  // Step 1: Get the project's current snapshot
+  // Step 1: Get the project's current snapshot and createdAt (for scoped progress)
   const projectData = await prisma.project.findUnique({
     where: { id: project.id },
     select: {
@@ -578,6 +584,7 @@ async function processProjectOverlap(
       centerLat: true,
       centerLng: true,
       radiusMeters: true,
+      createdAt: true,
     },
   });
 
@@ -588,12 +595,16 @@ async function processProjectOverlap(
   const snapshot = projectData.streetsSnapshot as StreetSnapshot;
   const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
 
-  // When ENGINE.VERSION is v2, use V2 pipeline only: persist node hits then derive progress from UserNodeHit + WayNode.
+  // When ENGINE.VERSION is v2, use V2 pipeline only: persist node hits then derive progress from UserNodeHit + WayNode (scoped to hits after project creation).
   if (ENGINE.VERSION === "v2") {
     const runDate = startDate ?? new Date();
     await processActivityV2(userId, coordinates, runDate);
 
-    const v2Results = await deriveProjectProgressV2(userId, snapshot.streets);
+    const v2Results = await deriveProjectProgressV2Scoped(
+      userId,
+      snapshot.streets,
+      projectData.createdAt,
+    );
     const streetUpdates = v2Results.map((r) => ({
       osmId: r.osmId,
       percentage: r.percentage,
@@ -860,6 +871,8 @@ function calculateRouteImpact(
     const thresholdPercentage = Math.round(threshold * 100);
 
     // Only update if coverage increased (MAX rule)
+    const wasInRun = rawByOsmId.has(snapshotStreet.osmId);
+
     if (newPercentage > oldPercentage) {
       coverages.push({
         osmId: snapshotStreet.osmId,
@@ -867,19 +880,19 @@ function calculateRouteImpact(
         isComplete: newPercentage >= thresholdPercentage,
       });
 
-      // Track improvements
-      improved.push({
-        osmId: snapshotStreet.osmId,
-        from: oldPercentage,
-        to: newPercentage,
-      });
-
-      // Track completions (newly completed)
-      if (
-        newPercentage >= thresholdPercentage &&
-        oldPercentage < thresholdPercentage
-      ) {
-        completed.push(snapshotStreet.osmId);
+      // Only count toward run impact (completed/improved) if this street was actually in the run (OSM ID match). Name-matched segments would otherwise inflate the count (e.g. 35 segments named "High Street" all getting the same ratio).
+      if (wasInRun) {
+        improved.push({
+          osmId: snapshotStreet.osmId,
+          from: oldPercentage,
+          to: newPercentage,
+        });
+        if (
+          newPercentage >= thresholdPercentage &&
+          oldPercentage < thresholdPercentage
+        ) {
+          completed.push(snapshotStreet.osmId);
+        }
       }
     } else if (
       newPercentage >= thresholdPercentage &&

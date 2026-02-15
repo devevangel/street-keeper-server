@@ -21,7 +21,7 @@ export interface GpsPoint {
 function bboxAroundPoint(
   lat: number,
   lon: number,
-  radiusMeters: number
+  radiusMeters: number,
 ): { minLat: number; maxLat: number; minLon: number; maxLon: number } {
   const latDegPerM = 1 / 111320;
   const lonDegPerM = 1 / (111320 * Math.cos((lat * Math.PI) / 180));
@@ -37,7 +37,7 @@ function haversineMeters(
   lat1: number,
   lon1: number,
   lat2: number,
-  lon2: number
+  lon2: number,
 ): number {
   const from = turf.point([lon1, lat1]);
   const to = turf.point([lon2, lat2]);
@@ -48,15 +48,20 @@ const BATCH_SIZE = 500;
 
 /**
  * For each GPS point, find NodeCache nodes within SNAP_RADIUS_M (25m), then
- * bulk upsert (userId, nodeId) to UserNodeHit. Returns the number of unique
- * nodes hit this run.
+ * bulk upsert (userId, nodeId) to UserNodeHit with hitAt = runDate so project
+ * progress can be scoped to "runs on or after project creation".
+ * Returns the number of unique nodes hit this run and the array of node IDs.
+ *
+ * @param runDate - Activity/run start time; stored as hitAt so deriveProjectProgressV2Scoped
+ *                  can filter to only count hits from runs on or after project.createdAt.
  */
 export async function markHitNodes(
   userId: string,
-  gpsPoints: GpsPoint[]
-): Promise<{ nodesHit: number }> {
+  gpsPoints: GpsPoint[],
+  runDate: Date,
+): Promise<{ nodesHit: number; nodeIds: bigint[] }> {
   if (gpsPoints.length === 0) {
-    return { nodesHit: 0 };
+    return { nodesHit: 0, nodeIds: [] };
   }
 
   const hitNodeIds = new Set<bigint>();
@@ -78,7 +83,7 @@ export async function markHitNodes(
   }
 
   if (hitNodeIds.size === 0) {
-    return { nodesHit: 0 };
+    return { nodesHit: 0, nodeIds: [] };
   }
 
   const nodeIds = [...hitNodeIds];
@@ -93,15 +98,16 @@ export async function markHitNodes(
           create: {
             userId,
             nodeId,
+            hitAt: runDate,
           },
-          update: {},
-        })
-      )
+          update: { hitAt: runDate },
+        }),
+      ),
     );
   }
 
   console.log(
-    `[markHitNodes] ${hitNodeIds.size} unique nodes hit for user ${userId}`
+    `[markHitNodes] ${hitNodeIds.size} unique nodes hit for user ${userId}`,
   );
-  return { nodesHit: hitNodeIds.size };
+  return { nodesHit: hitNodeIds.size, nodeIds };
 }

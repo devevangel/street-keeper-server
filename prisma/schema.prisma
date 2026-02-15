@@ -35,6 +35,8 @@ model User {
   streetProgress  UserStreetProgress[]
   edges           UserEdge[]
   nodeHits        UserNodeHit[]
+  milestones      UserMilestone[]
+  preferences     UserPreferences?
 }
 
 // ============================================
@@ -71,6 +73,7 @@ model Project {
   
   // Relations
   activities      ProjectActivity[]
+  milestones      UserMilestone[]
 
   @@index([userId])
   @@index([userId, isArchived])
@@ -314,4 +317,101 @@ model NodeCache {
   createdAt DateTime @default(now())
 
   @@index([lat, lon])  // For bounding box queries (city-level is sufficient)
+}
+
+// ============================================
+// Milestone Type (seed data - which types exist and are enabled)
+// ============================================
+
+model MilestoneType {
+  id           String   @id @default(uuid())
+  slug         String   @unique // e.g. "project_percent", "first_run_ever"
+  scope        String   // "project" | "global"
+  name         String   // Display name
+  description  String?
+  configSchema Json?    // JSON schema for config validation
+  isEnabled    Boolean  @default(true) // Feature flag - lock types here
+  order        Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([isEnabled])
+}
+
+// ============================================
+// User Milestone (user's milestone instances with progress)
+// ============================================
+
+model UserMilestone {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId    String?
+  project      Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  typeSlug     String    // FK to MilestoneType.slug
+  kind         String    // "auto" | "suggested" | "custom"
+  config       Json      // e.g. { targetPercent: 25 }
+  configKey    String    // Normalized string for uniqueness (e.g. "25")
+  name         String
+  description  String?
+  isPinned     Boolean   @default(false)
+  completedAt  DateTime?
+  order        Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([userId, projectId, typeSlug, configKey], name: "unique_milestone")
+  @@index([userId])
+  @@index([projectId])
+  @@index([userId, completedAt])
+}
+
+// ============================================
+// User Preferences (timezone, last viewed area)
+// ============================================
+
+model UserPreferences {
+  id                 String   @id @default(uuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  timezone           String   @default("UTC")
+  weekStartsOn       Int      @default(1) // 1 = Monday (ISO)
+  lastViewedLat      Float?
+  lastViewedLng      Float?
+  lastViewedRadius   Int?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+// ============================================
+// Analytics Event (client-side events for metrics)
+// ============================================
+
+model AnalyticsEvent {
+  id         String   @id @default(uuid())
+  userId     String?
+  sessionId  String?
+  event      String   // "homepage_viewed", "suggestion_opened", etc.
+  properties Json?    // Event-specific data
+  context    Json?    // Device, page, etc.
+  timestamp  DateTime @default(now())
+
+  @@index([userId])
+  @@index([event])
+  @@index([timestamp])
+}
+
+// ============================================
+// Suggestion Cooldown (avoid repeating same suggestion)
+// ============================================
+
+model SuggestionCooldown {
+  id          String   @id @default(uuid())
+  userId      String
+  cooldownKey String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@unique([userId, cooldownKey])
+  @@index([userId])
+  @@index([expiresAt])
 }
