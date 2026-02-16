@@ -123,6 +123,29 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
 
 /**
  * @openapi
+ * /milestones/:id:
+ *   delete:
+ *     summary: Delete a custom milestone (only kind custom)
+ */
+router.delete("/:id", async (req: Request, res: Response): Promise<void> => {
+  const userId = (req as Request & { user: { id: string } }).user.id;
+  const milestoneId = req.params.id;
+  const milestone = await prisma.userMilestone.findFirst({
+    where: { id: milestoneId, userId, kind: "custom" },
+  });
+  if (!milestone) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Milestone not found or not deletable" },
+    });
+    return;
+  }
+  await prisma.userMilestone.delete({ where: { id: milestone.id } });
+  res.json({ success: true });
+});
+
+/**
+ * @openapi
  * /milestones/:id/pin:
  *   patch:
  *     summary: Pin or unpin milestone
@@ -154,6 +177,35 @@ router.patch("/:id/pin", async (req: Request, res: Response): Promise<void> => {
 
   await pinMilestone(milestoneId, isPinned);
   res.json({ success: true, data: { isPinned } });
+});
+
+/**
+ * @openapi
+ * /milestones/:id/acknowledge:
+ *   post:
+ *     summary: Acknowledge a milestone celebration (mark as shown)
+ */
+router.post("/:id/acknowledge", async (req: Request, res: Response): Promise<void> => {
+  const userId = (req as Request & { user: { id: string } }).user.id;
+  const milestoneId = req.params.id;
+
+  const milestone = await prisma.userMilestone.findFirst({
+    where: { id: milestoneId, userId },
+  });
+  if (!milestone) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Milestone not found" },
+    });
+    return;
+  }
+
+  await prisma.userMilestone.update({
+    where: { id: milestoneId },
+    data: { celebrationShownAt: new Date() },
+  });
+
+  res.json({ success: true });
 });
 
 export default router;

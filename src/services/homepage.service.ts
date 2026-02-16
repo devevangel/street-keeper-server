@@ -6,14 +6,14 @@ import prisma from "../lib/prisma.js";
 import { getStreak } from "./streak.service.js";
 import { getNextMilestone } from "./milestone.service.js";
 import { getHeroState } from "./hero.service.js";
-import { getHomepageSuggestions } from "./suggestion.service.js";
+import { getHomepageSuggestions, getNearestShortStreet } from "./suggestion.service.js";
 import type { HomepagePayload } from "../types/homepage.types.js";
 
 const DEFAULT_RADIUS = 1200;
 
 export async function getHomepageData(
   userId: string,
-  query: { lat?: string; lng?: string; radius?: string; projectId?: string }
+  query: { lat?: string; lng?: string; radius?: string; projectId?: string; userLat?: string; userLng?: string }
 ): Promise<HomepagePayload> {
   const prefs = await prisma.userPreferences.findUnique({
     where: { userId },
@@ -24,6 +24,8 @@ export async function getHomepageData(
   const radiusNum =
     query.radius != null ? parseInt(query.radius, 10) : DEFAULT_RADIUS;
   const projectId = query.projectId ?? undefined;
+  const userLatNum = query.userLat != null ? parseFloat(query.userLat) : undefined;
+  const userLngNum = query.userLng != null ? parseFloat(query.userLng) : undefined;
 
   let mapLat: number;
   let mapLng: number;
@@ -61,7 +63,7 @@ export async function getHomepageData(
 
   const timezone = prefs?.timezone ?? "UTC";
 
-  const [streakData, nextMilestone, lastActivity, activityCount] = await Promise.all([
+  const [streakData, nextMilestone, lastActivity, activityCount, user] = await Promise.all([
     getStreak(userId, timezone),
     getNextMilestone(userId, contextProjectId),
     prisma.activity.findFirst({
@@ -74,10 +76,15 @@ export async function getHomepageData(
       },
     }),
     prisma.activity.count({ where: { userId } }),
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, createdAt: true },
+    }),
   ]);
 
   const lastActivityDate = lastActivity?.startDate ?? null;
   const hasAnyActivity = activityCount > 0;
+  const isNewUser = !hasAnyActivity;
   const isFirstRunRecent = activityCount === 1 && lastActivityDate != null;
   const daysSinceLast =
     lastActivityDate != null
@@ -91,6 +98,9 @@ export async function getHomepageData(
       0
     ) ?? 0;
 
+  const distanceKm =
+    Math.round((lastActivity?.distanceMeters ?? 0) / 1000) / 100;
+
   const hero = getHeroState({
     streak: streakData,
     nextMilestone,
@@ -98,6 +108,8 @@ export async function getHomepageData(
     hasAnyActivity,
     isFirstRunRecent: isFirstRunRecent && daysSinceLast != null && daysSinceLast <= 1,
     lastRunNewStreets,
+    lastRunDistanceKm: distanceKm,
+    daysSinceLast,
   });
 
   const suggestions = await getHomepageSuggestions(
@@ -112,8 +124,6 @@ export async function getHomepageData(
     nextMilestone
   );
 
-  const distanceKm =
-    Math.round((lastActivity?.distanceMeters ?? 0) / 1000) / 100;
   const lastRun =
     lastActivityDate != null && lastActivity != null
       ? {
@@ -132,6 +142,12 @@ export async function getHomepageData(
         }
       : undefined;
 
+  // For new users, find the nearest short street if we have their location
+  let firstStreet = undefined;
+  if (isNewUser && userLatNum != null && userLngNum != null && !Number.isNaN(userLatNum) && !Number.isNaN(userLngNum)) {
+    firstStreet = await getNearestShortStreet(userLatNum, userLngNum, 500);
+  }
+
   const payload: HomepagePayload = {
     hero,
     streak: streakData,
@@ -146,6 +162,9 @@ export async function getHomepageData(
     },
     ...(lastRun && { lastRun }),
     ...(recentHighlights && { recentHighlights }),
+    isNewUser,
+    userName: user?.name,
+    ...(firstStreet && { firstStreet }),
   };
 
   return payload;

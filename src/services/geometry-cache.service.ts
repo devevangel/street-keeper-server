@@ -213,8 +213,15 @@ export async function findLargerCachedRadius(
   cacheKey: string;
   cachedRadius: number;
 } | null> {
-  // Check each larger allowed radius
-  const largerRadii = PROJECTS.ALLOWED_RADII.filter((r) => r > radiusMeters);
+  // Generate larger radii candidates (up to max, step 100)
+  const largerRadii: number[] = [];
+  for (
+    let r = radiusMeters + PROJECTS.RADIUS_STEP;
+    r <= PROJECTS.RADIUS_MAX;
+    r += PROJECTS.RADIUS_STEP
+  ) {
+    largerRadii.push(r);
+  }
 
   for (const largerRadius of largerRadii) {
     const cacheKey = generateRadiusCacheKey(centerLat, centerLng, largerRadius);

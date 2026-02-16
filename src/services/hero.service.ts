@@ -17,6 +17,8 @@ interface HeroContext {
   hasAnyActivity: boolean;
   isFirstRunRecent: boolean;
   lastRunNewStreets?: number;
+  lastRunDistanceKm?: number;
+  daysSinceLast?: number | null;
 }
 
 function daysSince(d: Date): number {
@@ -54,25 +56,31 @@ const HERO_PRIORITY: Array<{
     message: (ctx) => `${ctx.streak.currentWeeks}-week discovery streak.`,
   },
   {
-    key: "recent_run",
+    key: "recent_run_good",
     check: (ctx) =>
-      ctx.lastActivityDate != null && daysSince(ctx.lastActivityDate) <= 2,
+      ctx.lastActivityDate != null && daysSince(ctx.lastActivityDate) <= 2 && ctx.lastRunNewStreets != null && ctx.lastRunNewStreets > 0,
     message: (ctx) =>
-      ctx.lastRunNewStreets != null && ctx.lastRunNewStreets > 0
-        ? `Nice — you discovered ${ctx.lastRunNewStreets} new streets.`
-        : "Nice — you got out there.",
+      ctx.lastRunDistanceKm != null
+        ? `Nice! You ran ${ctx.lastRunDistanceKm.toFixed(1)} km and discovered ${ctx.lastRunNewStreets} new streets.`
+        : `Nice! You discovered ${ctx.lastRunNewStreets} new streets.`,
   },
   {
-    key: "lapsed_30_days",
+    key: "recent_run_no_new",
     check: (ctx) =>
-      ctx.lastActivityDate != null && daysSince(ctx.lastActivityDate) >= 30,
-    message: () => "It's been a while. Let's find you a quick win.",
+      ctx.lastActivityDate != null && daysSince(ctx.lastActivityDate) <= 2 && (ctx.lastRunNewStreets == null || ctx.lastRunNewStreets === 0),
+    message: (ctx) => {
+      const daysAgo = ctx.daysSinceLast ?? (ctx.lastActivityDate ? daysSince(ctx.lastActivityDate) : null);
+      const dateText = daysAgo === 0 ? "today" : daysAgo === 1 ? "yesterday" : `${daysAgo} days ago`;
+      return ctx.lastRunDistanceKm != null
+        ? `Nice! You got out there — ${ctx.lastRunDistanceKm.toFixed(1)} km on ${dateText}.`
+        : `Nice! You got out there on ${dateText}.`;
+    },
   },
   {
-    key: "no_run_5_days",
+    key: "lapsed",
     check: (ctx) =>
       ctx.lastActivityDate != null && daysSince(ctx.lastActivityDate) >= 5,
-    message: () => "Ready to get back out? Here's a quick win.",
+    message: () => "Welcome back. Ready to run?",
   },
   {
     key: "has_activity",
@@ -80,9 +88,9 @@ const HERO_PRIORITY: Array<{
     message: () => "Nice — you got out there.",
   },
   {
-    key: "new_user_no_data",
+    key: "new_user",
     check: (ctx) => !ctx.hasAnyActivity,
-    message: () => "Welcome. Search an area to start exploring.",
+    message: () => "Run every street in your city, one run at a time.",
   },
 ];
 

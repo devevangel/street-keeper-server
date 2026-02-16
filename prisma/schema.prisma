@@ -14,29 +14,29 @@ datasource db {
 }
 
 model User {
-  id            String    @id @default(uuid())
-  stravaId      String?   @unique
-  garminId      String?   @unique
-  email         String?   @unique
-  name          String
-  profilePic    String?
-  
+  id         String  @id @default(uuid())
+  stravaId   String? @unique
+  garminId   String? @unique
+  email      String? @unique
+  name       String
+  profilePic String?
+
   // Strava OAuth tokens
-  stravaAccessToken   String?
-  stravaRefreshToken  String?
+  stravaAccessToken    String?
+  stravaRefreshToken   String?
   stravaTokenExpiresAt DateTime?
-  
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Relations
-  projects        Project[]
-  activities      Activity[]
-  streetProgress  UserStreetProgress[]
-  edges           UserEdge[]
-  nodeHits        UserNodeHit[]
-  milestones      UserMilestone[]
-  preferences     UserPreferences?
+  projects       Project[]
+  activities     Activity[]
+  streetProgress UserStreetProgress[]
+  edges          UserEdge[]
+  nodeHits       UserNodeHit[]
+  milestones     UserMilestone[]
+  preferences    UserPreferences?
 }
 
 // ============================================
@@ -44,36 +44,46 @@ model User {
 // ============================================
 
 model Project {
-  id              String    @id @default(uuid())
-  userId          String
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  name            String
-  centerLat       Float
-  centerLng       Float
-  radiusMeters    Int       // Allowed: 500, 1000, 2000, 5000, 10000
-  boundaryMode    String    @default("centroid")  // "centroid" = include if centroid in circle; "strict" = only if entire street in circle
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name         String
+  centerLat    Float
+  centerLng    Float
+  radiusMeters Int // Allowed: 500, 1000, 2000, 5000, 10000
+  boundaryMode String @default("centroid") // "centroid" = include if centroid in circle; "strict" = only if entire street in circle
 
   // Street snapshot stored as JSON
   // Structure: { streets: SnapshotStreet[], snapshotDate: string }
   streetsSnapshot Json
   snapshotDate    DateTime
-  
+
   // Cached statistics (avoid recalculating on every view)
   totalStreets      Int
   totalLengthMeters Float
-  completedStreets  Int       @default(0)
-  progress          Float     @default(0)  // 0-100 percentage
-  
-  deadline        DateTime?
-  isArchived      Boolean   @default(false)
-  
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  
+  completedStreets  Int   @default(0)
+  progress          Float @default(0) // 0-100 percentage
+
+  // Street name-based counts (for milestones and display)
+  totalStreetNames      Int?
+  completedStreetNames  Int?   @default(0)
+
+  // Location data (from reverse geocoding)
+  city        String?
+  region      String?
+  country     String?
+  countryCode String?
+
+  deadline   DateTime?
+  isArchived Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   // Relations
-  activities      ProjectActivity[]
-  milestones      UserMilestone[]
+  activities ProjectActivity[]
+  milestones UserMilestone[]
 
   @@index([userId])
   @@index([userId, isArchived])
@@ -84,29 +94,29 @@ model Project {
 // ============================================
 
 model Activity {
-  id              String    @id @default(uuid())
-  userId          String
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  stravaId        String    @unique
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stravaId        String   @unique
   name            String
   distanceMeters  Float
   durationSeconds Int
   startDate       DateTime
-  activityType    String    @default("Run")
-  
+  activityType    String   @default("Run")
+
   // GPS coordinates from Strava streams
   // Structure: GpxPoint[] (lat, lng, elevation?, timestamp?)
-  coordinates     Json
-  
+  coordinates Json
+
   // Processing status
-  isProcessed     Boolean   @default(false)
-  processedAt     DateTime?
-  
-  createdAt       DateTime  @default(now())
-  
+  isProcessed Boolean   @default(false)
+  processedAt DateTime?
+
+  createdAt DateTime @default(now())
+
   // Relations
-  projects        ProjectActivity[]
+  projects ProjectActivity[]
 
   @@index([userId])
   @@index([stravaId])
@@ -118,21 +128,21 @@ model Activity {
 // ============================================
 
 model ProjectActivity {
-  id              String    @id @default(uuid())
-  projectId       String
-  activityId      String
-  project         Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  activity        Activity   @relation(fields: [activityId], references: [id], onDelete: Cascade)
-  
+  id         String   @id @default(uuid())
+  projectId  String
+  activityId String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+
   // Impact of this activity on the project
-  streetsCompleted  Int
-  streetsImproved   Int
-  
+  streetsCompleted Int
+  streetsImproved  Int
+
   // Detailed impact breakdown (optional)
   // Structure: { completed: string[], improved: {osmId, from, to}[] }
-  impactDetails     Json?
-  
-  createdAt       DateTime  @default(now())
+  impactDetails Json?
+
+  createdAt DateTime @default(now())
 
   @@unique([projectId, activityId])
   @@index([projectId])
@@ -144,16 +154,16 @@ model ProjectActivity {
 // ============================================
 
 model GeometryCache {
-  id            String    @id @default(uuid())
-  
+  id String @id @default(uuid())
+
   // Cache key format: "radius:{lat}:{lng}:{meters}" or "bbox:{s}:{w}:{n}:{e}"
-  cacheKey      String    @unique
-  
+  cacheKey String @unique
+
   // Cached street geometries (OsmStreet[] with full geometry)
-  geometries    Json
-  
-  createdAt     DateTime  @default(now())
-  expiresAt     DateTime
+  geometries Json
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime
 
   @@index([cacheKey])
   @@index([expiresAt])
@@ -167,30 +177,30 @@ model GeometryCache {
 // Used by the map feature for efficient "all streets I've run" queries.
 
 model UserStreetProgress {
-  id            String    @id @default(uuid())
-  userId        String
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Street identity (from OpenStreetMap)
-  osmId         String    // OSM way ID
-  name          String    // Street name (denormalized for display)
-  highwayType   String    // e.g. residential, footway
-  lengthMeters  Float     // Street length (denormalized)
+  osmId        String // OSM way ID
+  name         String // Street name (denormalized for display)
+  highwayType  String // e.g. residential, footway
+  lengthMeters Float // Street length (denormalized)
 
   // Progress tracking
-  percentage    Float     @default(0)   // 0-100, MAX rule applies
-  spatialCoverage Json?   // { intervals: [[0, 50], [75, 100]] } - covered portions as percentages
-  everCompleted Boolean   @default(false) // Once true, always true
+  percentage      Float   @default(0) // 0-100, MAX rule applies
+  spatialCoverage Json? // { intervals: [[0, 50], [75, 100]] } - covered portions as percentages
+  everCompleted   Boolean @default(false) // Once true, always true
 
   // Stats for map info icon
-  runCount        Int      @default(0)   // Times user ran on this street
-  completionCount Int      @default(0)   // Times user achieved >= 90%
+  runCount        Int @default(0) // Times user ran on this street
+  completionCount Int @default(0) // Times user achieved >= 90%
 
   // Timestamps
-  firstRunDate  DateTime?
-  lastRunDate   DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  firstRunDate DateTime?
+  lastRunDate  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@unique([userId, osmId])
   @@index([userId])
@@ -204,34 +214,34 @@ model UserStreetProgress {
 // One row per edge per user. Edges are normalized (nodeA < nodeB always).
 
 model UserEdge {
-  id            String    @id @default(uuid())
-  userId        String
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Edge identity (normalized: nodeA < nodeB always)
-  edgeId        String    // Format: "{nodeA}-{nodeB}" e.g. "123456-123457"
-  nodeA         BigInt    // Smaller OSM node ID
-  nodeB         BigInt    // Larger OSM node ID
-  
-  // Way information (for street derivation)
-  wayId         BigInt    // OSM way ID this edge belongs to
-  wayName       String?   // Street name (denormalized for display)
-  highwayType   String    // e.g. residential, footway
-  
-  // Edge metadata
-  lengthMeters  Float     // Edge length in meters
-  
-  // Tracking
-  firstRunAt    DateTime  // When first completed
-  runCount      Int       @default(1) // Times traversed
-  
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  edgeId String // Format: "{nodeA}-{nodeB}" e.g. "123456-123457"
+  nodeA  BigInt // Smaller OSM node ID
+  nodeB  BigInt // Larger OSM node ID
 
-  @@unique([userId, edgeId])  // One edge per user (idempotent)
-  @@index([userId])           // Fast: "all edges for user X"
-  @@index([userId, wayId])    // Fast: "all edges for user X on way Y"
-  @@index([wayId])            // Fast: "all users who completed this way"
+  // Way information (for street derivation)
+  wayId       BigInt // OSM way ID this edge belongs to
+  wayName     String? // Street name (denormalized for display)
+  highwayType String // e.g. residential, footway
+
+  // Edge metadata
+  lengthMeters Float // Edge length in meters
+
+  // Tracking
+  firstRunAt DateTime // When first completed
+  runCount   Int      @default(1) // Times traversed
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, edgeId]) // One edge per user (idempotent)
+  @@index([userId]) // Fast: "all edges for user X"
+  @@index([userId, wayId]) // Fast: "all edges for user X on way Y"
+  @@index([wayId]) // Fast: "all users who completed this way"
 }
 
 // ============================================
@@ -241,19 +251,19 @@ model UserEdge {
 // Critical for performance - avoids hitting Overpass API repeatedly.
 
 model WayCache {
-  id            String    @id @default(uuid())
-  
+  id String @id @default(uuid())
+
   // Node to way mapping
-  nodeId        BigInt    @unique  // OSM node ID
-  wayIds        Json      // Array of way IDs containing this node: [wayId1, wayId2, ...]
-  
+  nodeId BigInt @unique // OSM node ID
+  wayIds Json // Array of way IDs containing this node: [wayId1, wayId2, ...]
+
   // Way metadata (denormalized for fast lookup)
   // Structure: { wayId: { name, highwayType, nodeSequence: [nodeA, nodeB, ...] } }
-  wayMetadata   Json
-  
-  createdAt     DateTime  @default(now())
-  expiresAt     DateTime  // Cache expiry (e.g. 30 days)
-  
+  wayMetadata Json
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime // Cache expiry (e.g. 30 days)
+
   @@index([nodeId])
   @@index([expiresAt])
 }
@@ -265,11 +275,11 @@ model WayCache {
 // Used to compute isComplete: edgesCompleted >= totalEdges.
 
 model WayTotalEdges {
-  wayId       BigInt   @id  // OSM way ID
-  totalEdges  Int            // nodes.length - 1 for this way (legacy)
-  totalNodes  Int      @default(0)  // node count per way (CityStrides-style completion)
-  name        String?         // Denormalized for display
-  highwayType String         // e.g. residential, footway
+  wayId       BigInt   @id // OSM way ID
+  totalEdges  Int // nodes.length - 1 for this way (legacy)
+  totalNodes  Int      @default(0) // node count per way (CityStrides-style completion)
+  name        String? // Denormalized for display
+  highwayType String // e.g. residential, footway
   createdAt   DateTime @default(now())
 }
 
@@ -279,11 +289,11 @@ model WayTotalEdges {
 // Tracks which OSM nodes a user has been within 25m of. One row per user per node (cumulative).
 
 model UserNodeHit {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  nodeId    BigInt
-  hitAt     DateTime @default(now())
+  id     String   @id @default(uuid())
+  userId String
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nodeId BigInt
+  hitAt  DateTime @default(now())
 
   @@unique([userId, nodeId])
   @@index([userId])
@@ -296,8 +306,8 @@ model UserNodeHit {
 // Maps each way to its constituent nodes. Populated by seed script for completion queries.
 
 model WayNode {
-  wayId   BigInt
-  nodeId  BigInt
+  wayId  BigInt
+  nodeId BigInt
 
   @@id([wayId, nodeId])
   @@index([nodeId])
@@ -311,12 +321,12 @@ model WayNode {
 // Used by node proximity (25m snap) and previously by local map-matcher.
 
 model NodeCache {
-  nodeId    BigInt   @id  // OSM node ID
-  lat       Float          // Latitude
-  lon       Float          // Longitude
+  nodeId    BigInt   @id // OSM node ID
+  lat       Float // Latitude
+  lon       Float // Longitude
   createdAt DateTime @default(now())
 
-  @@index([lat, lon])  // For bounding box queries (city-level is sufficient)
+  @@index([lat, lon]) // For bounding box queries (city-level is sufficient)
 }
 
 // ============================================
@@ -325,14 +335,17 @@ model NodeCache {
 
 model MilestoneType {
   id           String   @id @default(uuid())
-  slug         String   @unique // e.g. "project_percent", "first_run_ever"
-  scope        String   // "project" | "global"
-  name         String   // Display name
+  slug         String   @unique // e.g. "project_percent", "first_run_ever", "street_count", "percentage", "first_street"
+  scope        String   @default("project") // "project" | "global"
+  name         String // Display name
   description  String?
-  configSchema Json?    // JSON schema for config validation
+  configSchema Json? // JSON schema for config validation
   isEnabled    Boolean  @default(true) // Feature flag - lock types here
   order        Int      @default(0)
   createdAt    DateTime @default(now())
+
+  // Relations
+  milestones UserMilestone[]
 
   @@index([isEnabled])
 }
@@ -342,24 +355,42 @@ model MilestoneType {
 // ============================================
 
 model UserMilestone {
-  id           String    @id @default(uuid())
-  userId       String
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  projectId    String?
-  project      Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  typeSlug     String    // FK to MilestoneType.slug
-  kind         String    // "auto" | "suggested" | "custom"
-  config       Json      // e.g. { targetPercent: 25 }
-  configKey    String    // Normalized string for uniqueness (e.g. "25")
-  name         String
-  description  String?
-  isPinned     Boolean   @default(false)
-  completedAt  DateTime?
-  order        Int       @default(0)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Legacy fields (for backward compatibility)
+  typeSlug  String? // FK to MilestoneType.slug (legacy)
+  kind      String? // "auto" | "suggested" | "custom" (legacy)
+  config    Json? // e.g. { targetPercent: 25 } (legacy)
+  configKey String? // Normalized string for uniqueness (legacy)
+
+  // MVP fields (new)
+  typeId       String? // FK to MilestoneType.id (MVP)
+  targetValue  Float? // Target value for MVP milestones
+  currentValue Float?  @default(0) // Current progress value
+
+  // Common fields
+  name        String
+  description String?
+  isPinned    Boolean   @default(false)
+  completedAt DateTime?
+
+  // Celebration fields (MVP)
+  celebrationShownAt DateTime? // null = pending celebration
+  shareMessage       String? // Auto-generated from templates
+
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  type MilestoneType? @relation(fields: [typeId], references: [id])
 
   @@unique([userId, projectId, typeSlug, configKey], name: "unique_milestone")
+  @@unique([userId, projectId, typeId, targetValue], name: "unique_mvp_milestone")
   @@index([userId])
   @@index([projectId])
   @@index([userId, completedAt])
@@ -370,16 +401,16 @@ model UserMilestone {
 // ============================================
 
 model UserPreferences {
-  id                 String   @id @default(uuid())
-  userId             String   @unique
-  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  timezone           String   @default("UTC")
-  weekStartsOn       Int      @default(1) // 1 = Monday (ISO)
-  lastViewedLat      Float?
-  lastViewedLng      Float?
-  lastViewedRadius   Int?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id               String   @id @default(uuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  timezone         String   @default("UTC")
+  weekStartsOn     Int      @default(1) // 1 = Monday (ISO)
+  lastViewedLat    Float?
+  lastViewedLng    Float?
+  lastViewedRadius Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
 
 // ============================================
@@ -390,9 +421,9 @@ model AnalyticsEvent {
   id         String   @id @default(uuid())
   userId     String?
   sessionId  String?
-  event      String   // "homepage_viewed", "suggestion_opened", etc.
-  properties Json?    // Event-specific data
-  context    Json?    // Device, page, etc.
+  event      String // "homepage_viewed", "suggestion_opened", etc.
+  properties Json? // Event-specific data
+  context    Json? // Device, page, etc.
   timestamp  DateTime @default(now())
 
   @@index([userId])

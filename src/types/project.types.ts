@@ -3,6 +3,8 @@
  * Types for project creation, management, and street snapshots
  */
 
+import type { MilestoneWithProgress } from "./milestone.types.js";
+
 // ============================================
 // Street Snapshot Types
 // ============================================
@@ -74,6 +76,10 @@ export interface ProjectListItem {
   isArchived: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Total unique street names (grouped by name). If not provided, use totalStreets. */
+  totalStreetNames?: number;
+  /** Completed street names (all segments of street completed). If not provided, use completedStreets. */
+  completedStreetNames?: number;
 }
 
 /** Next milestone (25, 50, 75, 100) and streets needed to reach it */
@@ -123,6 +129,7 @@ export interface ProjectDetail extends ProjectListItem {
   activityCount: number; // Activities that touched this project
   lastActivityDate: string | null; // Most recent activity in project (ISO)
   nextMilestone: NextMilestone | null;
+  realNextMilestone: MilestoneWithProgress | null;
   streetsByType: StreetsByTypeItem[];
 
   // Refresh info
@@ -316,8 +323,11 @@ export interface ProjectPreview {
    */
   cacheKey: string;
 
-  /** Total number of streets in the area */
+  /** Total number of street segments in the area */
   totalStreets: number;
+
+  /** Total unique street names (for consistent display with detail page) */
+  totalStreetNames: number;
 
   /** Combined length of all streets in meters */
   totalLengthMeters: number;
@@ -333,6 +343,17 @@ export interface ProjectPreview {
    * @example ["Large area: 500+ streets. Consider reducing radius."]
    */
   warnings: string[];
+
+  /**
+   * Optional: Street names list (only included when includeStreets=true)
+   * Grouped by name, showing unique street names with segment counts
+   */
+  streets?: Array<{
+    name: string;
+    segmentCount: number;
+    totalLengthMeters: number;
+    highwayType: string;
+  }>;
 }
 
 /**

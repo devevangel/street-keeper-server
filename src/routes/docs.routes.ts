@@ -70,6 +70,9 @@ const navItems = [
   { href: "/docs/engines", label: "Engines", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
   { href: "/docs/how-engines-work", label: "How Engines Work", icon: "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" },
   { href: "/docs/database", label: "Database", icon: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" },
+  { href: "/docs/test-flows", label: "Test Flows", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" },
+  { href: "/docs/features/milestones", label: "Milestones Feature", icon: "M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" },
+  { href: "/docs/features/homepage-engagement", label: "Homepage Plan", icon: "M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" },
 ];
 
 /**
@@ -348,6 +351,36 @@ router.get("/", (req: Request, res: Response) => {
           <h2 class="ml-3 text-xl font-semibold text-white">Database</h2>
         </div>
         <p class="text-gray-400">Plain-English guide to all 12 Prisma models: User, Project, Activity, UserStreetProgress, UserNodeHit, WayCache, and more. Relationships, design choices, and analogies.</p>
+      </a>
+
+      <a href="/docs/test-flows" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors border-2 border-emerald-600">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">App Test Flows</h2>
+        </div>
+        <p class="text-gray-400">Complete test flows for every feature: authentication, homepage, projects, milestones, GPX analysis, activity pipeline, and all API endpoints.</p>
+      </a>
+
+      <a href="/docs/features/milestones" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-pink-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">Milestones Feature</h2>
+        </div>
+        <p class="text-gray-400">Full vision for the milestones &amp; goals system: behavioral research, all 6 phases, message engine, celebration UX, and implementation details.</p>
+      </a>
+
+      <a href="/docs/features/homepage-engagement" class="block p-6 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors">
+        <div class="flex items-center mb-4">
+          <svg class="h-8 w-8 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
+          </svg>
+          <h2 class="ml-3 text-xl font-semibold text-white">Homepage Plan</h2>
+        </div>
+        <p class="text-gray-400">Homepage design rationale, engagement strategy, dynamic hero states, suggestion engine, streaks, and behavioral patterns driving retention.</p>
       </a>
 
       <div class="block p-6 bg-gray-800 rounded-lg border-2 border-dashed border-gray-600">
@@ -644,6 +677,42 @@ router.get("/troubleshooting", (req: Request, res: Response) => {
 router.get("/engines-overview", (req: Request, res: Response) => {
   const content = readMarkdownFile("ENGINES.md");
   res.send(wrapInHtml("Engines Overview", content, "/docs/engines-overview"));
+});
+
+// ============================================
+// Feature Documentation
+// ============================================
+
+/**
+ * GET /docs/test-flows
+ * Comprehensive test flows and feature reference for the entire app
+ */
+router.get("/test-flows", (req: Request, res: Response) => {
+  const content = readMarkdownFile("APP_TEST_FLOWS.md");
+  res.send(wrapInHtml("App Test Flows", content, "/docs/test-flows"));
+});
+
+/**
+ * GET /docs/features/milestones
+ * Milestones & Goals feature documentation (full vision + behavioral research)
+ */
+router.get("/features/milestones", (req: Request, res: Response) => {
+  const content = readMarkdownFile("features/MILESTONES_GOALS_FEATURE.md");
+  res.send(wrapInHtml("Milestones & Goals Feature", content, "/docs/features/milestones"));
+});
+
+/**
+ * GET /docs/features/homepage-engagement
+ * Homepage & Engagement plan documentation
+ */
+router.get("/features/homepage-engagement", (req: Request, res: Response) => {
+  const filePath = path.join(docsDir, "..", "..", "..", "docs", "HOMEPAGE_AND_ENGAGEMENT_PLAN.md");
+  if (!fs.existsSync(filePath)) {
+    res.send(wrapInHtml("Homepage & Engagement", "<p class='text-red-400'>File not found</p>", "/docs/features/homepage-engagement"));
+    return;
+  }
+  const content = marked.parse(fs.readFileSync(filePath, "utf-8")) as string;
+  res.send(wrapInHtml("Homepage & Engagement Plan", content, "/docs/features/homepage-engagement"));
 });
 
 export default router;

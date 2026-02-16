@@ -32,6 +32,19 @@ export interface HomepagePayload {
     newStreets: number;
     distanceKm: number;
   };
+  /** Whether this is a new user (no activities yet) */
+  isNewUser: boolean;
+  /** User's display name for personalization */
+  userName?: string;
+  /** First street suggestion for new users (nearest shortest street) */
+  firstStreet?: {
+    osmId: string;
+    name: string;
+    lengthMeters: number;
+    distanceFromUser: number;
+    geometry: Array<{ lat: number; lng: number }>;
+    bbox: [number, number, number, number];
+  };
 }
 
 export interface MapContextQuery {
@@ -39,4 +52,6 @@ export interface MapContextQuery {
   lng?: string;
   radius?: string;
   projectId?: string;
+  userLat?: string;
+  userLng?: string;
 }

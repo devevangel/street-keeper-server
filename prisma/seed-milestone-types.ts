@@ -5,6 +5,32 @@
 import type { PrismaClient } from "../src/generated/prisma/client.js";
 
 const MILESTONE_TYPES = [
+  // MVP Milestone Types (Phase 1)
+  {
+    slug: "street_count",
+    scope: "project",
+    name: "Streets Completed",
+    description: "Complete N streets in project",
+    isEnabled: true,
+    order: -3,
+  },
+  {
+    slug: "percentage",
+    scope: "project",
+    name: "Percentage Complete",
+    description: "Reach N% of project",
+    isEnabled: true,
+    order: -2,
+  },
+  {
+    slug: "first_street",
+    scope: "project",
+    name: "First Street",
+    description: "Complete your first street",
+    isEnabled: true,
+    order: -1,
+  },
+  
   // Enabled by default (core experience)
   {
     slug: "first_run_ever",
@@ -65,7 +91,7 @@ const MILESTONE_TYPES = [
     name: "Street Count",
     description: "Complete N streets in the project",
     configSchema: { targetCount: [10, 25, 50, 100] } as object,
-    isEnabled: false,
+    isEnabled: true,
     order: 10,
   },
   {

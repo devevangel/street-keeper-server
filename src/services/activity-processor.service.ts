@@ -95,7 +95,12 @@ import {
   detectOverlappingProjects,
   type OverlapResult,
 } from "./overlap-detection.service.js";
-import { updateProjectProgress } from "./project.service.js";
+import { updateProjectProgress, groupSnapshotByStreetName } from "./project.service.js";
+import {
+  createGlobalAutoMilestonesIfNeeded,
+  updateMilestoneProgress,
+  checkMilestoneCompletion,
+} from "./milestone.service.js";
 import {
   upsertStreetProgress,
   calculateCoverageInterval,
@@ -386,6 +391,7 @@ export async function processActivity(
     if (coordinates.length === 0) {
       console.log(`[Processor] Activity ${activityId} has no coordinates`);
       await markActivityProcessed(activityId);
+      await createGlobalAutoMilestonesIfNeeded(userId);
       return {
         activityId,
         success: true,
@@ -416,6 +422,7 @@ export async function processActivity(
         activity.startDate
       );
       await markActivityProcessed(activityId);
+      await createGlobalAutoMilestonesIfNeeded(userId);
       return {
         activityId,
         success: true,
@@ -449,6 +456,7 @@ export async function processActivity(
 
     // Step 4: Mark activity as processed
     await markActivityProcessed(activityId);
+    await createGlobalAutoMilestonesIfNeeded(userId);
 
     const processingTimeMs = Date.now() - startTime;
     console.log(
@@ -616,6 +624,42 @@ async function processProjectOverlap(
       console.log(
         `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}" (V2)`
       );
+
+      // Update milestone progress - calculate from snapshot to avoid migration dependency
+      const updatedProject = await prisma.project.findUnique({
+        where: { id: project.id },
+        select: {
+          totalStreets: true,
+          completedStreets: true,
+          streetsSnapshot: true,
+        },
+      });
+      if (updatedProject) {
+        // Calculate street name counts from snapshot
+        const updatedSnapshot = updatedProject.streetsSnapshot as StreetSnapshot;
+        const { totalStreetNames, completedStreetNames } = groupSnapshotByStreetName(updatedSnapshot);
+        
+        await updateMilestoneProgress(
+          userId,
+          project.id,
+          completedStreetNames,
+          totalStreetNames,
+        );
+        // Check for completions
+        const completed = await checkMilestoneCompletion(userId, project.id, {
+          name: project.name,
+          totalStreets: updatedProject.totalStreets,
+          completedStreets: updatedProject.completedStreets,
+          totalStreetNames,
+          completedStreetNames,
+          city: undefined, // City will be available after migration
+        });
+        if (completed.length > 0) {
+          console.log(
+            `[Processor] User ${userId} completed ${completed.length} milestone(s) in project "${project.name}"`
+          );
+        }
+      }
     }
 
     const completed: string[] = [];
@@ -701,6 +745,42 @@ async function processProjectOverlap(
     console.log(
       `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}"`
     );
+
+    // Step 6a: Update milestone progress - calculate from snapshot to avoid migration dependency
+    const updatedProject = await prisma.project.findUnique({
+      where: { id: project.id },
+      select: {
+        totalStreets: true,
+        completedStreets: true,
+        streetsSnapshot: true,
+      },
+    });
+    if (updatedProject) {
+      // Calculate street name counts from snapshot
+      const updatedSnapshot = updatedProject.streetsSnapshot as StreetSnapshot;
+      const { totalStreetNames, completedStreetNames } = groupSnapshotByStreetName(updatedSnapshot);
+      
+      await updateMilestoneProgress(
+        userId,
+        project.id,
+        completedStreetNames,
+        totalStreetNames,
+      );
+      // Check for completions
+      const completed = await checkMilestoneCompletion(userId, project.id, {
+        name: project.name,
+        totalStreets: updatedProject.totalStreets,
+        completedStreets: updatedProject.completedStreets,
+        totalStreetNames,
+        completedStreetNames,
+        city: undefined, // City will be available after migration
+      });
+      if (completed.length > 0) {
+        console.log(
+          `[Processor] User ${userId} completed ${completed.length} milestone(s) in project "${project.name}"`
+        );
+      }
+    }
 
     // Step 6b: Update user-level street progress (for map feature)
     const streetProgressInput = coverages

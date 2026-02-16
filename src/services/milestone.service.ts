@@ -3,7 +3,9 @@
  * Progress is always returned in a unified shape (currentValue, targetValue, unit, ratio, isCompleted).
  */
 import prisma from "../lib/prisma.js";
+import { MILESTONES } from "../config/constants.js";
 import { getStreak } from "./streak.service.js";
+import { buildShareMessage } from "./share-message.service.js";
 import type {
   MilestoneProgress,
   MilestoneWithProgress,
@@ -255,9 +257,28 @@ export async function createMilestone(
     throw new Error(`Milestone type ${data.typeSlug} is not available`);
   }
 
+  const effectiveProjectId = data.projectId ?? null;
+  const countWhere = {
+    userId,
+    completedAt: null,
+    ...(effectiveProjectId !== null ? { projectId: effectiveProjectId } : { projectId: null }),
+  };
+  const existingCount = await prisma.userMilestone.count({ where: countWhere });
+  const limit =
+    effectiveProjectId !== null
+      ? MILESTONES.MAX_ACTIVE_PER_PROJECT
+      : MILESTONES.MAX_ACTIVE_GLOBAL;
+  if (existingCount >= limit) {
+    throw new Error(
+      effectiveProjectId !== null
+        ? `You can have at most ${limit} active milestones per project. Complete or remove one to add another.`
+        : `You can have at most ${limit} global milestones. Complete or remove one to add another.`
+    );
+  }
+
   const name =
     data.name ??
-    `${typeRow.name} ${config.targetPercent ?? config.targetKm ?? config.targetWeeks ?? ""}`.trim();
+    `${typeRow.name} ${config.targetPercent ?? config.targetKm ?? config.targetWeeks ?? config.targetCount ?? ""}`.trim();
 
   const created = await prisma.userMilestone.create({
     data: {
@@ -297,7 +318,75 @@ export async function pinMilestone(
 }
 
 /**
+ * Ensure a global milestone exists (create if not). Used for auto global milestones.
+ */
+async function upsertGlobalMilestone(
+  userId: string,
+  typeSlug: string,
+  config: JsonObject,
+): Promise<void> {
+  const typeRow = await prisma.milestoneType.findFirst({
+    where: { slug: typeSlug, isEnabled: true },
+  });
+  if (!typeRow) return;
+  const configKey = configToKey(config);
+  const existing = await prisma.userMilestone.findFirst({
+    where: {
+      userId,
+      projectId: null,
+      typeSlug,
+      configKey,
+    },
+  });
+  if (existing) return;
+  const name =
+    typeSlug === "first_run_ever"
+      ? "First run"
+      : typeSlug === "first_street_complete"
+        ? "First street complete"
+        : typeSlug === "single_run_distance_km"
+          ? `${config.targetKm as number} km run`
+          : typeRow.name;
+  await prisma.userMilestone.create({
+    data: {
+      userId,
+      projectId: null,
+      typeSlug,
+      kind: "auto",
+      config: config as object,
+      configKey,
+      name,
+    },
+  });
+}
+
+/**
+ * Create global auto milestones when they become relevant (after activity processing).
+ */
+export async function createGlobalAutoMilestonesIfNeeded(
+  userId: string,
+): Promise<void> {
+  const activityCount = await prisma.activity.count({
+    where: { userId, isProcessed: true },
+  });
+  if (activityCount >= 1) {
+    await upsertGlobalMilestone(userId, "first_run_ever", {});
+  }
+
+  const hasComplete = await prisma.userStreetProgress.findFirst({
+    where: { userId, everCompleted: true },
+  });
+  if (hasComplete) {
+    await upsertGlobalMilestone(userId, "first_street_complete", {});
+  }
+
+  await upsertGlobalMilestone(userId, "single_run_distance_km", { targetKm: 5 });
+  await upsertGlobalMilestone(userId, "single_run_distance_km", { targetKm: 10 });
+}
+
+/**
  * Create auto milestones for a new project (by size).
+ * Legacy function - kept for backward compatibility.
  */
 export async function createAutoMilestones(
   userId: string,
@@ -309,12 +398,12 @@ export async function createAutoMilestones(
   });
   if (!typeRow) return;
 
-  const targets =
-    projectSize < 80
-      ? [50, 100]
-      : projectSize < 250
-        ? [25, 50, 100]
-        : [10, 25, 50, 100];
+  const baseTargets = [5, 10];
+  const sizeTargets =
+    projectSize < 80 ? [50, 100] : projectSize < 250 ? [25, 50, 100] : [25, 50, 100];
+  const targets = [...new Set([...baseTargets, ...sizeTargets])].sort(
+    (a, b) => a - b,
+  );
 
   const project = await prisma.project.findUnique({
     where: { id: projectId },
@@ -347,4 +436,230 @@ export async function createAutoMilestones(
       });
     }
   }
+}
+
+// ============================================
+// MVP Milestone Functions (Phase 1)
+// ============================================
+
+interface MilestoneConfig {
+  type: "street_count" | "percentage" | "first_street";
+  target: number;
+  name: string;
+}
+
+/**
+ * Generate MVP milestones for a project based on total street count.
+ * Returns milestone configurations (does not create them in DB).
+ */
+export function generateMilestonesForProject(
+  totalStreets: number,
+): MilestoneConfig[] {
+  const milestones: MilestoneConfig[] = [];
+
+  // Always: First street
+  milestones.push({ type: "first_street", target: 1, name: "First street!" });
+
+  if (totalStreets <= 15) {
+    // Tiny: 3, 50%, 100%
+    milestones.push(
+      { type: "street_count", target: 3, name: "Complete 3 streets" },
+      { type: "percentage", target: 50, name: "Halfway there!" },
+      { type: "percentage", target: 100, name: "Project complete!" },
+    );
+  } else if (totalStreets <= 50) {
+    // Small: 5, 10, 50%, 100%
+    milestones.push(
+      { type: "street_count", target: 5, name: "Complete 5 streets" },
+      { type: "street_count", target: 10, name: "Complete 10 streets" },
+      { type: "percentage", target: 50, name: "Halfway there!" },
+      { type: "percentage", target: 100, name: "Project complete!" },
+    );
+  } else if (totalStreets <= 150) {
+    // Medium: 10, 25, 25%, 50%, 100%
+    milestones.push(
+      { type: "street_count", target: 10, name: "Complete 10 streets" },
+      { type: "street_count", target: 25, name: "Complete 25 streets" },
+      { type: "percentage", target: 25, name: "25% complete!" },
+      { type: "percentage", target: 50, name: "Halfway there!" },
+      { type: "percentage", target: 100, name: "Project complete!" },
+    );
+  } else {
+    // Large: 10, 25, 50, 25%, 50%, 75%, 100%
+    milestones.push(
+      { type: "street_count", target: 10, name: "Complete 10 streets" },
+      { type: "street_count", target: 25, name: "Complete 25 streets" },
+      { type: "street_count", target: 50, name: "Complete 50 streets" },
+      { type: "percentage", target: 25, name: "25% complete!" },
+      { type: "percentage", target: 50, name: "Halfway there!" },
+      { type: "percentage", target: 75, name: "75% complete!" },
+      { type: "percentage", target: 100, name: "Project complete!" },
+    );
+  }
+
+  return milestones;
+}
+
+/**
+ * Create MVP milestones for a project (called on project creation).
+ */
+export async function createMVPMilestonesForProject(
+  userId: string,
+  projectId: string,
+  totalStreets: number,
+): Promise<void> {
+  const milestoneConfigs = generateMilestonesForProject(totalStreets);
+
+  // Get milestone types
+  const typeMap = new Map<string, string>();
+  for (const slug of ["street_count", "percentage", "first_street"]) {
+    const type = await prisma.milestoneType.findUnique({
+      where: { slug },
+      select: { id: true },
+    });
+    if (type) {
+      typeMap.set(slug, type.id);
+    }
+  }
+
+  // Create milestones
+  for (const config of milestoneConfigs) {
+    const typeId = typeMap.get(config.type);
+    if (!typeId) continue;
+
+    // Check if already exists
+    const existing = await prisma.userMilestone.findFirst({
+      where: {
+        userId,
+        projectId,
+        typeId,
+        targetValue: config.target,
+      },
+    });
+
+    if (!existing) {
+      await prisma.userMilestone.create({
+        data: {
+          userId,
+          projectId,
+          typeId,
+          name: config.name,
+          targetValue: config.target,
+          currentValue: 0,
+        },
+      });
+    }
+  }
+}
+
+/**
+ * Update milestone progress after activity sync.
+ * Updates currentValue for MVP milestones based on project progress.
+ * Uses street name counts (not segment counts) for accurate milestone tracking.
+ */
+export async function updateMilestoneProgress(
+  userId: string,
+  projectId: string,
+  completedStreetNames: number,
+  totalStreetNames: number,
+): Promise<void> {
+  const milestones = await prisma.userMilestone.findMany({
+    where: {
+      userId,
+      projectId,
+      completedAt: null,
+      typeId: { not: null }, // Only MVP milestones have typeId
+    },
+    include: { type: true },
+  });
+
+  for (const milestone of milestones) {
+    if (!milestone.typeId || !milestone.type) continue;
+
+    let newValue: number;
+
+    switch (milestone.type.slug) {
+      case "street_count":
+      case "first_street":
+        // Use street name count, not segment count
+        newValue = completedStreetNames;
+        break;
+      case "percentage":
+        // Use street name count for percentage calculation
+        newValue =
+          totalStreetNames > 0
+            ? (completedStreetNames / totalStreetNames) * 100
+            : 0;
+        break;
+      default:
+        continue;
+    }
+
+    await prisma.userMilestone.update({
+      where: { id: milestone.id },
+      data: { currentValue: newValue },
+    });
+  }
+}
+
+/**
+ * Check for completed milestones and generate share messages.
+ * Returns list of newly completed milestones.
+ */
+export async function checkMilestoneCompletion(
+  userId: string,
+  projectId: string,
+  project: {
+    name: string;
+    totalStreets: number;
+    completedStreets: number;
+    totalStreetNames?: number;
+    completedStreetNames?: number;
+    city?: string;
+  },
+): Promise<Array<{ id: string; name: string; shareMessage: string }>> {
+  const milestones = await prisma.userMilestone.findMany({
+    where: {
+      userId,
+      projectId,
+      completedAt: null,
+      typeId: { not: null }, // Only MVP milestones
+    },
+    include: { type: true },
+  });
+
+  const completed: Array<{ id: string; name: string; shareMessage: string }> = [];
+
+  for (const milestone of milestones) {
+    if (!milestone.typeId || !milestone.type || !milestone.targetValue) continue;
+
+    if (milestone.currentValue !== null && milestone.currentValue >= milestone.targetValue) {
+      // Generate unique share message
+      const shareMessage = buildShareMessage({
+        milestone: {
+          name: milestone.name,
+          targetValue: milestone.targetValue,
+          currentValue: milestone.currentValue,
+          type: milestone.type,
+        },
+        project,
+      });
+
+      const updated = await prisma.userMilestone.update({
+        where: { id: milestone.id },
+        data: {
+          completedAt: new Date(),
+          shareMessage, // Store generated message
+        },
+      });
+
+      completed.push({
+        id: updated.id,
+        name: updated.name,
+        shareMessage: updated.shareMessage || "",
+      });
+    }
+  }
+
+  return completed;
 }

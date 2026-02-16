@@ -37,6 +37,8 @@ router.get("/", async (req: Request, res: Response): Promise<void> => {
     lng: req.query.lng as string | undefined,
     radius: req.query.radius as string | undefined,
     projectId: req.query.projectId as string | undefined,
+    userLat: req.query.userLat as string | undefined,
+    userLng: req.query.userLng as string | undefined,
   };
   const data = await getHomepageData(userId, query);
   res.json({ success: true, data });

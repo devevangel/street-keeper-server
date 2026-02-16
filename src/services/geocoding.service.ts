@@ -30,6 +30,18 @@ interface NominatimItem {
   class?: string;
   importance?: number;
   boundingbox?: string[];
+  address?: {
+    city?: string;
+    town?: string;
+    village?: string;
+    municipality?: string;
+    state?: string;
+    state_district?: string;
+    region?: string;
+    county?: string;
+    country?: string;
+    country_code?: string;
+  };
 }
 
 /**
@@ -106,4 +118,74 @@ export async function searchLocation(
     importance: item.importance ?? 0,
     placeId: item.place_id,
   }));
+}
+
+/**
+ * Reverse geocode coordinates to get location details (city, region, country).
+ * Uses Nominatim reverse geocoding API.
+ *
+ * @param lat - Latitude
+ * @param lng - Longitude
+ * @returns Location details (city, region, country, countryCode)
+ */
+export async function reverseGeocode(
+  lat: number,
+  lng: number,
+): Promise<{
+  city?: string;
+  region?: string;
+  country?: string;
+  countryCode?: string;
+}> {
+  const params = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lng),
+    format: "json",
+    addressdetails: "1",
+  });
+
+  const url = `${NOMINATIM_BASE}/reverse?${params.toString()}`;
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "StreetKeeper/1.0 (https://street-keeper.app; dev@street-keeper.app)",
+      Referer: "https://street-keeper.app/",
+      Accept: "application/json",
+      "Accept-Language": "en",
+    },
+  });
+
+  if (!response.ok) {
+    // Don't throw - return empty object if geocoding fails
+    console.warn(`Reverse geocoding failed: ${response.status}`);
+    return {};
+  }
+
+  const data = (await response.json()) as NominatimItem;
+  if (!data || !data.address) {
+    return {};
+  }
+
+  const address = data.address;
+
+  // Prioritize city > town > village > municipality
+  const city =
+    address.city ||
+    address.town ||
+    address.village ||
+    address.municipality;
+
+  // Prioritize region > state_district > state > county
+  const region =
+    address.region ||
+    address.state_district ||
+    address.state ||
+    address.county;
+
+  return {
+    city: city || undefined,
+    region: region || undefined,
+    country: address.country || undefined,
+    countryCode: address.country_code?.toUpperCase() || undefined,
+  };
 }

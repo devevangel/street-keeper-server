@@ -24,8 +24,15 @@
  */
 
 import prisma from "../lib/prisma.js";
-import { PROJECTS, GEOMETRY_CACHE } from "../config/constants.js";
+import {
+  PROJECTS,
+  GEOMETRY_CACHE,
+  isValidRadius,
+  getCompletionThreshold,
+} from "../config/constants.js";
 import { queryStreetsInRadius, OverpassError } from "./overpass.service.js";
+// Note: reverseGeocode will be enabled after migration
+// import { reverseGeocode } from "./geocoding.service.js";
 import {
   generateRadiusCacheKey,
   getCachedGeometries,
@@ -35,6 +42,7 @@ import {
   filterStreetsToRadiusStrict,
 } from "./geometry-cache.service.js";
 import type { OsmStreet } from "../types/run.types.js";
+import { getNextMilestone } from "./milestone.service.js";
 import type {
   CreateProjectInput,
   ProjectPreview,
@@ -75,7 +83,8 @@ export async function previewProject(
   centerLat: number,
   centerLng: number,
   radiusMeters: number,
-  boundaryMode: "centroid" | "strict" = "centroid"
+  boundaryMode: "centroid" | "strict" = "centroid",
+  includeStreets: boolean = false
 ): Promise<ProjectPreview> {
   // Get streets with smart caching
   const { streets, cacheKey, cachedRadius } = await getStreetsWithCache(
@@ -89,11 +98,9 @@ export async function previewProject(
       ? filterStreetsToRadiusStrict
       : filterStreetsToRadius;
 
-  // Filter to requested radius (and boundary mode) if cache was larger or we need strict
-  const filteredStreets =
-    cachedRadius > radiusMeters || boundaryMode === "strict"
-      ? filterFn(streets, centerLat, centerLng, radiusMeters)
-      : streets;
+  // ALWAYS filter to requested radius and boundary mode (even if cache matches radius)
+  // This ensures preview matches creation exactly
+  const filteredStreets = filterFn(streets, centerLat, centerLng, radiusMeters);
 
   // Build summary statistics
   const totalLengthMeters = filteredStreets.reduce(
@@ -105,6 +112,32 @@ export async function previewProject(
   // Generate warnings
   const warnings = generatePreviewWarnings(filteredStreets);
 
+  // Group streets by normalized name (handles OSM data inconsistencies like apostrophe variations)
+  const byName = new Map<string, { segments: OsmStreet[]; displayName: string }>();
+  for (const street of filteredStreets) {
+    const key = normalizeStreetName(street.name || "Unnamed");
+    if (!byName.has(key)) {
+      // Use the first encountered name as the display name
+      byName.set(key, { segments: [], displayName: street.name || "Unnamed" });
+    }
+    byName.get(key)!.segments.push(street);
+  }
+
+  const totalStreetNames = byName.size;
+
+  console.log(`[Preview] boundaryMode=${boundaryMode}, filtered ${streets.length} -> ${filteredStreets.length} segments (${totalStreetNames} unique names)`);
+
+  // Build full streets list if requested
+  let streetsList: ProjectPreview["streets"] | undefined;
+  if (includeStreets) {
+    streetsList = Array.from(byName.values()).map((data) => ({
+      name: data.displayName,
+      segmentCount: data.segments.length,
+      totalLengthMeters: data.segments.reduce((sum, s) => sum + s.lengthMeters, 0),
+      highwayType: data.segments[0]?.highwayType || "unknown",
+    })).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   return {
     centerLat,
     centerLng,
@@ -112,9 +145,11 @@ export async function previewProject(
     cachedRadiusMeters: cachedRadius,
     cacheKey,
     totalStreets: filteredStreets.length,
+    totalStreetNames, // Always include for consistent display
     totalLengthMeters: Math.round(totalLengthMeters * 100) / 100,
     streetsByType,
     warnings,
+    ...(includeStreets && streetsList ? { streets: streetsList } : {}),
   };
 }
 
@@ -189,13 +224,9 @@ export async function createProject(
     deadline,
   } = input;
 
-  if (
-    !PROJECTS.ALLOWED_RADII.includes(
-      radiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number]
-    )
-  ) {
+  if (!isValidRadius(radiusMeters)) {
     throw new Error(
-      `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(", ")}`
+      "Invalid radius. Must be 100–10000 meters in 100 m increments.",
     );
   }
 
@@ -222,10 +253,9 @@ export async function createProject(
       centerLng,
       radiusMeters
     );
-    streets =
-      result.cachedRadius > radiusMeters || boundaryMode === "strict"
-        ? filterFn(result.streets, centerLat, centerLng, radiusMeters)
-        : result.streets;
+    // ALWAYS filter to ensure boundaryMode is applied consistently
+    // Even if cache matches radius exactly, we need to apply boundaryMode filtering
+    streets = filterFn(result.streets, centerLat, centerLng, radiusMeters);
   }
 
   if (streets.length === 0) {
@@ -234,8 +264,18 @@ export async function createProject(
     );
   }
 
+  console.log(`[CreateProject] boundaryMode=${boundaryMode}, created with ${streets.length} streets`);
+
   const snapshot = buildStreetSnapshot(streets);
   const totalLengthMeters = streets.reduce((sum, s) => sum + s.lengthMeters, 0);
+
+  // Calculate unique street names count using normalized names for consistency
+  // This handles OSM data inconsistencies like "St George's" vs "St Georges"
+  const uniqueStreetNames = new Set(streets.map((s) => normalizeStreetName(s.name || "Unnamed")));
+  const totalStreetNames = uniqueStreetNames.size;
+
+  // Note: Reverse geocoding for city/region/country will be enabled after migration
+  // For now, location data is not stored
 
   const project = await prisma.project.create({
     data: {
@@ -251,15 +291,21 @@ export async function createProject(
       totalLengthMeters,
       completedStreets: 0,
       progress: 0,
+      // Note: totalStreetNames, completedStreetNames, city fields will be available after migration
+      // For now, these values are calculated on-the-fly from the snapshot
       deadline: deadline ? new Date(deadline) : null,
     },
   });
 
   console.log(
-    `[Project] Created project "${name}" with ${streets.length} streets for user ${userId}`
+    `[Project] Created project "${name}" with ${streets.length} segments (${totalStreetNames} unique names) for user ${userId}`
   );
 
-  return mapProjectToListItem(project);
+  return {
+    ...mapProjectToListItem(project),
+    totalStreetNames,
+    completedStreetNames: 0, // New project has no completed streets
+  };
 }
 
 // ============================================
@@ -281,7 +327,17 @@ export async function listProjects(
     orderBy: { createdAt: "desc" },
   });
 
-  return projects.map(mapProjectToListItem);
+  // Calculate totalStreetNames and completedStreetNames for each project
+  return projects.map((project) => {
+    const snapshot = project.streetsSnapshot as StreetSnapshot;
+    const { totalStreetNames, completedStreetNames } = groupSnapshotByStreetName(snapshot);
+    
+    return {
+      ...mapProjectToListItem(project),
+      totalStreetNames,
+      completedStreetNames,
+    };
+  });
 }
 
 /**
@@ -369,6 +425,8 @@ export async function getProjectById(
         }
       : null;
 
+  const realNextMilestone = await getNextMilestone(userId, projectId);
+
   const streetsByTypeMap = new Map<
     string,
     { total: number; completed: number }
@@ -422,6 +480,7 @@ export async function getProjectById(
     activityCount,
     lastActivityDate,
     nextMilestone,
+    realNextMilestone,
     streetsByType,
     refreshNeeded,
     daysSinceRefresh,
@@ -577,19 +636,20 @@ export async function getProjectMapData(
     totalStreets > 0 ? (completedCount / totalStreets) * 100 : 0;
 
   // Name-grouped counts so map header matches list ("X streets completed")
-  const byName = new Map<string, { completed: number; total: number }>();
+  // Use normalized names to handle OSM data inconsistencies
+  const byNameMap = new Map<string, { completed: number; total: number }>();
   for (const st of mapStreets) {
-    const key = st.name || "Unnamed";
-    const cur = byName.get(key) ?? { completed: 0, total: 0 };
+    const key = normalizeStreetName(st.name || "Unnamed");
+    const cur = byNameMap.get(key) ?? { completed: 0, total: 0 };
     cur.total += 1;
     if (st.status === "completed") cur.completed += 1;
-    byName.set(key, cur);
+    byNameMap.set(key, cur);
   }
   let completedStreetNames = 0;
-  for (const v of byName.values()) {
+  for (const v of byNameMap.values()) {
     if (v.total > 0 && v.completed === v.total) completedStreetNames += 1;
   }
-  const totalStreetNames = byName.size;
+  const totalStreetNames = byNameMap.size;
 
   const mapData: ProjectMapData = {
     id: project.id,
@@ -752,12 +812,17 @@ export async function refreshProjectSnapshot(
       ? (completedStreets / newSnapshot.streets.length) * 100
       : 0;
 
+  // Calculate street name-based counts
+  const { totalStreetNames, completedStreetNames } =
+    groupSnapshotByStreetName(newSnapshot);
+
   await prisma.project.update({
     where: { id: projectId },
     data: {
       streetsSnapshot: newSnapshot as object,
       snapshotDate: new Date(),
       totalStreets: newSnapshot.streets.length,
+      // Note: totalStreetNames, completedStreetNames will be available after migration
       totalLengthMeters,
       completedStreets,
       progress,
@@ -765,7 +830,7 @@ export async function refreshProjectSnapshot(
   });
 
   console.log(
-    `[Project] Refreshed project "${project.name}": +${diff.added.length} added, -${diff.removed.length} removed`
+    `[Project] Refreshed project "${project.name}": +${diff.added.length} added, -${diff.removed.length} removed, ${totalStreetNames} unique names (${completedStreetNames} completed)`
   );
 
   const { project: projectDetail } = await getProjectById(projectId, userId, {
@@ -831,13 +896,9 @@ export async function resizeProject(
     throw new ProjectAccessDeniedError(projectId);
   }
 
-  if (
-    !PROJECTS.ALLOWED_RADII.includes(
-      newRadiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number],
-    )
-  ) {
+  if (!isValidRadius(newRadiusMeters)) {
     throw new Error(
-      `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(", ")}`,
+      "Invalid radius. Must be 100–10000 meters in 100 m increments.",
     );
   }
 
@@ -882,6 +943,10 @@ export async function resizeProject(
       ? (completedStreets / newSnapshot.streets.length) * 100
       : 0;
 
+  // Calculate street name-based counts
+  const { totalStreetNames, completedStreetNames } =
+    groupSnapshotByStreetName(newSnapshot);
+
   await prisma.project.update({
     where: { id: projectId },
     data: {
@@ -892,11 +957,12 @@ export async function resizeProject(
       totalLengthMeters,
       completedStreets,
       progress,
+      // Note: totalStreetNames, completedStreetNames will be available after migration
     },
   });
 
   console.log(
-    `[Project] Resized project "${project.name}" to ${newRadiusMeters}m`,
+    `[Project] Resized project "${project.name}" to ${newRadiusMeters}m (${totalStreetNames} unique names)`,
   );
 
   const { project: projectDetail } = await getProjectById(projectId, userId, {
@@ -937,7 +1003,9 @@ export async function updateProjectProgress(
       if (shouldUpdate) {
         street.percentage = update.percentage;
         street.lastRunDate = update.lastRunDate;
-        street.completed = update.percentage >= 90;
+        // Use length-based threshold instead of hardcoded 90%
+        const threshold = getCompletionThreshold(street.lengthMeters);
+        street.completed = update.percentage >= threshold * 100;
       }
     }
   }
@@ -948,12 +1016,17 @@ export async function updateProjectProgress(
       ? (completedStreets / snapshot.streets.length) * 100
       : 0;
 
+  // Calculate street name-based counts for milestones (used by milestone service)
+  const { totalStreetNames, completedStreetNames } =
+    groupSnapshotByStreetName(snapshot);
+
   await prisma.project.update({
     where: { id: projectId },
     data: {
       streetsSnapshot: snapshot as object,
       completedStreets,
       progress,
+      // Note: totalStreetNames, completedStreetNames will be available after migration
     },
   });
 }
@@ -1017,15 +1090,46 @@ export async function recomputeProjectProgressFromV2(
 // Helper Functions
 // ============================================
 
+/**
+ * Normalize a street name for grouping purposes.
+ * Handles common OSM data inconsistencies like:
+ * - "St George's Square" vs "St Georges Square" (apostrophe variations)
+ * - "Saint" vs "St" (abbreviation variations)
+ * - Extra whitespace
+ * - Case differences
+ */
+function normalizeStreetName(name: string): string {
+  if (!name) return "unnamed";
+  
+  return name
+    .toLowerCase()
+    // Remove apostrophes and similar punctuation
+    .replace(/[''`´]/g, "")
+    // Normalize common abbreviations
+    .replace(/\bsaint\b/g, "st")
+    .replace(/\broad\b/g, "rd")
+    .replace(/\bstreet\b/g, "st")
+    .replace(/\bavenue\b/g, "ave")
+    .replace(/\blane\b/g, "ln")
+    .replace(/\bdrive\b/g, "dr")
+    .replace(/\bcourt\b/g, "ct")
+    .replace(/\bplace\b/g, "pl")
+    .replace(/\bclose\b/g, "cl")
+    // Normalize whitespace
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /** Group snapshot streets by name; return counts and bins so UI matches "street" (name) not segment. */
-function groupSnapshotByStreetName(snapshot: StreetSnapshot): {
+export function groupSnapshotByStreetName(snapshot: StreetSnapshot): {
   totalStreetNames: number;
   completedStreetNames: number;
   completionBins: CompletionBins;
 } {
   const byName = new Map<string, SnapshotStreet[]>();
   for (const s of snapshot.streets) {
-    const key = s.name || "Unnamed";
+    // Use normalized name for grouping key
+    const key = normalizeStreetName(s.name || "Unnamed");
     if (!byName.has(key)) byName.set(key, []);
     byName.get(key)!.push(s);
   }

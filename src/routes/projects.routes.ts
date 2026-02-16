@@ -54,9 +54,15 @@ import {
   ProjectNotFoundError,
   ProjectAccessDeniedError,
 } from "../services/project.service.js";
+import {
+  createAutoMilestones,
+  createMVPMilestonesForProject,
+  getMilestonesForUser,
+} from "../services/milestone.service.js";
 import { getSuggestions } from "../services/suggestion.service.js";
 import { listActivitiesForProject } from "../services/activity.service.js";
-import { ERROR_CODES, PROJECTS } from "../config/constants.js";
+import prisma from "../lib/prisma.js";
+import { ERROR_CODES, isValidRadius } from "../config/constants.js";
 import { OverpassError } from "../services/overpass.service.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
 import type { CreateProjectInput } from "../types/project.types.js";
@@ -172,17 +178,11 @@ router.get("/preview", async (req: Request, res: Response) => {
   }
 
   // Validate radius
-  if (
-    isNaN(radius) ||
-    !PROJECTS.ALLOWED_RADII.includes(
-      radius as (typeof PROJECTS.ALLOWED_RADII)[number]
-    )
-  ) {
+  if (isNaN(radius) || !isValidRadius(radius)) {
     res.status(400).json({
       success: false,
-      error: `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(
-        ", "
-      )} meters.`,
+      error:
+        "Invalid radius. Must be 100–10000 meters in 100 m increments.",
       code: ERROR_CODES.PROJECT_INVALID_RADIUS,
     });
     return;
@@ -190,9 +190,10 @@ router.get("/preview", async (req: Request, res: Response) => {
 
   const boundaryMode =
     req.query.boundaryMode === "strict" ? "strict" : "centroid";
+  const includeStreets = req.query.includeStreets === "true";
 
   try {
-    const preview = await previewProject(lat, lng, radius, boundaryMode);
+    const preview = await previewProject(lat, lng, radius, boundaryMode, includeStreets);
 
     res.status(200).json({
       success: true,
@@ -373,16 +374,11 @@ router.post("/", async (req: Request, res: Response) => {
     return;
   }
 
-  if (
-    !PROJECTS.ALLOWED_RADII.includes(
-      radiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number]
-    )
-  ) {
+  if (!isValidRadius(radiusMeters)) {
     res.status(400).json({
       success: false,
-      error: `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(
-        ", "
-      )} meters.`,
+      error:
+        "Invalid radius. Must be 100–10000 meters in 100 m increments.",
       code: ERROR_CODES.PROJECT_INVALID_RADIUS,
     });
     return;
@@ -402,6 +398,8 @@ router.post("/", async (req: Request, res: Response) => {
     };
 
     const project = await createProject(userId, input, cacheKey);
+    // Create MVP milestones for the project
+    await createMVPMilestonesForProject(userId, project.id, project.totalStreets);
 
     res.status(201).json({
       success: true,
@@ -543,13 +541,12 @@ router.patch("/:id", async (req: Request, res: Response) => {
   if (
     typeof radiusMeters !== "number" ||
     !Number.isInteger(radiusMeters) ||
-    !PROJECTS.ALLOWED_RADII.includes(
-      radiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number],
-    )
+    !isValidRadius(radiusMeters)
   ) {
     res.status(400).json({
       success: false,
-      error: `Invalid radiusMeters. Must be one of: ${PROJECTS.ALLOWED_RADII.join(", ")}`,
+      error:
+        "Invalid radiusMeters. Must be 100–10000 meters in 100 m increments.",
       code: ERROR_CODES.PROJECT_INVALID_RADIUS,
     });
     return;
@@ -1133,6 +1130,86 @@ router.get("/:id/activities", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Get activities error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Get Project Milestones (MVP)
+// ============================================
+
+/**
+ * GET /projects/:id/milestones
+ * Get all milestones for a project (active, completed, and pending celebrations)
+ */
+router.get("/:id/milestones", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    // Verify project access
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, userId },
+    });
+    if (!project) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    // Get all milestones for this project
+    const allMilestones = await prisma.userMilestone.findMany({
+      where: { userId, projectId },
+      include: { type: true },
+      orderBy: [{ completedAt: "asc" }, { createdAt: "asc" }],
+    });
+
+    // Separate into active, completed, and pending celebrations
+    const active = allMilestones
+      .filter((m) => !m.completedAt)
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        targetValue: m.targetValue ?? 0,
+        currentValue: m.currentValue ?? 0,
+        type: m.type ? { slug: m.type.slug } : null,
+      }));
+
+    const completed = allMilestones
+      .filter((m) => m.completedAt && m.celebrationShownAt)
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        targetValue: m.targetValue ?? 0,
+        currentValue: m.currentValue ?? 0,
+        completedAt: m.completedAt?.toISOString(),
+      }));
+
+    const pendingCelebrations = allMilestones
+      .filter((m) => m.completedAt && !m.celebrationShownAt)
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        projectName: project.name,
+        completedAt: m.completedAt?.toISOString(),
+        shareMessage: m.shareMessage,
+      }));
+
+    res.status(200).json({
+      success: true,
+      active,
+      completed,
+      pendingCelebrations,
+    });
+  } catch (error) {
+    console.error("[Projects] Get milestones error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

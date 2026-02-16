@@ -299,6 +299,16 @@ export const MAPBOX = {
 } as const;
 
 // ============================================
+// Milestones Configuration
+// ============================================
+
+/** Max active (incomplete) milestones per project and globally. */
+export const MILESTONES = {
+  MAX_ACTIVE_PER_PROJECT: 5,
+  MAX_ACTIVE_GLOBAL: 7,
+} as const;
+
+// ============================================
 // Projects Configuration
 // ============================================
 
@@ -322,6 +332,11 @@ export const PROJECTS = {
    */
   ALLOWED_RADII: [100, 200, 500, 1000, 2000, 5000, 10000] as const,
 
+  /** Min/max/step for radius slider (100–10000 m in 100 m steps) */
+  RADIUS_MIN: 100,
+  RADIUS_MAX: 10000,
+  RADIUS_STEP: 100,
+
   /**
    * Days before project snapshot is considered stale
    * When user views project, if snapshot is older than this, refresh from OSM
@@ -342,6 +357,17 @@ export const PROJECTS = {
    */
   NON_RUNNABLE_HIGHWAYS: ["motorway", "trunk", "motorway_link", "trunk_link"],
 } as const;
+
+/**
+ * Validate radius is within allowed range and step (100–10000 m in 100 m steps).
+ */
+export function isValidRadius(r: number): boolean {
+  return (
+    r >= PROJECTS.RADIUS_MIN &&
+    r <= PROJECTS.RADIUS_MAX &&
+    r % PROJECTS.RADIUS_STEP === 0
+  );
+}
 
 // ============================================
 // Map Feature Configuration
