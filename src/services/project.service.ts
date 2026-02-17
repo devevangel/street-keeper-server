@@ -59,6 +59,7 @@ import type {
 } from "../types/project.types.js";
 import type { GpxPoint } from "../types/run.types.js";
 import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.js";
+import { normalizeStreetName } from "../utils/normalize-street-name.js";
 
 // ============================================
 // Project Preview (Before Creation)
@@ -632,8 +633,6 @@ export async function getProjectMapData(
   });
 
   const totalStreets = mapStreets.length;
-  const completionPercentage =
-    totalStreets > 0 ? (completedCount / totalStreets) * 100 : 0;
 
   // Name-grouped counts so map header matches list ("X streets completed")
   // Use normalized names to handle OSM data inconsistencies
@@ -650,6 +649,36 @@ export async function getProjectMapData(
     if (v.total > 0 && v.completed === v.total) completedStreetNames += 1;
   }
   const totalStreetNames = byNameMap.size;
+
+  // Propagate aggregated street status to segments so all segments of a street
+  // share the same visual style on the map (e.g. all "Park Road" segments same color).
+  const streetStatusByName = new Map<
+    string,
+    "completed" | "partial" | "not_started"
+  >();
+  for (const [key, v] of byNameMap) {
+    if (v.total > 0 && v.completed === v.total) {
+      streetStatusByName.set(key, "completed");
+    } else if (v.completed > 0) {
+      streetStatusByName.set(key, "partial");
+    } else {
+      streetStatusByName.set(key, "not_started");
+    }
+  }
+  for (const segment of mapStreets) {
+    const key = normalizeStreetName(segment.name || "Unnamed");
+    const aggregatedStatus = streetStatusByName.get(key);
+    if (aggregatedStatus) {
+      segment.status = aggregatedStatus;
+    }
+  }
+
+  // Recalculate segment counts and completion % to match propagated statuses
+  completedCount = mapStreets.filter((s) => s.status === "completed").length;
+  partialCount = mapStreets.filter((s) => s.status === "partial").length;
+  notRunCount = mapStreets.filter((s) => s.status === "not_started").length;
+  const completionPercentage =
+    totalStreets > 0 ? (completedCount / totalStreets) * 100 : 0;
 
   const mapData: ProjectMapData = {
     id: project.id,
@@ -1089,36 +1118,6 @@ export async function recomputeProjectProgressFromV2(
 // ============================================
 // Helper Functions
 // ============================================
-
-/**
- * Normalize a street name for grouping purposes.
- * Handles common OSM data inconsistencies like:
- * - "St George's Square" vs "St Georges Square" (apostrophe variations)
- * - "Saint" vs "St" (abbreviation variations)
- * - Extra whitespace
- * - Case differences
- */
-function normalizeStreetName(name: string): string {
-  if (!name) return "unnamed";
-  
-  return name
-    .toLowerCase()
-    // Remove apostrophes and similar punctuation
-    .replace(/[''`´]/g, "")
-    // Normalize common abbreviations
-    .replace(/\bsaint\b/g, "st")
-    .replace(/\broad\b/g, "rd")
-    .replace(/\bstreet\b/g, "st")
-    .replace(/\bavenue\b/g, "ave")
-    .replace(/\blane\b/g, "ln")
-    .replace(/\bdrive\b/g, "dr")
-    .replace(/\bcourt\b/g, "ct")
-    .replace(/\bplace\b/g, "pl")
-    .replace(/\bclose\b/g, "cl")
-    // Normalize whitespace
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 /** Group snapshot streets by name; return counts and bins so UI matches "street" (name) not segment. */
 export function groupSnapshotByStreetName(snapshot: StreetSnapshot): {

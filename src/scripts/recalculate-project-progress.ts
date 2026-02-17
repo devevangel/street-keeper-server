@@ -18,29 +18,7 @@ import "dotenv/config";
 
 import prisma from "../lib/prisma.js";
 import type { StreetSnapshot } from "../types/project.types.js";
-
-// Import normalizeStreetName helper
-function normalizeStreetName(name: string): string {
-  if (!name) return "unnamed";
-  
-  return name
-    .toLowerCase()
-    .replace(/[''`´]/g, "")
-    .replace(/\bsaint\b/g, "st")
-    .replace(/\broad\b/g, "rd")
-    .replace(/\bstreet\b/g, "st")
-    .replace(/\bavenue\b/g, "ave")
-    .replace(/\blane\b/g, "ln")
-    .replace(/\bdrive\b/g, "dr")
-    .replace(/\bcourt\b/g, "ct")
-    .replace(/\bplace\b/g, "pl")
-    .replace(/\bclose\b/g, "cl")
-    .replace(/\bway\b/g, "wy")
-    .replace(/\bgardens\b/g, "gdns")
-    .replace(/\bgarden\b/g, "gdn")
-    .trim()
-    .replace(/\s+/g, " ");
-}
+import { normalizeStreetName } from "../utils/normalize-street-name.js";
 
 // Copy of groupSnapshotByStreetName function (not exported from service)
 // Groups streets by normalized name and counts completed street names

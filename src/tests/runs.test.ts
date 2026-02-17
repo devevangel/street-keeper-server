@@ -309,7 +309,7 @@ describe("Street Matching Service", () => {
 describe("Street Aggregation Service", () => {
   it("should normalize street names", async () => {
     const { normalizeStreetName } = await import(
-      "../engines/v1/street-aggregation.js"
+      "../utils/normalize-street-name.js"
     );
 
     expect(normalizeStreetName("Main Street")).toBe("main street");

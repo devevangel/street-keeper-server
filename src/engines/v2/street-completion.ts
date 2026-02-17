@@ -4,6 +4,7 @@
  */
 
 import prisma from "../../lib/prisma.js";
+import { normalizeStreetName } from "../../utils/normalize-street-name.js";
 import type { StreetCompletion, GroupedStreet } from "./types.js";
 import { NODE_PROXIMITY_CONFIG } from "./config.js";
 
@@ -398,6 +399,7 @@ export async function deriveStreetCompletion(
 
 /**
  * Group street completion by name for client-friendly list.
+ * Uses normalized key so "Park Road" and "Park Road (A3066)" group together.
  */
 export function groupStreetsByName(
   streets: StreetCompletion[],
@@ -405,20 +407,21 @@ export function groupStreetsByName(
   const byName = new Map<string, StreetCompletion[]>();
 
   for (const street of streets) {
-    const name = street.name || "Unnamed";
-    if (!byName.has(name)) byName.set(name, []);
-    byName.get(name)!.push(street);
+    const key = normalizeStreetName(street.name || "Unnamed") || "unnamed";
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key)!.push(street);
   }
 
   return Array.from(byName.entries())
-    .map(([name, ways]) => {
+    .map(([, ways]) => {
+      const displayName = ways[0]?.name || "Unnamed";
       const edgesTotal = ways.reduce((sum, w) => sum + w.edgesTotal, 0);
       const edgesCompleted = ways.reduce((sum, w) => sum + w.edgesCompleted, 0);
       const isComplete = ways.every((w) => w.isComplete);
       const completionPercent =
         edgesTotal > 0 ? Math.round((edgesCompleted / edgesTotal) * 100) : 0;
       return {
-        name,
+        name: displayName,
         wayIds: ways.map((w) => String(w.wayId)),
         edgesTotal,
         edgesCompleted,
@@ -426,5 +429,5 @@ export function groupStreetsByName(
         completionPercent,
       };
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 }

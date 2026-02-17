@@ -119,8 +119,9 @@ export async function getCachedGeometries(
 
     // Check if expired
     if (new Date() > cached.expiresAt) {
-      // Expired - delete and return null
-      await prisma.geometryCache.delete({
+      // Expired - delete and return null. Use deleteMany to avoid P2025 (record not found)
+      // when another request already deleted the record (race condition).
+      await prisma.geometryCache.deleteMany({
         where: { cacheKey },
       });
       console.log(`[GeometryCache] Expired cache entry deleted: ${cacheKey}`);

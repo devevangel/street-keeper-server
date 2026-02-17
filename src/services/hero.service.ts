@@ -45,8 +45,13 @@ const HERO_PRIORITY: Array<{
   },
   {
     key: "close_to_milestone",
-    check: (ctx) =>
-      ctx.nextMilestone != null && ctx.nextMilestone.progress.ratio >= 0.8,
+    check: (ctx) => {
+      if (ctx.nextMilestone == null) return false;
+      const remaining = Math.ceil(
+        ctx.nextMilestone.progress.targetValue - ctx.nextMilestone.progress.currentValue
+      );
+      return ctx.nextMilestone.progress.ratio >= 0.8 && remaining > 0;
+    },
     message: (ctx) =>
       `${Math.ceil((ctx.nextMilestone!.progress.targetValue - ctx.nextMilestone!.progress.currentValue))} more to ${ctx.nextMilestone!.name}.`,
   },
