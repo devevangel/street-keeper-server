@@ -414,8 +414,17 @@ model UserPreferences {
   lastViewedLat    Float?
   lastViewedLng    Float?
   lastViewedRadius Int?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+
+  // Display preferences
+  distanceUnit         String @default("km") // "km" | "miles" | "meters"
+  theme                String @default("system") // "dark" | "light" | "system"
+  dateFormat           String @default("short") // "short" | "long" | "numeric"
+  defaultMapZoom       Int    @default(15) // 13-19
+  defaultProjectRadius Int    @default(300) // meters
+  defaultStreetFilter  String @default("all") // "all" | "completed" | "inProgress" | "notStarted"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ============================================
