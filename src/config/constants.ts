@@ -329,12 +329,13 @@ export const PROJECTS = {
    * - 2000m: Small town area
    * - 5000m: Town/city district
    * - 10000m: Large city area
+   * - 50000m: Entire city/metropolitan area
    */
-  ALLOWED_RADII: [100, 200, 500, 1000, 2000, 5000, 10000] as const,
+  ALLOWED_RADII: [100, 200, 500, 1000, 2000, 5000, 10000, 50000] as const,
 
-  /** Min/max/step for radius slider (100–10000 m in 100 m steps) */
+  /** Min/max/step for radius slider (100–50000 m in 100 m steps) */
   RADIUS_MIN: 100,
-  RADIUS_MAX: 10000,
+  RADIUS_MAX: 50000,
   RADIUS_STEP: 100,
 
   /**
@@ -359,7 +360,7 @@ export const PROJECTS = {
 } as const;
 
 /**
- * Validate radius is within allowed range and step (100–10000 m in 100 m steps).
+ * Validate radius is within allowed range and step (100–50000 m in 100 m steps).
  */
 export function isValidRadius(r: number): boolean {
   return (
@@ -380,7 +381,7 @@ export const MAP = {
   /** Default radius in meters when not specified */
   DEFAULT_RADIUS_METERS: 2000,
   /** Maximum allowed radius in meters */
-  MAX_RADIUS_METERS: 10000,
+  MAX_RADIUS_METERS: 50000,
   /** Minimum allowed radius in meters */
   MIN_RADIUS_METERS: 100,
 } as const;

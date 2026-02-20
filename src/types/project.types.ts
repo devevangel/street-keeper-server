@@ -48,26 +48,34 @@ export interface StreetSnapshot {
 export type BoundaryMode = "centroid" | "strict";
 
 /**
- * Input for creating a new project
+ * Input for creating a new project.
+ * For circle: provide centerLat, centerLng, radiusMeters.
+ * For polygon: provide polygonCoordinates (closed ring [lng, lat][]).
  */
 export interface CreateProjectInput {
   name: string;
-  centerLat: number;
-  centerLng: number;
-  radiusMeters: number; // Must be in PROJECTS.ALLOWED_RADII
+  boundaryType?: "circle" | "polygon"; // Default "circle"
+  centerLat?: number;
+  centerLng?: number;
+  radiusMeters?: number; // Required for circle; must be in allowed range
+  polygonCoordinates?: [number, number][]; // [lng, lat][] closed ring for polygon
   boundaryMode?: BoundaryMode; // Default "centroid"
   deadline?: string; // ISO date string (optional)
+  cacheKey?: string; // From preview response (circle only)
 }
 
 /**
- * Project summary for list view (minimal data)
+ * Project summary for list view (minimal data).
+ * For circle projects: centerLat, centerLng, radiusMeters set.
+ * For polygon projects: boundaryType "polygon", center/radius null (optional centroid for display).
  */
 export interface ProjectListItem {
   id: string;
   name: string;
-  centerLat: number;
-  centerLng: number;
-  radiusMeters: number;
+  boundaryType: "circle" | "polygon";
+  centerLat: number | null;
+  centerLng: number | null;
+  radiusMeters: number | null;
   progress: number;
   totalStreets: number;
   completedStreets: number;
@@ -164,12 +172,14 @@ export interface ProjectMapStreet {
   };
 }
 
-/** Boundary for project map (circle) */
-export interface ProjectMapBoundary {
-  type: "circle";
-  center: { lat: number; lng: number };
-  radiusMeters: number;
-}
+/** Boundary for project map (circle or polygon) */
+export type ProjectMapBoundary =
+  | {
+      type: "circle";
+      center: { lat: number; lng: number };
+      radiusMeters: number;
+    }
+  | { type: "polygon"; coordinates: [number, number][] };
 
 /** Stats for project map view (segment counts; use *StreetNames for display consistency with list). */
 export interface ProjectMapStats {
@@ -187,11 +197,12 @@ export interface ProjectMapStats {
 export interface ProjectMapData {
   id: string;
   name: string;
-  centerLat: number;
-  centerLng: number;
-  radiusMeters: number;
+  /** Present for circle projects; null for polygon */
+  centerLat: number | null;
+  centerLng: number | null;
+  radiusMeters: number | null;
   progress: number;
-  /** Circle boundary for map centering/fitting */
+  /** Boundary for map centering/fitting */
   boundary: ProjectMapBoundary;
   /** Street counts by status */
   stats: ProjectMapStats;
@@ -276,6 +287,21 @@ export interface ProjectRefreshResponse {
 // ============================================
 
 /**
+ * Input for previewing a project (circle or polygon).
+ * Circle: centerLat, centerLng, radiusMeters required.
+ * Polygon: polygonCoordinates required.
+ */
+export interface PreviewProjectInput {
+  boundaryType: "circle" | "polygon";
+  centerLat?: number;
+  centerLng?: number;
+  radiusMeters?: number;
+  polygonCoordinates?: [number, number][];
+  boundaryMode?: BoundaryMode;
+  includeStreets?: boolean;
+}
+
+/**
  * Project preview response (before creating project)
  *
  * Allows users to see street count and total length before committing
@@ -289,6 +315,7 @@ export interface ProjectRefreshResponse {
  * {
  *   "success": true,
  *   "preview": {
+ *     "boundaryType": "circle",
  *     "centerLat": 50.788,
  *     "centerLng": -1.089,
  *     "radiusMeters": 2000,
@@ -302,20 +329,25 @@ export interface ProjectRefreshResponse {
  * }
  */
 export interface ProjectPreview {
-  /** Center latitude of the preview area */
-  centerLat: number;
+  boundaryType: "circle" | "polygon";
 
-  /** Center longitude of the preview area */
-  centerLng: number;
+  /** Center latitude (circle only) */
+  centerLat?: number;
 
-  /** Requested radius in meters */
-  radiusMeters: number;
+  /** Center longitude (circle only) */
+  centerLng?: number;
+
+  /** Requested radius in meters (circle only) */
+  radiusMeters?: number;
 
   /**
-   * Actual radius in cache (may be larger than requested)
+   * Actual radius in cache (circle only; may be larger than requested)
    * If larger, results were filtered to requested radius
    */
-  cachedRadiusMeters: number;
+  cachedRadiusMeters?: number;
+
+  /** Polygon ring [lng, lat][] (polygon only) */
+  polygonCoordinates?: [number, number][];
 
   /**
    * Cache key to pass to create endpoint

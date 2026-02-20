@@ -49,10 +49,12 @@ model Project {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   name         String
-  centerLat    Float
-  centerLng    Float
-  radiusMeters Int // Allowed: 500, 1000, 2000, 5000, 10000
-  boundaryMode String @default("centroid") // "centroid" = include if centroid in circle; "strict" = only if entire street in circle
+  boundaryType String  @default("circle") // "circle" | "polygon"
+  centerLat    Float?  // Required for circle; null for polygon
+  centerLng    Float?
+  radiusMeters Int?    // Required for circle; null for polygon. Allowed: 100-10000 in 100m steps
+  polygonCoordinates Json? // GeoJSON ring [lng, lat][] for polygon projects
+  boundaryMode String @default("centroid") // "centroid" = include if centroid in area; "strict" = only if entire street in area
 
   // Street snapshot stored as JSON
   // Structure: { streets: SnapshotStreet[], snapshotDate: string }

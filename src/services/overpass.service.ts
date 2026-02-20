@@ -29,7 +29,14 @@ import type {
 } from "../types/run.types.js";
 import { OVERPASS } from "../config/constants.js";
 import { calculateLineLength } from "./geo.service.js";
+import {
+  polygonBoundingBox,
+  filterStreetsToPolygon,
+} from "./geometry-cache.service.js";
 import { throttledOverpassQuery } from "./overpass-throttle.service.js";
+
+/** Max polygon vertices for direct Overpass poly query; above this use bbox + post-filter */
+const POLYGON_VERTEX_LIMIT = 50;
 
 // ============================================
 // Main Query Function
@@ -59,7 +66,7 @@ import { throttledOverpassQuery } from "./overpass-throttle.service.js";
  * // ]
  */
 export async function queryStreetsInBoundingBox(
-  bbox: BoundingBox
+  bbox: BoundingBox,
 ): Promise<OsmStreet[]> {
   // Build the highway type filter (residential|primary|secondary|...)
   const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
@@ -97,18 +104,14 @@ export async function queryStreetsInBoundingBox(
         }
 
         // Send POST request to Overpass API
-        const response = await axios.post<OverpassResponse>(
-          serverUrl,
-          query,
-          {
-            headers: { "Content-Type": "text/plain" },
-            timeout: OVERPASS.TIMEOUT_MS,
-          }
-        );
+        const response = await axios.post<OverpassResponse>(serverUrl, query, {
+          headers: { "Content-Type": "text/plain" },
+          timeout: OVERPASS.TIMEOUT_MS,
+        });
 
         // Success! Parse and return results
         console.log(
-          `[Overpass] Successfully queried ${serverUrl} (attempt ${attempt + 1})`
+          `[Overpass] Successfully queried ${serverUrl} (attempt ${attempt + 1})`,
         );
         return parseOverpassResponse(response.data);
       } catch (error) {
@@ -126,13 +129,13 @@ export async function queryStreetsInBoundingBox(
         // If last attempt on last server, throw error
         if (attempt === OVERPASS.MAX_RETRIES - 1 && isLastServer) {
           throw new OverpassError(
-            `All Overpass API servers failed after ${OVERPASS.MAX_RETRIES} attempts each. Last error: ${errorMessage}`
+            `All Overpass API servers failed after ${OVERPASS.MAX_RETRIES} attempts each. Last error: ${errorMessage}`,
           );
         }
 
         // Log retry attempt
         console.warn(
-          `[Overpass] ${serverUrl} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${errorMessage}`
+          `[Overpass] ${serverUrl} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${errorMessage}`,
         );
       }
     }
@@ -141,14 +144,14 @@ export async function queryStreetsInBoundingBox(
     // Try next server (if available)
     if (!isLastServer) {
       console.log(
-        `[Overpass] Switching to fallback server after ${OVERPASS.MAX_RETRIES} failed attempts`
+        `[Overpass] Switching to fallback server after ${OVERPASS.MAX_RETRIES} failed attempts`,
       );
     }
   }
 
   // Should never reach here, but TypeScript needs it
   throw new OverpassError(
-    `All Overpass API servers failed. Errors: ${errors.join("; ")}`
+    `All Overpass API servers failed. Errors: ${errors.join("; ")}`,
   );
 }
 
@@ -194,7 +197,7 @@ function isRetryableError(error: unknown): boolean {
 function getErrorMessage(
   error: unknown,
   serverUrl: string,
-  attempt: number
+  attempt: number,
 ): string {
   if (!axios.isAxiosError(error)) {
     return `Unknown error: ${String(error)}`;
@@ -259,6 +262,11 @@ function getErrorMessage(
  */
 function parseOverpassResponse(data: OverpassResponse): OsmStreet[] {
   const streets: OsmStreet[] = [];
+
+  if (!data || !Array.isArray(data.elements)) {
+    console.warn("[Overpass] Invalid response: elements is not an array", data);
+    return streets;
+  }
 
   for (const element of data.elements) {
     // Skip non-way elements (shouldn't happen with our query, but safety first)
@@ -339,22 +347,22 @@ function parseOverpassResponse(data: OverpassResponse): OsmStreet[] {
 
 /**
  * Query streets within a radius from a center point
- * 
+ *
  * Used for creating Routes - queries all streets within a circular area
  * around a center point. This is more appropriate for Routes than bounding
  * box queries because Routes are defined by center + radius.
- * 
+ *
  * Features:
  * - Queries by radius (circular area) instead of bounding box
  * - Only returns named streets (filters out unnamed roads)
  * - Same retry/fallback logic as bounding box query
- * 
+ *
  * @param centerLat - Center latitude of the search area
  * @param centerLng - Center longitude of the search area
  * @param radiusMeters - Radius in meters (e.g., 2000 for 2km)
  * @returns Array of OsmStreet objects with name, length, and geometry
  * @throws OverpassError if all API requests fail after retries
- * 
+ *
  * @example
  * // Query streets within 2km of a point
  * const streets = await queryStreetsInRadius(50.788, -1.089, 2000);
@@ -366,7 +374,7 @@ function parseOverpassResponse(data: OverpassResponse): OsmStreet[] {
 export async function queryStreetsInRadius(
   centerLat: number,
   centerLng: number,
-  radiusMeters: number
+  radiusMeters: number,
 ): Promise<OsmStreet[]> {
   // Build the highway type filter (residential|primary|secondary|...)
   const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
@@ -387,10 +395,10 @@ export async function queryStreetsInRadius(
 
 /**
  * Query ALL streets (including unnamed) within a radius
- * 
+ *
  * Similar to queryStreetsInRadius but includes unnamed roads.
  * Used when we need complete street coverage (e.g., for accurate map display).
- * 
+ *
  * @param centerLat - Center latitude of the search area
  * @param centerLng - Center longitude of the search area
  * @param radiusMeters - Radius in meters
@@ -399,7 +407,7 @@ export async function queryStreetsInRadius(
 export async function queryAllStreetsInRadius(
   centerLat: number,
   centerLng: number,
-  radiusMeters: number
+  radiusMeters: number,
 ): Promise<OsmStreet[]> {
   const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
 
@@ -415,13 +423,56 @@ export async function queryAllStreetsInRadius(
 }
 
 /**
+ * Query named streets inside a polygon.
+ * Polygon coordinates are [lng, lat][] (GeoJSON closed ring).
+ * For polygons with more than 50 vertices, uses bounding box query + post-filter
+ * to avoid Overpass URL length limits.
+ *
+ * @param polygonCoordinates - Closed ring of [lng, lat] pairs
+ * @returns Array of OsmStreet objects inside the polygon
+ */
+export async function queryStreetsInPolygon(
+  polygonCoordinates: [number, number][],
+): Promise<OsmStreet[]> {
+  if (polygonCoordinates.length < 3) {
+    return [];
+  }
+
+  if (polygonCoordinates.length > POLYGON_VERTEX_LIMIT) {
+    const bbox = polygonBoundingBox(polygonCoordinates);
+    const bboxForOverpass: BoundingBox = {
+      south: bbox.south,
+      west: bbox.west,
+      north: bbox.north,
+      east: bbox.east,
+    };
+    const streets = await queryStreetsInBoundingBox(bboxForOverpass);
+    return filterStreetsToPolygon(streets, polygonCoordinates);
+  }
+
+  const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
+  // Overpass poly filter uses "lat lng" space-separated (first point repeated at end to close)
+  const polyString = polygonCoordinates
+    .map(([lng, lat]) => `${lat} ${lng}`)
+    .join(" ");
+  const query = `
+    [out:json][timeout:${OVERPASS.QUERY_TIMEOUT_SECONDS}];
+    way["highway"~"^(${highwayFilter})$"]["name"]
+      (poly:"${polyString}");
+    out body geom;
+  `;
+
+  return throttledOverpassQuery(() => executeOverpassQuery(query));
+}
+
+/**
  * Execute an Overpass query with retry and fallback logic
- * 
+ *
  * Internal helper that handles the actual API request with:
  * - Multiple server fallbacks
  * - Exponential backoff retries
  * - Error classification and handling
- * 
+ *
  * @param query - Overpass QL query string
  * @returns Parsed OsmStreet array
  * @throws OverpassError if all attempts fail
@@ -442,24 +493,22 @@ async function executeOverpassQuery(query: string): Promise<OsmStreet[]> {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
 
-        const response = await axios.post<OverpassResponse>(
-          serverUrl,
-          query,
-          {
-            headers: { "Content-Type": "text/plain" },
-            timeout: OVERPASS.TIMEOUT_MS,
-          }
-        );
+        const response = await axios.post<OverpassResponse>(serverUrl, query, {
+          headers: { "Content-Type": "text/plain" },
+          timeout: OVERPASS.TIMEOUT_MS,
+        });
 
         console.log(
-          `[Overpass] Successfully queried ${serverUrl} (attempt ${attempt + 1})`
+          `[Overpass] Successfully queried ${serverUrl} (attempt ${attempt + 1})`,
         );
         return parseOverpassResponse(response.data);
       } catch (error) {
         const errorMessage = getErrorMessage(error, serverUrl, attempt);
         errors.push(errorMessage);
 
-        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        const status = axios.isAxiosError(error)
+          ? error.response?.status
+          : undefined;
         if (status === 429) {
           console.warn("[Overpass] Rate limited, waiting 60s before retry");
           await new Promise((r) => setTimeout(r, 60000));
@@ -472,25 +521,25 @@ async function executeOverpassQuery(query: string): Promise<OsmStreet[]> {
 
         if (attempt === OVERPASS.MAX_RETRIES - 1 && isLastServer) {
           throw new OverpassError(
-            `All Overpass API servers failed after ${OVERPASS.MAX_RETRIES} attempts each. Last error: ${errorMessage}`
+            `All Overpass API servers failed after ${OVERPASS.MAX_RETRIES} attempts each. Last error: ${errorMessage}`,
           );
         }
 
         console.warn(
-          `[Overpass] ${serverUrl} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${errorMessage}`
+          `[Overpass] ${serverUrl} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${errorMessage}`,
         );
       }
     }
 
     if (!isLastServer) {
       console.log(
-        `[Overpass] Switching to fallback server after ${OVERPASS.MAX_RETRIES} failed attempts`
+        `[Overpass] Switching to fallback server after ${OVERPASS.MAX_RETRIES} failed attempts`,
       );
     }
   }
 
   throw new OverpassError(
-    `All Overpass API servers failed. Errors: ${errors.join("; ")}`
+    `All Overpass API servers failed. Errors: ${errors.join("; ")}`,
   );
 }
 

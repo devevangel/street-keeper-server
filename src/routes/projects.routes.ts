@@ -152,48 +152,103 @@ router.use(requireAuth);
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
+function parseAndValidatePolygon(
+  polygonParam: unknown
+): [number, number][] | null {
+  if (typeof polygonParam !== "string") return null;
+  let arr: unknown[];
+  try {
+    arr = JSON.parse(polygonParam) as unknown[];
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(arr) || arr.length < 3) return null;
+  const coords: [number, number][] = [];
+  const seen = new Set<string>();
+  for (const p of arr) {
+    if (!Array.isArray(p) || p.length < 2) return null;
+    const lng = Number(p[0]);
+    const lat = Number(p[1]);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null;
+    if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null;
+    const key = `${lng},${lat}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    coords.push([lng, lat]);
+  }
+  return coords.length >= 3 ? coords : null;
+}
+
 router.get("/preview", async (req: Request, res: Response) => {
-  // Parse and validate query parameters
-  const lat = parseFloat(req.query.lat as string);
-  const lng = parseFloat(req.query.lng as string);
-  const radius = parseInt(req.query.radius as string, 10);
-
-  // Validate lat/lng
-  if (isNaN(lat) || lat < -90 || lat > 90) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid latitude. Must be between -90 and 90.",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  if (isNaN(lng) || lng < -180 || lng > 180) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid longitude. Must be between -180 and 180.",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  // Validate radius
-  if (isNaN(radius) || !isValidRadius(radius)) {
-    res.status(400).json({
-      success: false,
-      error:
-        "Invalid radius. Must be 100–10000 meters in 100 m increments.",
-      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
-    });
-    return;
-  }
-
+  const boundaryType = (req.query.boundaryType as string) || "circle";
   const boundaryMode =
     req.query.boundaryMode === "strict" ? "strict" : "centroid";
   const includeStreets = req.query.includeStreets === "true";
 
+  let input: import("../types/project.types.js").PreviewProjectInput;
+
+  if (boundaryType === "polygon") {
+    const polygon = parseAndValidatePolygon(req.query.polygon);
+    if (!polygon) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Polygon preview requires a valid polygon query (JSON array of [lng, lat] with at least 3 unique points).",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+    input = {
+      boundaryType: "polygon",
+      polygonCoordinates: polygon,
+      boundaryMode,
+      includeStreets,
+    };
+  } else {
+    const lat = parseFloat(req.query.lat as string);
+    const lng = parseFloat(req.query.lng as string);
+    const radius = parseInt(req.query.radius as string, 10);
+
+    if (isNaN(lat) || lat < -90 || lat > 90) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid latitude. Must be between -90 and 90.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (isNaN(lng) || lng < -180 || lng > 180) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid longitude. Must be between -180 and 180.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (isNaN(radius) || !isValidRadius(radius)) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Invalid radius. Must be 100–10000 meters in 100 m increments.",
+        code: ERROR_CODES.PROJECT_INVALID_RADIUS,
+      });
+      return;
+    }
+
+    input = {
+      boundaryType: "circle",
+      centerLat: lat,
+      centerLng: lng,
+      radiusMeters: radius,
+      boundaryMode,
+      includeStreets,
+    };
+  }
+
   try {
-    const preview = await previewProject(lat, lng, radius, boundaryMode, includeStreets);
+    const preview = await previewProject(input);
 
     res.status(200).json({
       success: true,
@@ -336,12 +391,13 @@ router.get("/", async (req: Request, res: Response) => {
 router.post("/", async (req: Request, res: Response) => {
   const userId = req.user!.id;
 
-  // Validate request body
   const {
     name,
+    boundaryType: bodyBoundaryType,
     centerLat,
     centerLng,
     radiusMeters,
+    polygonCoordinates: bodyPolygonCoordinates,
     boundaryMode: bodyBoundaryMode,
     deadline,
     cacheKey,
@@ -356,48 +412,95 @@ router.post("/", async (req: Request, res: Response) => {
     return;
   }
 
-  if (typeof centerLat !== "number" || centerLat < -90 || centerLat > 90) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid center latitude",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  if (typeof centerLng !== "number" || centerLng < -180 || centerLng > 180) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid center longitude",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  if (!isValidRadius(radiusMeters)) {
-    res.status(400).json({
-      success: false,
-      error:
-        "Invalid radius. Must be 100–10000 meters in 100 m increments.",
-      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
-    });
-    return;
-  }
-
+  const boundaryType = bodyBoundaryType === "polygon" ? "polygon" : "circle";
   const boundaryMode =
     bodyBoundaryMode === "strict" ? "strict" : "centroid";
 
-  try {
-    const input: CreateProjectInput = {
+  let input: CreateProjectInput;
+
+  if (boundaryType === "polygon") {
+    const polygonCoordinates = Array.isArray(bodyPolygonCoordinates)
+      ? (bodyPolygonCoordinates as unknown[]).map((p) => {
+          if (!Array.isArray(p) || p.length < 2) return null;
+          const lng = Number(p[0]);
+          const lat = Number(p[1]);
+          if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null;
+          if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null;
+          return [lng, lat] as [number, number];
+        }).filter((x): x is [number, number] => x !== null)
+      : [];
+    if (polygonCoordinates.length < 3) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Polygon project requires polygonCoordinates (array of [lng, lat]) with at least 3 points.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+    if (centerLat != null || centerLng != null || radiusMeters != null) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Polygon project must not include centerLat, centerLng, or radiusMeters. Use polygonCoordinates only.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+    input = {
       name: name.trim(),
+      boundaryType: "polygon",
+      polygonCoordinates,
+      boundaryMode,
+      deadline,
+    };
+  } else {
+    if (typeof centerLat !== "number" || centerLat < -90 || centerLat > 90) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid center latitude",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (typeof centerLng !== "number" || centerLng < -180 || centerLng > 180) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid center longitude",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (typeof radiusMeters !== "number" || !isValidRadius(radiusMeters)) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Invalid radius. Must be 100–10000 meters in 100 m increments.",
+        code: ERROR_CODES.PROJECT_INVALID_RADIUS,
+      });
+      return;
+    }
+
+    input = {
+      name: name.trim(),
+      boundaryType: "circle",
       centerLat,
       centerLng,
       radiusMeters,
       boundaryMode,
       deadline,
+      cacheKey: typeof cacheKey === "string" ? cacheKey : undefined,
     };
+  }
 
-    const project = await createProject(userId, input, cacheKey);
+  try {
+    const project = await createProject(
+      userId,
+      input,
+      "cacheKey" in input ? input.cacheKey : undefined
+    );
     // Create MVP milestones for the project
     await createMVPMilestonesForProject(userId, project.id, project.totalStreets);
 
