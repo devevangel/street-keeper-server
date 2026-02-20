@@ -31,7 +31,7 @@ import { OVERPASS } from "../config/constants.js";
 import { calculateLineLength } from "./geo.service.js";
 import {
   polygonBoundingBox,
-  filterStreetsToPolygon,
+  resolvePolygonFilter,
 } from "./geometry-cache.service.js";
 import { throttledOverpassQuery } from "./overpass-throttle.service.js";
 
@@ -433,6 +433,7 @@ export async function queryAllStreetsInRadius(
  */
 export async function queryStreetsInPolygon(
   polygonCoordinates: [number, number][],
+  boundaryMode?: string
 ): Promise<OsmStreet[]> {
   if (polygonCoordinates.length < 3) {
     return [];
@@ -447,7 +448,8 @@ export async function queryStreetsInPolygon(
       east: bbox.east,
     };
     const streets = await queryStreetsInBoundingBox(bboxForOverpass);
-    return filterStreetsToPolygon(streets, polygonCoordinates);
+    const filterFn = resolvePolygonFilter(boundaryMode ?? "intersects");
+    return filterFn(streets, polygonCoordinates);
   }
 
   const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");

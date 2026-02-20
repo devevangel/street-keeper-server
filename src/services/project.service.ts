@@ -42,10 +42,8 @@ import {
   getCachedGeometries,
   setCachedGeometries,
   findLargerCachedRadius,
-  filterStreetsToRadius,
-  filterStreetsToRadiusStrict,
-  filterStreetsToPolygon,
-  filterStreetsToPolygonStrict,
+  resolveRadiusFilter,
+  resolvePolygonFilter,
   polygonCentroid,
   pointInPolygon,
 } from "./geometry-cache.service.js";
@@ -90,7 +88,7 @@ export async function previewProject(
 ): Promise<ProjectPreview> {
   const {
     boundaryType,
-    boundaryMode = "centroid",
+    boundaryMode = "intersects",
     includeStreets = false,
   } = input;
 
@@ -120,10 +118,7 @@ export async function previewProject(
       centerLngIn,
       radiusMetersIn
     );
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToRadiusStrict
-        : filterStreetsToRadius;
+    const filterFn = resolveRadiusFilter(boundaryMode);
     filteredStreets = filterFn(
       streets,
       centerLatIn,
@@ -142,11 +137,8 @@ export async function previewProject(
         "Polygon preview requires polygonCoordinates with at least 3 points."
       );
     }
-    const streets = await queryStreetsInPolygon(coords);
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToPolygonStrict
-        : filterStreetsToPolygon;
+    const streets = await queryStreetsInPolygon(coords, boundaryMode);
+    const filterFn = resolvePolygonFilter(boundaryMode);
     filteredStreets = filterFn(streets, coords);
     cacheKey = `geo:polygon:${coords.length}:${coords
       .map((p) => p.join(","))
@@ -278,7 +270,8 @@ export async function createProject(
   const {
     name,
     boundaryType = "circle",
-    boundaryMode = "centroid",
+    boundaryMode = "intersects",
+    includePreviousRuns = false,
     deadline,
   } = input;
 
@@ -292,6 +285,7 @@ export async function createProject(
     radiusMeters: number | null;
     polygonCoordinates: unknown;
     boundaryMode: string;
+    includePreviousRuns: boolean;
     streetsSnapshot: object;
     snapshotDate: Date;
     totalStreets: number;
@@ -319,10 +313,7 @@ export async function createProject(
         "Invalid radius. Must be 100–10000 meters in 100 m increments."
       );
     }
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToRadiusStrict
-        : filterStreetsToRadius;
+    const filterFn = resolveRadiusFilter(boundaryMode);
 
     if (cacheKey) {
       const cached = await getCachedGeometries(cacheKey);
@@ -351,6 +342,7 @@ export async function createProject(
       radiusMeters,
       polygonCoordinates: null,
       boundaryMode,
+      includePreviousRuns,
       streetsSnapshot: {} as object,
       snapshotDate: new Date(),
       totalStreets: 0,
@@ -366,11 +358,8 @@ export async function createProject(
         "Polygon project requires polygonCoordinates with at least 3 points."
       );
     }
-    streets = await queryStreetsInPolygon(polygonCoordinates);
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToPolygonStrict
-        : filterStreetsToPolygon;
+    streets = await queryStreetsInPolygon(polygonCoordinates, boundaryMode);
+    const filterFn = resolvePolygonFilter(boundaryMode);
     streets = filterFn(streets, polygonCoordinates);
 
     createData = {
@@ -382,6 +371,7 @@ export async function createProject(
       radiusMeters: null,
       polygonCoordinates: polygonCoordinates as unknown,
       boundaryMode,
+      includePreviousRuns,
       streetsSnapshot: {} as object,
       snapshotDate: new Date(),
       totalStreets: 0,
@@ -410,17 +400,66 @@ export async function createProject(
   createData.totalLengthMeters = totalLengthMeters;
 
   const project = await prisma.project.create({
-    data: createData,
+    data: createData as Parameters<typeof prisma.project.create>[0]["data"],
   });
 
   console.log(
     `[Project] Created ${boundaryType} project "${name}" with ${streets.length} segments (${totalStreetNames} unique names) for user ${userId}`
   );
 
+  if (includePreviousRuns) {
+    const BACKFILL_TIMEOUT_MS = 10_000;
+    try {
+      const backfillPromise = (async () => {
+        const v2Results = await deriveProjectProgressV2Scoped(
+          userId,
+          snapshot.streets.map((s) => ({
+            osmId: s.osmId,
+            lengthMeters: s.lengthMeters ?? 0,
+          })),
+          null
+        );
+        const snapshotByOsmId = new Map(
+          snapshot.streets.map((s) => [s.osmId, s])
+        );
+        const streetUpdates = v2Results.map((r) => ({
+          osmId: r.osmId,
+          percentage: r.percentage,
+          lastRunDate:
+            snapshotByOsmId.get(r.osmId)?.lastRunDate ??
+            new Date().toISOString(),
+        }));
+        await updateProjectProgress(project.id, streetUpdates, {
+          forceUpdate: true,
+        });
+      })();
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("Backfill timeout")),
+          BACKFILL_TIMEOUT_MS
+        )
+      );
+      await Promise.race([backfillPromise, timeoutPromise]);
+    } catch (err) {
+      console.warn(
+        `[Project] Include previous runs backfill failed or timed out for project ${project.id}:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
+  const finalProject = await prisma.project.findUnique({
+    where: { id: project.id },
+  });
+  const toReturn = finalProject ?? project;
+  const snapshotFinal = toReturn.streetsSnapshot as StreetSnapshot | null;
+  const { completedStreetNames: completedNames } = snapshotFinal?.streets?.length
+    ? groupSnapshotByStreetName(snapshotFinal)
+    : { completedStreetNames: 0 };
   return {
-    ...mapProjectToListItem(project),
+    ...mapProjectToListItem(toReturn),
     totalStreetNames,
-    completedStreetNames: 0,
+    completedStreetNames: completedNames,
   };
 }
 
@@ -657,7 +696,7 @@ export async function getProjectMapData(
 
   const boundaryType = (project as { boundaryType?: string }).boundaryType ?? "circle";
   const boundaryMode =
-    (project as { boundaryMode?: string }).boundaryMode ?? "centroid";
+    (project as { boundaryMode?: string }).boundaryMode ?? "intersects";
 
   let streetsWithGeometry: OsmStreet[];
   let geometryCacheHit: boolean;
@@ -668,11 +707,11 @@ export async function getProjectMapData(
     if (!polygonCoordinates || polygonCoordinates.length < 3) {
       throw new Error("Project has invalid polygon boundary.");
     }
-    streetsWithGeometry = await queryStreetsInPolygon(polygonCoordinates);
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToPolygonStrict
-        : filterStreetsToPolygon;
+    streetsWithGeometry = await queryStreetsInPolygon(
+      polygonCoordinates,
+      boundaryMode
+    );
+    const filterFn = resolvePolygonFilter(boundaryMode);
     streetsWithGeometry = filterFn(streetsWithGeometry, polygonCoordinates);
     streetsWithGeometry = streetsWithGeometry.filter((s) =>
       snapshotOsmIds.has(s.osmId)
@@ -689,10 +728,7 @@ export async function getProjectMapData(
     ) {
       throw new Error("Project has invalid circle boundary.");
     }
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToRadiusStrict
-        : filterStreetsToRadius;
+    const filterFn = resolveRadiusFilter(boundaryMode);
 
     const exactKey = generateRadiusCacheKey(
       centerLat,
@@ -1018,12 +1054,12 @@ export async function refreshProjectSnapshot(
       throw new Error("Project has invalid polygon boundary.");
     }
     const boundaryMode =
-      (project as { boundaryMode?: string }).boundaryMode ?? "centroid";
-    freshStreets = await queryStreetsInPolygon(polygonCoordinates);
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToPolygonStrict
-        : filterStreetsToPolygon;
+      (project as { boundaryMode?: string }).boundaryMode ?? "intersects";
+    freshStreets = await queryStreetsInPolygon(
+      polygonCoordinates,
+      boundaryMode
+    );
+    const filterFn = resolvePolygonFilter(boundaryMode);
     freshStreets = filterFn(freshStreets, polygonCoordinates);
   } else {
     const centerLat = project.centerLat;
@@ -1034,11 +1070,8 @@ export async function refreshProjectSnapshot(
     }
     freshStreets = await queryStreetsInRadius(centerLat, centerLng, radiusMeters);
     const boundaryMode =
-      (project as { boundaryMode?: string }).boundaryMode ?? "centroid";
-    const filterFn =
-      boundaryMode === "strict"
-        ? filterStreetsToRadiusStrict
-        : filterStreetsToRadius;
+      (project as { boundaryMode?: string }).boundaryMode ?? "intersects";
+    const filterFn = resolveRadiusFilter(boundaryMode);
     freshStreets = filterFn(freshStreets, centerLat, centerLng, radiusMeters);
   }
 
@@ -1172,10 +1205,7 @@ export async function resizeProject(
     ((project as { boundaryMode?: string }).boundaryMode as
       | "centroid"
       | "strict") ?? "centroid";
-  const filterFn =
-    boundaryMode === "strict"
-      ? filterStreetsToRadiusStrict
-      : filterStreetsToRadius;
+  const filterFn = resolveRadiusFilter(boundaryMode);
 
   const { streets: rawStreets } = await getStreetsWithCache(
     centerLat,
@@ -1301,7 +1331,6 @@ export async function recomputeProjectProgressFromV2(
 ): Promise<void> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { userId: true, createdAt: true, streetsSnapshot: true },
   });
 
   if (!project) {
@@ -1317,13 +1346,16 @@ export async function recomputeProjectProgressFromV2(
     return;
   }
 
+  const includePreviousRuns = (project as { includePreviousRuns?: boolean })
+    .includePreviousRuns;
+  const cutoff = includePreviousRuns ? null : project.createdAt;
   const v2Results = await deriveProjectProgressV2Scoped(
     userId,
     snapshot.streets.map((s) => ({
       osmId: s.osmId,
       lengthMeters: s.lengthMeters ?? 0,
     })),
-    project.createdAt
+    cutoff
   );
 
   const snapshotByOsmId = new Map(

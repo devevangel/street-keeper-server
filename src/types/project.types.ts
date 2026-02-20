@@ -42,10 +42,11 @@ export interface StreetSnapshot {
 
 /**
  * Boundary mode: which streets to include in the project area.
- * - centroid: include if street centroid is inside circle (default, more inclusive)
- * - strict: include only if entire street geometry is inside circle
+ * - intersects: include if any part of street touches/crosses the boundary (default)
+ * - centroid: include if street centroid is inside boundary
+ * - strict: include only if entire street geometry is inside boundary
  */
-export type BoundaryMode = "centroid" | "strict";
+export type BoundaryMode = "centroid" | "strict" | "intersects";
 
 /**
  * Input for creating a new project.
@@ -59,7 +60,9 @@ export interface CreateProjectInput {
   centerLng?: number;
   radiusMeters?: number; // Required for circle; must be in allowed range
   polygonCoordinates?: [number, number][]; // [lng, lat][] closed ring for polygon
-  boundaryMode?: BoundaryMode; // Default "centroid"
+  boundaryMode?: BoundaryMode; // Default "intersects"
+  /** Creation-time only. Cannot be changed after project creation. */
+  includePreviousRuns?: boolean;
   deadline?: string; // ISO date string (optional)
   cacheKey?: string; // From preview response (circle only)
 }

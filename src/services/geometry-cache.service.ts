@@ -23,6 +23,7 @@
  * }
  */
 
+import * as turf from "@turf/turf";
 import prisma from "../lib/prisma.js";
 import { GEOMETRY_CACHE, PROJECTS } from "../config/constants.js";
 import type { OsmStreet } from "../types/run.types.js";
@@ -317,6 +318,52 @@ export function filterStreetsToRadiusStrict(
   });
 }
 
+/**
+ * Filter streets to those that intersect the circle (any part within radius).
+ * Uses Turf pointToLineDistance for exact geodesic distance. Skips degenerate streets (< 2 coords).
+ */
+export function filterStreetsToRadiusIntersects(
+  streets: OsmStreet[],
+  centerLat: number,
+  centerLng: number,
+  radiusMeters: number
+): OsmStreet[] {
+  const center = turf.point([centerLng, centerLat]);
+  const metersPerDegLat = 111_000;
+  const metersPerDegLng = 111_000 * Math.cos((centerLat * Math.PI) / 180);
+  const deltaLat = radiusMeters / metersPerDegLat;
+  const deltaLng = radiusMeters / metersPerDegLng;
+  const circleSouth = centerLat - deltaLat;
+  const circleNorth = centerLat + deltaLat;
+  const circleWest = centerLng - deltaLng;
+  const circleEast = centerLng + deltaLng;
+
+  return streets.filter((street) => {
+    const coords = street.geometry.coordinates;
+    if (coords.length < 2) {
+      console.warn(
+        "[GeometryCache] Skipping street with < 2 coordinates (degenerate):",
+        street.osmId ?? street.name
+      );
+      return false;
+    }
+    const streetBbox = polygonBoundingBox(coords);
+    if (
+      streetBbox.east < circleWest ||
+      streetBbox.west > circleEast ||
+      streetBbox.north < circleSouth ||
+      streetBbox.south > circleNorth
+    ) {
+      return false;
+    }
+    const line = turf.lineString(coords);
+    const distMeters = turf.pointToLineDistance(center, line, {
+      units: "meters",
+    });
+    return distMeters <= radiusMeters;
+  });
+}
+
 // ============================================
 // Polygon Helpers (point-in-polygon, bbox, filter)
 // ============================================
@@ -441,6 +488,68 @@ export function filterStreetsToPolygonStrict(
     }
     return true;
   });
+}
+
+/**
+ * Filter streets to those that intersect the polygon (any part touches or crosses).
+ * Uses Turf booleanIntersects with bbox pre-filter. Skips degenerate streets (< 2 coords).
+ * Polygon coordinates are [lng, lat][] (GeoJSON closed ring).
+ */
+export function filterStreetsToPolygonIntersects(
+  streets: OsmStreet[],
+  polygonCoords: [number, number][]
+): OsmStreet[] {
+  if (polygonCoords.length < 3) return [];
+
+  const ring =
+    polygonCoords.length > 0 &&
+    (polygonCoords[0][0] !== polygonCoords[polygonCoords.length - 1][0] ||
+      polygonCoords[0][1] !== polygonCoords[polygonCoords.length - 1][1])
+      ? [...polygonCoords, polygonCoords[0]]
+      : polygonCoords;
+
+  const poly = turf.polygon([ring]);
+  const polyBbox = polygonBoundingBox(ring);
+
+  return streets.filter((street) => {
+    const coords = street.geometry.coordinates;
+    if (coords.length < 2) {
+      console.warn(
+        "[GeometryCache] Skipping street with < 2 coordinates (degenerate):",
+        street.osmId ?? street.name
+      );
+      return false;
+    }
+    const streetBbox = polygonBoundingBox(coords);
+    if (
+      streetBbox.east < polyBbox.west ||
+      streetBbox.west > polyBbox.east ||
+      streetBbox.north < polyBbox.south ||
+      streetBbox.south > polyBbox.north
+    ) {
+      return false;
+    }
+    const line = turf.lineString(coords);
+    return turf.booleanIntersects(line, poly);
+  });
+}
+
+// ============================================
+// Filter Resolvers (single place to map boundaryMode to filter function)
+// ============================================
+
+export function resolveRadiusFilter(boundaryMode: string): typeof filterStreetsToRadius {
+  if (boundaryMode === "strict") return filterStreetsToRadiusStrict;
+  if (boundaryMode === "centroid") return filterStreetsToRadius;
+  return filterStreetsToRadiusIntersects;
+}
+
+export function resolvePolygonFilter(
+  boundaryMode: string
+): typeof filterStreetsToPolygon {
+  if (boundaryMode === "strict") return filterStreetsToPolygonStrict;
+  if (boundaryMode === "centroid") return filterStreetsToPolygon;
+  return filterStreetsToPolygonIntersects;
 }
 
 // ============================================

@@ -106,13 +106,13 @@ export async function deriveProjectProgressV2(
 
 /**
  * Derive project progress from UserNodeHit + WayNode, scoped to node hits
- * after project creation. Use this when updating project progress so only
- * runs after the project was created count.
+ * after project creation (or all hits if projectCreatedAt is null).
+ * Use projectCreatedAt: null when includePreviousRuns is true.
  */
 export async function deriveProjectProgressV2Scoped(
   userId: string,
   projectStreets: Array<{ osmId: string; lengthMeters: number }>,
-  projectCreatedAt: Date,
+  projectCreatedAt: Date | null,
 ): Promise<
   Array<{
     osmId: string;
@@ -128,7 +128,7 @@ export async function deriveProjectProgressV2Scoped(
     prisma.userNodeHit.findMany({
       where: {
         userId,
-        hitAt: { gte: projectCreatedAt },
+        ...(projectCreatedAt ? { hitAt: { gte: projectCreatedAt } } : {}),
       },
       select: { nodeId: true },
     }),

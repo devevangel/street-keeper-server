@@ -54,7 +54,7 @@ model Project {
   centerLng    Float?
   radiusMeters Int?    // Required for circle; null for polygon. Allowed: 100-10000 in 100m steps
   polygonCoordinates Json? // GeoJSON ring [lng, lat][] for polygon projects
-  boundaryMode String @default("centroid") // "centroid" = include if centroid in area; "strict" = only if entire street in area
+  boundaryMode String @default("intersects") // "intersects" = any part touches boundary; "centroid" = centroid in area; "strict" = entire street in area
 
   // Street snapshot stored as JSON
   // Structure: { streets: SnapshotStreet[], snapshotDate: string }
@@ -79,6 +79,9 @@ model Project {
 
   deadline   DateTime?
   isArchived Boolean   @default(false)
+
+  /** Immutable after creation. If true, historical activities count toward progress. */
+  includePreviousRuns Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

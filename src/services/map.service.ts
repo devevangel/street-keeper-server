@@ -16,7 +16,7 @@ import {
   setCachedGeometries,
   generateRadiusCacheKey,
   findLargerCachedRadius,
-  filterStreetsToRadius,
+  resolveRadiusFilter,
 } from "./geometry-cache.service.js";
 import { getUserStreetProgress } from "./user-street-progress.service.js";
 import {
@@ -528,7 +528,8 @@ export async function getGeometriesInArea(
     radiusMeters
   );
   if (larger) {
-    const filtered = filterStreetsToRadius(
+    const filterFn = resolveRadiusFilter("intersects");
+    const filtered = filterFn(
       larger.streets,
       centerLat,
       centerLng,

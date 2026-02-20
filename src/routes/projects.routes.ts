@@ -399,6 +399,7 @@ router.post("/", async (req: Request, res: Response) => {
     radiusMeters,
     polygonCoordinates: bodyPolygonCoordinates,
     boundaryMode: bodyBoundaryMode,
+    includePreviousRuns,
     deadline,
     cacheKey,
   } = req.body;
@@ -414,7 +415,11 @@ router.post("/", async (req: Request, res: Response) => {
 
   const boundaryType = bodyBoundaryType === "polygon" ? "polygon" : "circle";
   const boundaryMode =
-    bodyBoundaryMode === "strict" ? "strict" : "centroid";
+    bodyBoundaryMode === "strict"
+      ? "strict"
+      : bodyBoundaryMode === "centroid"
+        ? "centroid"
+        : "intersects";
 
   let input: CreateProjectInput;
 
@@ -452,6 +457,7 @@ router.post("/", async (req: Request, res: Response) => {
       boundaryType: "polygon",
       polygonCoordinates,
       boundaryMode,
+      includePreviousRuns: Boolean(includePreviousRuns),
       deadline,
     };
   } else {
@@ -490,6 +496,7 @@ router.post("/", async (req: Request, res: Response) => {
       centerLng,
       radiusMeters,
       boundaryMode,
+      includePreviousRuns: Boolean(includePreviousRuns),
       deadline,
       cacheKey: typeof cacheKey === "string" ? cacheKey : undefined,
     };
