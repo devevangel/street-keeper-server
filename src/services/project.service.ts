@@ -67,6 +67,7 @@ import type {
 import type { GpxPoint } from "../types/run.types.js";
 import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.js";
 import { normalizeStreetName } from "../utils/normalize-street-name.js";
+import { STREET_AGGREGATION } from "../config/constants.js";
 
 // ============================================
 // Project Preview (Before Creation)
@@ -814,44 +815,58 @@ export async function getProjectMapData(
 
   const totalStreets = mapStreets.length;
 
-  // Name-grouped counts so map header matches list ("X streets completed")
-  // Use normalized names to handle OSM data inconsistencies
-  const byNameMap = new Map<string, { completed: number; total: number }>();
+  // Group segments by street name for aggregation (same logic as map.service)
+  const segmentsByName = new Map<string, typeof mapStreets>();
   for (const st of mapStreets) {
     const key = normalizeStreetName(st.name || "Unnamed");
-    const cur = byNameMap.get(key) ?? { completed: 0, total: 0 };
-    cur.total += 1;
-    if (st.status === "completed") cur.completed += 1;
-    byNameMap.set(key, cur);
+    if (!segmentsByName.has(key)) segmentsByName.set(key, []);
+    segmentsByName.get(key)!.push(st);
   }
-  let completedStreetNames = 0;
-  for (const v of byNameMap.values()) {
-    if (v.total > 0 && v.completed === v.total) completedStreetNames += 1;
-  }
-  const totalStreetNames = byNameMap.size;
 
-  // Propagate aggregated street status to segments so all segments of a street
-  // share the same visual style on the map (e.g. all "Park Road" segments same color).
-  const streetStatusByName = new Map<
+  // Compute length-weighted percentage and status per street name.
+  // Matches map.service: all segments of same street share same color on map.
+  const { STREET_COMPLETION_THRESHOLD, CONNECTOR_MAX_LENGTH_METERS, CONNECTOR_WEIGHT } =
+    STREET_AGGREGATION;
+  const streetDataByName = new Map<
     string,
-    "completed" | "partial" | "not_started"
+    { status: "completed" | "partial" | "not_started"; percentage: number }
   >();
-  for (const [key, v] of byNameMap) {
-    if (v.total > 0 && v.completed === v.total) {
-      streetStatusByName.set(key, "completed");
-    } else if (v.completed > 0) {
-      streetStatusByName.set(key, "partial");
-    } else {
-      streetStatusByName.set(key, "not_started");
+  for (const [key, segments] of segmentsByName) {
+    let weightedSum = 0;
+    let totalWeight = 0;
+    for (const s of segments) {
+      const isConnector = s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS;
+      const weight = s.lengthMeters * (isConnector ? CONNECTOR_WEIGHT : 1);
+      weightedSum += (s.percentage / 100) * weight;
+      totalWeight += weight;
     }
+    const weightedRatio = totalWeight === 0 ? 0 : weightedSum / totalWeight;
+    const weightedPercentage = Math.round(weightedRatio * 100);
+    const status: "completed" | "partial" | "not_started" =
+      weightedRatio >= STREET_COMPLETION_THRESHOLD
+        ? "completed"
+        : weightedPercentage > 0
+          ? "partial"
+          : "not_started";
+    streetDataByName.set(key, { status, percentage: weightedPercentage });
   }
+
+  // Propagate aggregated status and percentage to all segments
   for (const segment of mapStreets) {
     const key = normalizeStreetName(segment.name || "Unnamed");
-    const aggregatedStatus = streetStatusByName.get(key);
-    if (aggregatedStatus) {
-      segment.status = aggregatedStatus;
+    const aggregated = streetDataByName.get(key);
+    if (aggregated) {
+      segment.status = aggregated.status;
+      segment.percentage = aggregated.percentage;
     }
   }
+
+  // Name-grouped counts for map header ("X streets completed")
+  let completedStreetNames = 0;
+  for (const [, data] of streetDataByName) {
+    if (data.status === "completed") completedStreetNames += 1;
+  }
+  const totalStreetNames = streetDataByName.size;
 
   // Recalculate segment counts and completion % to match propagated statuses
   completedCount = mapStreets.filter((s) => s.status === "completed").length;
