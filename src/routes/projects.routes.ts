@@ -48,6 +48,8 @@ import {
   getProjectMapData,
   getProjectHeatmapData,
   archiveProject,
+  restoreProject,
+  deleteProjectPermanently,
   refreshProjectSnapshot,
   resizeProject,
   recomputeProjectProgressFromV2,
@@ -971,6 +973,137 @@ router.delete("/:id", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Archive error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Restore Archived Project
+// ============================================
+
+/**
+ * @openapi
+ * /routes/{id}/restore:
+ *   post:
+ *     summary: Restore an archived project
+ *     description: Restore a previously archived project so it reappears in the active list.
+ *     tags: [Routes]
+ *     security:
+ *       - DevAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Route ID
+ *     responses:
+ *       200:
+ *         description: Project restored successfully
+ */
+router.post("/:id/restore", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    await restoreProject(projectId, userId);
+
+    res.status(200).json({
+      success: true,
+      message: "Project restored successfully",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    console.error("[Projects] Restore error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Permanently Delete Project
+// ============================================
+
+/**
+ * @openapi
+ * /routes/{id}/permanent:
+ *   delete:
+ *     summary: Permanently delete a project
+ *     description: |
+ *       Permanently delete a project and all related data. This action cannot be undone.
+ *       Deletes: Project, ProjectActivity records, and project-specific milestones.
+ *       Activities (runs) themselves are NOT deleted as they may be shared with other projects.
+ *     tags: [Routes]
+ *     security:
+ *       - DevAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Route ID
+ *     responses:
+ *       200:
+ *         description: Project permanently deleted
+ */
+router.delete("/:id/permanent", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    await deleteProjectPermanently(projectId, userId);
+
+    res.status(200).json({
+      success: true,
+      message: "Project permanently deleted",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    console.error("[Projects] Permanent delete error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

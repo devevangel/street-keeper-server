@@ -419,6 +419,7 @@ model UserPreferences {
   distanceUnit         String @default("km") // "km" | "miles" | "meters"
   theme                String @default("system") // "dark" | "light" | "system"
   dateFormat           String @default("short") // "short" | "long" | "numeric"
+  mapStyle             String @default("standard") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
   defaultMapZoom       Int    @default(15) // 13-19
   defaultProjectRadius Int    @default(300) // meters
   defaultStreetFilter  String @default("all") // "all" | "completed" | "inProgress" | "notStarted"

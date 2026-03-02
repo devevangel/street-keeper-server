@@ -1169,6 +1169,63 @@ export async function archiveProject(
 }
 
 /**
+ * Restore an archived project.
+ * Sets isArchived = false so project reappears in list.
+ */
+export async function restoreProject(
+  projectId: string,
+  userId: string
+): Promise<void> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+  });
+
+  if (!project) {
+    throw new ProjectNotFoundError(projectId);
+  }
+
+  if (project.userId !== userId) {
+    throw new ProjectAccessDeniedError(projectId);
+  }
+
+  await prisma.project.update({
+    where: { id: projectId },
+    data: { isArchived: false },
+  });
+
+  console.log(`[Project] Restored project "${project.name}"`);
+}
+
+/**
+ * Permanently delete a project and all related data.
+ * Removes: Project, ProjectActivity (cascade), UserMilestone (cascade).
+ * Activities themselves are NOT deleted (they may be shared with other projects).
+ */
+export async function deleteProjectPermanently(
+  projectId: string,
+  userId: string
+): Promise<void> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+  });
+
+  if (!project) {
+    throw new ProjectNotFoundError(projectId);
+  }
+
+  if (project.userId !== userId) {
+    throw new ProjectAccessDeniedError(projectId);
+  }
+
+  // Delete the project (ProjectActivity and UserMilestone have onDelete: Cascade)
+  await prisma.project.delete({
+    where: { id: projectId },
+  });
+
+  console.log(`[Project] Permanently deleted project "${project.name}"`);
+}
+
+/**
  * Resize project radius. Re-queries streets for the new radius and merges
  * with existing snapshot, preserving progress for streets that remain inside.
  */

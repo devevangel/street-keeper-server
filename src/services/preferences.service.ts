@@ -14,6 +14,7 @@ const ALLOWED_KEYS = [
   "distanceUnit",
   "theme",
   "dateFormat",
+  "mapStyle",
   "defaultMapZoom",
   "defaultProjectRadius",
   "defaultStreetFilter",
@@ -28,6 +29,7 @@ export type UpdatePreferencesInput = Partial<{
   distanceUnit: string;
   theme: string;
   dateFormat: string;
+  mapStyle: string;
   defaultMapZoom: number;
   defaultProjectRadius: number;
   defaultStreetFilter: string;
