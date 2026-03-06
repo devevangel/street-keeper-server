@@ -16,14 +16,18 @@ import {
   setCachedGeometries,
   generateRadiusCacheKey,
   findLargerCachedRadius,
-  filterStreetsToRadius,
+  resolveRadiusFilter,
 } from "./geometry-cache.service.js";
 import { getUserStreetProgress } from "./user-street-progress.service.js";
 import {
   isUnnamedStreet,
   normalizeStreetName,
+  normalizeStreetNameForMatching,
 } from "../engines/v1/street-aggregation.js";
-import { deriveStreetCompletion } from "../engines/v2/street-completion.js";
+import {
+  deriveStreetCompletionForArea,
+  osmIdToWayId,
+} from "../engines/v2/street-completion.js";
 import type { OsmStreet } from "../types/run.types.js";
 import type {
   MapStreet,
@@ -57,7 +61,8 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
   const byName = new Map<string, MapStreet[]>();
 
   for (const street of streets) {
-    const key = normalizeStreetName(street.name) || street.osmId;
+    // Use aggressive normalization to group "Park Road" and "Park Road (A3066)" together
+    const key = normalizeStreetNameForMatching(street.name) || street.osmId;
     if (!byName.has(key)) byName.set(key, []);
     byName.get(key)!.push(street);
   }
@@ -126,13 +131,14 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
         ? "completed"
         : "partial";
 
+    const weightedPercentage = Math.round(weightedCompletionRatio * 100);
     const stats: MapStreetStats = {
       runCount: totalRuns,
       completionCount: totalCompletions,
       firstRunDate,
       lastRunDate,
       totalLengthMeters,
-      currentPercentage: maxPercentage,
+      currentPercentage: weightedPercentage,
       everCompleted,
       weightedCompletionRatio,
       segmentCount: segments.length,
@@ -178,7 +184,7 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       osmId: base.osmId,
       name: base.name,
       highwayType: base.highwayType,
-      percentage: maxPercentage,
+      percentage: weightedPercentage,
       lengthMeters: totalLengthMeters,
       status,
       geometry: mergedGeometry,
@@ -309,18 +315,26 @@ export async function getMapStreets(
   // 4. Aggregate by name for list and stats (no duplicates)
   const streets = aggregateStreetsByName(segments);
 
-  // 5. Propagate aggregated street status to segments so all segments of a street
-  // share the same visual style on the map (solid green or dotted yellow).
-  const streetStatusByName = new Map<string, "completed" | "partial">();
+  // 5. Propagate aggregated street status and percentage to segments so all
+  // segments of a street share the same visual style and popup info on the map.
+  // Use aggressive normalization so "Park Road" and "Park Road (A3066)" match.
+  const streetDataByName = new Map<
+    string,
+    { status: "completed" | "partial"; percentage: number }
+  >();
   for (const street of streets) {
-    const key = normalizeStreetName(street.name) || street.osmId;
-    streetStatusByName.set(key, street.status);
+    const key = normalizeStreetNameForMatching(street.name) || street.osmId;
+    streetDataByName.set(key, {
+      status: street.status,
+      percentage: street.percentage,
+    });
   }
   for (const segment of segments) {
-    const key = normalizeStreetName(segment.name) || segment.osmId;
-    const aggregatedStatus = streetStatusByName.get(key);
-    if (aggregatedStatus) {
-      segment.status = aggregatedStatus;
+    const key = normalizeStreetNameForMatching(segment.name) || segment.osmId;
+    const aggregated = streetDataByName.get(key);
+    if (aggregated) {
+      segment.status = aggregated.status;
+      segment.percentage = aggregated.percentage;
     }
   }
 
@@ -357,10 +371,9 @@ export async function getMapStreetsV2(
     MAP.MAX_RADIUS_METERS
   );
 
-  const [geometries, completion] = await Promise.all([
-    getGeometriesInArea(lat, lng, radius),
-    deriveStreetCompletion(userId),
-  ]);
+  const geometries = await getGeometriesInArea(lat, lng, radius);
+  const wayIds = geometries.map((g) => osmIdToWayId(g.osmId));
+  const completion = await deriveStreetCompletionForArea(userId, wayIds);
 
   const completionByOsmId = new Map(
     completion.map((s) => [`way/${String(s.wayId)}`, s])
@@ -382,9 +395,10 @@ export async function getMapStreetsV2(
     const isConnector =
       geom.lengthMeters <= STREET_AGGREGATION.CONNECTOR_MAX_LENGTH_METERS;
 
+    // V2: do not set runCount/completionCount (node-based progress, not activity count)
     const stats: MapStreetStats = {
-      runCount: comp.edgesCompleted > 0 ? 1 : 0,
-      completionCount: comp.isComplete ? 1 : 0,
+      runCount: 0,
+      completionCount: 0,
       firstRunDate: null,
       lastRunDate: null,
       totalLengthMeters: geom.lengthMeters,
@@ -409,15 +423,25 @@ export async function getMapStreetsV2(
 
   const streets = aggregateStreetsByName(segments);
 
-  const streetStatusByName = new Map<string, "completed" | "partial">();
+  // Propagate aggregated status and percentage to segments using aggressive normalization
+  const streetDataByName = new Map<
+    string,
+    { status: "completed" | "partial"; percentage: number }
+  >();
   for (const street of streets) {
-    const key = normalizeStreetName(street.name) || street.osmId;
-    streetStatusByName.set(key, street.status);
+    const key = normalizeStreetNameForMatching(street.name) || street.osmId;
+    streetDataByName.set(key, {
+      status: street.status,
+      percentage: street.percentage,
+    });
   }
   for (const segment of segments) {
-    const key = normalizeStreetName(segment.name) || segment.osmId;
-    const aggregatedStatus = streetStatusByName.get(key);
-    if (aggregatedStatus) segment.status = aggregatedStatus;
+    const key = normalizeStreetNameForMatching(segment.name) || segment.osmId;
+    const aggregated = streetDataByName.get(key);
+    if (aggregated) {
+      segment.status = aggregated.status;
+      segment.percentage = aggregated.percentage;
+    }
   }
 
   const completedCount = streets.filter((s) => s.status === "completed").length;
@@ -504,7 +528,8 @@ export async function getGeometriesInArea(
     radiusMeters
   );
   if (larger) {
-    const filtered = filterStreetsToRadius(
+    const filterFn = resolveRadiusFilter("intersects");
+    const filtered = filterFn(
       larger.streets,
       centerLat,
       centerLng,

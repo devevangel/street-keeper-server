@@ -48,13 +48,24 @@ import {
   getProjectMapData,
   getProjectHeatmapData,
   archiveProject,
+  restoreProject,
+  deleteProjectPermanently,
   refreshProjectSnapshot,
+  expandProjectToFullStreets,
+  resizeProject,
+  recomputeProjectProgressFromV2,
   ProjectNotFoundError,
   ProjectAccessDeniedError,
 } from "../services/project.service.js";
+import {
+  createAutoMilestones,
+  createMVPMilestonesForProject,
+  getMilestonesForUser,
+} from "../services/milestone.service.js";
 import { getSuggestions } from "../services/suggestion.service.js";
 import { listActivitiesForProject } from "../services/activity.service.js";
-import { ERROR_CODES, PROJECTS } from "../config/constants.js";
+import prisma from "../lib/prisma.js";
+import { ERROR_CODES, isValidRadius } from "../config/constants.js";
 import { OverpassError } from "../services/overpass.service.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
 import type { CreateProjectInput } from "../types/project.types.js";
@@ -144,53 +155,107 @@ router.use(requireAuth);
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
+function parseAndValidatePolygon(
+  polygonParam: unknown
+): [number, number][] | null {
+  if (typeof polygonParam !== "string") return null;
+  let arr: unknown[];
+  try {
+    arr = JSON.parse(polygonParam) as unknown[];
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(arr) || arr.length < 3) return null;
+  const coords: [number, number][] = [];
+  const seen = new Set<string>();
+  for (const p of arr) {
+    if (!Array.isArray(p) || p.length < 2) return null;
+    const lng = Number(p[0]);
+    const lat = Number(p[1]);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null;
+    if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null;
+    const key = `${lng},${lat}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    coords.push([lng, lat]);
+  }
+  return coords.length >= 3 ? coords : null;
+}
+
 router.get("/preview", async (req: Request, res: Response) => {
-  // Parse and validate query parameters
-  const lat = parseFloat(req.query.lat as string);
-  const lng = parseFloat(req.query.lng as string);
-  const radius = parseInt(req.query.radius as string, 10);
-
-  // Validate lat/lng
-  if (isNaN(lat) || lat < -90 || lat > 90) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid latitude. Must be between -90 and 90.",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  if (isNaN(lng) || lng < -180 || lng > 180) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid longitude. Must be between -180 and 180.",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  // Validate radius
-  if (
-    isNaN(radius) ||
-    !PROJECTS.ALLOWED_RADII.includes(
-      radius as (typeof PROJECTS.ALLOWED_RADII)[number]
-    )
-  ) {
-    res.status(400).json({
-      success: false,
-      error: `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(
-        ", "
-      )} meters.`,
-      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
-    });
-    return;
-  }
-
+  const boundaryType = (req.query.boundaryType as string) || "circle";
   const boundaryMode =
-    req.query.boundaryMode === "strict" ? "strict" : "centroid";
+    req.query.boundaryMode === "strict"
+      ? "strict"
+      : req.query.boundaryMode === "intersects"
+        ? "intersects"
+        : "centroid";
+  const includeStreets = req.query.includeStreets === "true";
+
+  let input: import("../types/project.types.js").PreviewProjectInput;
+
+  if (boundaryType === "polygon") {
+    const polygon = parseAndValidatePolygon(req.query.polygon);
+    if (!polygon) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Polygon preview requires a valid polygon query (JSON array of [lng, lat] with at least 3 unique points).",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+    input = {
+      boundaryType: "polygon",
+      polygonCoordinates: polygon,
+      boundaryMode,
+      includeStreets,
+    };
+  } else {
+    const lat = parseFloat(req.query.lat as string);
+    const lng = parseFloat(req.query.lng as string);
+    const radius = parseInt(req.query.radius as string, 10);
+
+    if (isNaN(lat) || lat < -90 || lat > 90) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid latitude. Must be between -90 and 90.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (isNaN(lng) || lng < -180 || lng > 180) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid longitude. Must be between -180 and 180.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (isNaN(radius) || !isValidRadius(radius)) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Invalid radius. Must be 100–10000 meters in 100 m increments.",
+        code: ERROR_CODES.PROJECT_INVALID_RADIUS,
+      });
+      return;
+    }
+
+    input = {
+      boundaryType: "circle",
+      centerLat: lat,
+      centerLng: lng,
+      radiusMeters: radius,
+      boundaryMode,
+      includeStreets,
+    };
+  }
 
   try {
-    const preview = await previewProject(lat, lng, radius, boundaryMode);
+    const preview = await previewProject(input);
 
     res.status(200).json({
       success: true,
@@ -333,13 +398,15 @@ router.get("/", async (req: Request, res: Response) => {
 router.post("/", async (req: Request, res: Response) => {
   const userId = req.user!.id;
 
-  // Validate request body
   const {
     name,
+    boundaryType: bodyBoundaryType,
     centerLat,
     centerLng,
     radiusMeters,
+    polygonCoordinates: bodyPolygonCoordinates,
     boundaryMode: bodyBoundaryMode,
+    includePreviousRuns,
     deadline,
     cacheKey,
   } = req.body;
@@ -353,53 +420,103 @@ router.post("/", async (req: Request, res: Response) => {
     return;
   }
 
-  if (typeof centerLat !== "number" || centerLat < -90 || centerLat > 90) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid center latitude",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  if (typeof centerLng !== "number" || centerLng < -180 || centerLng > 180) {
-    res.status(400).json({
-      success: false,
-      error: "Invalid center longitude",
-      code: ERROR_CODES.VALIDATION_ERROR,
-    });
-    return;
-  }
-
-  if (
-    !PROJECTS.ALLOWED_RADII.includes(
-      radiusMeters as (typeof PROJECTS.ALLOWED_RADII)[number]
-    )
-  ) {
-    res.status(400).json({
-      success: false,
-      error: `Invalid radius. Must be one of: ${PROJECTS.ALLOWED_RADII.join(
-        ", "
-      )} meters.`,
-      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
-    });
-    return;
-  }
-
+  const boundaryType = bodyBoundaryType === "polygon" ? "polygon" : "circle";
   const boundaryMode =
-    bodyBoundaryMode === "strict" ? "strict" : "centroid";
+    bodyBoundaryMode === "strict"
+      ? "strict"
+      : bodyBoundaryMode === "centroid"
+        ? "centroid"
+        : "intersects";
 
-  try {
-    const input: CreateProjectInput = {
+  let input: CreateProjectInput;
+
+  if (boundaryType === "polygon") {
+    const polygonCoordinates = Array.isArray(bodyPolygonCoordinates)
+      ? (bodyPolygonCoordinates as unknown[]).map((p) => {
+          if (!Array.isArray(p) || p.length < 2) return null;
+          const lng = Number(p[0]);
+          const lat = Number(p[1]);
+          if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null;
+          if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null;
+          return [lng, lat] as [number, number];
+        }).filter((x): x is [number, number] => x !== null)
+      : [];
+    if (polygonCoordinates.length < 3) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Polygon project requires polygonCoordinates (array of [lng, lat]) with at least 3 points.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+    if (centerLat != null || centerLng != null || radiusMeters != null) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Polygon project must not include centerLat, centerLng, or radiusMeters. Use polygonCoordinates only.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+    input = {
       name: name.trim(),
+      boundaryType: "polygon",
+      polygonCoordinates,
+      boundaryMode,
+      includePreviousRuns: Boolean(includePreviousRuns),
+      deadline,
+    };
+  } else {
+    if (typeof centerLat !== "number" || centerLat < -90 || centerLat > 90) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid center latitude",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (typeof centerLng !== "number" || centerLng < -180 || centerLng > 180) {
+      res.status(400).json({
+        success: false,
+        error: "Invalid center longitude",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    if (typeof radiusMeters !== "number" || !isValidRadius(radiusMeters)) {
+      res.status(400).json({
+        success: false,
+        error:
+          "Invalid radius. Must be 100–10000 meters in 100 m increments.",
+        code: ERROR_CODES.PROJECT_INVALID_RADIUS,
+      });
+      return;
+    }
+
+    input = {
+      name: name.trim(),
+      boundaryType: "circle",
       centerLat,
       centerLng,
       radiusMeters,
       boundaryMode,
+      includePreviousRuns: Boolean(includePreviousRuns),
       deadline,
+      cacheKey: typeof cacheKey === "string" ? cacheKey : undefined,
     };
+  }
 
-    const project = await createProject(userId, input, cacheKey);
+  try {
+    const project = await createProject(
+      userId,
+      input,
+      "cacheKey" in input ? input.cacheKey : undefined
+    );
+    // Create MVP milestones for the project
+    await createMVPMilestonesForProject(userId, project.id, project.totalStreets);
 
     res.status(201).json({
       success: true,
@@ -486,9 +603,14 @@ router.post("/", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   const userId = req.user!.id;
   const projectId = req.params.id;
+  const includeStreets =
+    typeof req.query.include === "string" &&
+    req.query.include.split(",").includes("streets");
 
   try {
-    const { project, warning } = await getProjectById(projectId, userId);
+    const { project, warning } = await getProjectById(projectId, userId, {
+      includeStreets,
+    });
 
     res.status(200).json({
       success: true,
@@ -515,6 +637,62 @@ router.get("/:id", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Get detail error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// PATCH Project (resize radius)
+// ============================================
+
+router.patch("/:id", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+  const body = req.body as { radiusMeters?: number };
+
+  const radiusMeters = body?.radiusMeters;
+  if (
+    typeof radiusMeters !== "number" ||
+    !Number.isInteger(radiusMeters) ||
+    !isValidRadius(radiusMeters)
+  ) {
+    res.status(400).json({
+      success: false,
+      error:
+        "Invalid radiusMeters. Must be 100–10000 meters in 100 m increments.",
+      code: ERROR_CODES.PROJECT_INVALID_RADIUS,
+    });
+    return;
+  }
+
+  try {
+    const project = await resizeProject(projectId, userId, radiusMeters);
+    res.status(200).json({
+      success: true,
+      project,
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+    console.error("[Projects] Resize error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -809,6 +987,137 @@ router.delete("/:id", async (req: Request, res: Response) => {
 });
 
 // ============================================
+// Restore Archived Project
+// ============================================
+
+/**
+ * @openapi
+ * /routes/{id}/restore:
+ *   post:
+ *     summary: Restore an archived project
+ *     description: Restore a previously archived project so it reappears in the active list.
+ *     tags: [Routes]
+ *     security:
+ *       - DevAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Route ID
+ *     responses:
+ *       200:
+ *         description: Project restored successfully
+ */
+router.post("/:id/restore", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    await restoreProject(projectId, userId);
+
+    res.status(200).json({
+      success: true,
+      message: "Project restored successfully",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    console.error("[Projects] Restore error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Permanently Delete Project
+// ============================================
+
+/**
+ * @openapi
+ * /routes/{id}/permanent:
+ *   delete:
+ *     summary: Permanently delete a project
+ *     description: |
+ *       Permanently delete a project and all related data. This action cannot be undone.
+ *       Deletes: Project, ProjectActivity records, and project-specific milestones.
+ *       Activities (runs) themselves are NOT deleted as they may be shared with other projects.
+ *     tags: [Routes]
+ *     security:
+ *       - DevAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Route ID
+ *     responses:
+ *       200:
+ *         description: Project permanently deleted
+ */
+router.delete("/:id/permanent", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    await deleteProjectPermanently(projectId, userId);
+
+    res.status(200).json({
+      success: true,
+      message: "Project permanently deleted",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    console.error("[Projects] Permanent delete error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
 // Refresh Route Snapshot
 // ============================================
 
@@ -938,6 +1247,112 @@ router.post("/:id/refresh", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /routes/:id/expand-streets
+ * Expand project to include ALL segments of streets that are already in the project.
+ * 
+ * This solves the issue where a street might have only 1 segment captured because
+ * only that segment intersected the boundary, but the road actually has more segments.
+ * 
+ * The endpoint queries a larger area (2x radius) and adds any segments that have
+ * the same street name as existing streets in the project.
+ */
+router.post("/:id/expand-streets", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    const { project, addedSegments } = await expandProjectToFullStreets(
+      projectId,
+      userId
+    );
+
+    res.status(200).json({
+      success: true,
+      project,
+      addedSegments,
+      message: addedSegments > 0
+        ? `Expanded: ${addedSegments} additional segment${addedSegments === 1 ? "" : "s"} added`
+        : "No additional segments found",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    if (error instanceof OverpassError) {
+      res.status(502).json({
+        success: false,
+        error: "Failed to expand street data. Please try again.",
+        code: ERROR_CODES.OVERPASS_API_ERROR,
+      });
+      return;
+    }
+
+    console.error("[Projects] Expand streets error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+/**
+ * POST /routes/:id/recompute-progress
+ * Recompute project progress from V2 engine (only runs on or after project creation).
+ * Use to fix false completions from runs that happened before the project existed.
+ */
+router.post("/:id/recompute-progress", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    await recomputeProjectProgressFromV2(projectId, userId);
+    const { project } = await getProjectById(projectId, userId, {
+      includeStreets: true,
+    });
+    res.status(200).json({
+      success: true,
+      project,
+      message:
+        "Project progress recomputed from runs on or after project creation.",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+    throw error;
+  }
+});
+
 // ============================================
 // Get Route Activities
 // ============================================
@@ -1028,6 +1443,86 @@ router.get("/:id/activities", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Get activities error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Get Project Milestones (MVP)
+// ============================================
+
+/**
+ * GET /projects/:id/milestones
+ * Get all milestones for a project (active, completed, and pending celebrations)
+ */
+router.get("/:id/milestones", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    // Verify project access
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, userId },
+    });
+    if (!project) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    // Get all milestones for this project
+    const allMilestones = await prisma.userMilestone.findMany({
+      where: { userId, projectId },
+      include: { type: true },
+      orderBy: [{ completedAt: "asc" }, { createdAt: "asc" }],
+    });
+
+    // Separate into active, completed, and pending celebrations
+    const active = allMilestones
+      .filter((m) => !m.completedAt)
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        targetValue: m.targetValue ?? 0,
+        currentValue: m.currentValue ?? 0,
+        type: m.type ? { slug: m.type.slug } : null,
+      }));
+
+    const completed = allMilestones
+      .filter((m) => m.completedAt && m.celebrationShownAt)
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        targetValue: m.targetValue ?? 0,
+        currentValue: m.currentValue ?? 0,
+        completedAt: m.completedAt?.toISOString(),
+      }));
+
+    const pendingCelebrations = allMilestones
+      .filter((m) => m.completedAt && !m.celebrationShownAt)
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        projectName: project.name,
+        completedAt: m.completedAt?.toISOString(),
+        shareMessage: m.shareMessage,
+      }));
+
+    res.status(200).json({
+      success: true,
+      active,
+      completed,
+      pendingCelebrations,
+    });
+  } catch (error) {
+    console.error("[Projects] Get milestones error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

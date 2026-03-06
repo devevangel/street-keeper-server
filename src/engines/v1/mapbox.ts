@@ -28,6 +28,7 @@
 import axios, { AxiosError } from "axios";
 import type { GpxPoint, GeoJsonLineString } from "../../types/run.types.js";
 import { MAPBOX } from "../../config/constants.js";
+import { normalizeStreetName } from "../../utils/normalize-street-name.js";
 
 // ============================================
 // Types
@@ -255,25 +256,34 @@ export async function mapMatchGpsTrace(
 export function extractStreetsFromMatch(
   matchResult: MapboxMatchResponse
 ): MapboxExtractedStreet[] {
-  // Aggregate distances by street name
+  // Aggregate distances by normalized street name (so "High St" and "High Street" merge)
   const streetMap = new Map<
     string,
-    { distance: number; points: number; geometries: GeoJsonLineString[] }
+    {
+      distance: number;
+      points: number;
+      geometries: GeoJsonLineString[];
+      displayName: string;
+    }
   >();
 
   // Process each matching (usually just one)
   for (const matching of matchResult.matchings) {
-    // Process each leg
     for (const leg of matching.legs) {
-      // Process each step (street segment)
       for (const step of leg.steps) {
-        const streetName = step.name || "Unnamed Road";
+        const rawName = step.name || "Unnamed Road";
+        const key = normalizeStreetName(rawName) || "unnamed";
 
-        if (!streetMap.has(streetName)) {
-          streetMap.set(streetName, { distance: 0, points: 0, geometries: [] });
+        if (!streetMap.has(key)) {
+          streetMap.set(key, {
+            distance: 0,
+            points: 0,
+            geometries: [],
+            displayName: rawName,
+          });
         }
 
-        const streetData = streetMap.get(streetName)!;
+        const streetData = streetMap.get(key)!;
         streetData.distance += step.distance;
         streetData.geometries.push(step.geometry);
       }
@@ -283,9 +293,10 @@ export function extractStreetsFromMatch(
   // Count points per street from tracepoints
   for (const tracepoint of matchResult.tracepoints) {
     if (tracepoint) {
-      const streetName = tracepoint.name || "Unnamed Road";
-      if (streetMap.has(streetName)) {
-        streetMap.get(streetName)!.points++;
+      const rawName = tracepoint.name || "Unnamed Road";
+      const key = normalizeStreetName(rawName) || "unnamed";
+      if (streetMap.has(key)) {
+        streetMap.get(key)!.points++;
       }
     }
   }
@@ -293,9 +304,9 @@ export function extractStreetsFromMatch(
   // Convert to array
   const streets: MapboxExtractedStreet[] = [];
 
-  for (const [name, data] of streetMap) {
+  for (const [, data] of streetMap) {
     streets.push({
-      name,
+      name: data.displayName,
       distanceMeters: Math.round(data.distance * 100) / 100,
       pointsCount: data.points || 1, // At least 1 if we have a step
       geometry:

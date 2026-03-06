@@ -299,6 +299,16 @@ export const MAPBOX = {
 } as const;
 
 // ============================================
+// Milestones Configuration
+// ============================================
+
+/** Max active (incomplete) milestones per project and globally. */
+export const MILESTONES = {
+  MAX_ACTIVE_PER_PROJECT: 5,
+  MAX_ACTIVE_GLOBAL: 7,
+} as const;
+
+// ============================================
 // Projects Configuration
 // ============================================
 
@@ -313,13 +323,20 @@ export const PROJECTS = {
   /**
    * Allowed radius values in meters
    * Limited set prevents excessively large or small projects
+   * - 100m, 200m: Very small area (quick wins)
    * - 500m: Small neighborhood
    * - 1000m: Large neighborhood
-   * - 2000m: Small town area (default)
+   * - 2000m: Small town area
    * - 5000m: Town/city district
    * - 10000m: Large city area
+   * - 50000m: Entire city/metropolitan area
    */
-  ALLOWED_RADII: [500, 1000, 2000, 5000, 10000] as const,
+  ALLOWED_RADII: [100, 200, 500, 1000, 2000, 5000, 10000, 50000] as const,
+
+  /** Min/max/step for radius slider (100–50000 m in 100 m steps) */
+  RADIUS_MIN: 100,
+  RADIUS_MAX: 50000,
+  RADIUS_STEP: 100,
 
   /**
    * Days before project snapshot is considered stale
@@ -342,6 +359,17 @@ export const PROJECTS = {
   NON_RUNNABLE_HIGHWAYS: ["motorway", "trunk", "motorway_link", "trunk_link"],
 } as const;
 
+/**
+ * Validate radius is within allowed range and step (100–50000 m in 100 m steps).
+ */
+export function isValidRadius(r: number): boolean {
+  return (
+    r >= PROJECTS.RADIUS_MIN &&
+    r <= PROJECTS.RADIUS_MAX &&
+    r % PROJECTS.RADIUS_STEP === 0
+  );
+}
+
 // ============================================
 // Map Feature Configuration
 // ============================================
@@ -353,7 +381,7 @@ export const MAP = {
   /** Default radius in meters when not specified */
   DEFAULT_RADIUS_METERS: 2000,
   /** Maximum allowed radius in meters */
-  MAX_RADIUS_METERS: 10000,
+  MAX_RADIUS_METERS: 50000,
   /** Minimum allowed radius in meters */
   MIN_RADIUS_METERS: 100,
 } as const;
@@ -416,9 +444,9 @@ export const GEOMETRY_CACHE = {
 
   /**
    * Number of decimal places for coordinate rounding in cache keys
-   * 4 decimal places = ~11m accuracy (sufficient for caching)
+   * 3 decimal places = ~111m accuracy (improves cache hit rate, fewer Overpass calls)
    */
-  COORD_PRECISION: 4,
+  COORD_PRECISION: 3,
 } as const;
 
 // ============================================

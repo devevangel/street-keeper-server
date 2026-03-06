@@ -3,6 +3,8 @@
  * Types for project creation, management, and street snapshots
  */
 
+import type { MilestoneWithProgress } from "./milestone.types.js";
+
 // ============================================
 // Street Snapshot Types
 // ============================================
@@ -40,32 +42,43 @@ export interface StreetSnapshot {
 
 /**
  * Boundary mode: which streets to include in the project area.
- * - centroid: include if street centroid is inside circle (default, more inclusive)
- * - strict: include only if entire street geometry is inside circle
+ * - intersects: include if any part of street touches/crosses the boundary (default)
+ * - centroid: include if street centroid is inside boundary
+ * - strict: include only if entire street geometry is inside boundary
  */
-export type BoundaryMode = "centroid" | "strict";
+export type BoundaryMode = "centroid" | "strict" | "intersects";
 
 /**
- * Input for creating a new project
+ * Input for creating a new project.
+ * For circle: provide centerLat, centerLng, radiusMeters.
+ * For polygon: provide polygonCoordinates (closed ring [lng, lat][]).
  */
 export interface CreateProjectInput {
   name: string;
-  centerLat: number;
-  centerLng: number;
-  radiusMeters: number; // Must be in PROJECTS.ALLOWED_RADII
-  boundaryMode?: BoundaryMode; // Default "centroid"
+  boundaryType?: "circle" | "polygon"; // Default "circle"
+  centerLat?: number;
+  centerLng?: number;
+  radiusMeters?: number; // Required for circle; must be in allowed range
+  polygonCoordinates?: [number, number][]; // [lng, lat][] closed ring for polygon
+  boundaryMode?: BoundaryMode; // Default "intersects"
+  /** Creation-time only. Cannot be changed after project creation. */
+  includePreviousRuns?: boolean;
   deadline?: string; // ISO date string (optional)
+  cacheKey?: string; // From preview response (circle only)
 }
 
 /**
- * Project summary for list view (minimal data)
+ * Project summary for list view (minimal data).
+ * For circle projects: centerLat, centerLng, radiusMeters set.
+ * For polygon projects: boundaryType "polygon", center/radius null (optional centroid for display).
  */
 export interface ProjectListItem {
   id: string;
   name: string;
-  centerLat: number;
-  centerLng: number;
-  radiusMeters: number;
+  boundaryType: "circle" | "polygon";
+  centerLat: number | null;
+  centerLng: number | null;
+  radiusMeters: number | null;
   progress: number;
   totalStreets: number;
   completedStreets: number;
@@ -74,6 +87,10 @@ export interface ProjectListItem {
   isArchived: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Total unique street names (grouped by name). If not provided, use totalStreets. */
+  totalStreetNames?: number;
+  /** Completed street names (all segments of street completed). If not provided, use completedStreets. */
+  completedStreetNames?: number;
 }
 
 /** Next milestone (25, 50, 75, 100) and streets needed to reach it */
@@ -90,12 +107,29 @@ export interface StreetsByTypeItem {
   completed: number;
 }
 
+/** Completion bins for dashboard (replaces client-side CompletionFunnel computation) */
+export interface CompletionBins {
+  completed: number;
+  almostThere: number;
+  inProgress: number;
+  notStarted: number;
+}
+
 /**
  * Full project detail with street data
+ * When fetched without ?include=streets, streets array is empty to reduce payload.
  */
 export interface ProjectDetail extends ProjectListItem {
   streets: SnapshotStreet[];
   snapshotDate: string;
+
+  // Server-computed completion bins (by street name, so pills match the street list)
+  completionBins: CompletionBins;
+
+  /** Total distinct street names (for "X of Y streets completed" display). */
+  totalStreetNames: number;
+  /** Street names where every segment is completed (matches list/map). */
+  completedStreetNames: number;
 
   // Computed stats
   inProgressCount: number; // Streets with 1-89% coverage
@@ -106,11 +140,20 @@ export interface ProjectDetail extends ProjectListItem {
   activityCount: number; // Activities that touched this project
   lastActivityDate: string | null; // Most recent activity in project (ISO)
   nextMilestone: NextMilestone | null;
+  realNextMilestone: MilestoneWithProgress | null;
   streetsByType: StreetsByTypeItem[];
 
   // Refresh info
   refreshNeeded: boolean;
   daysSinceRefresh: number;
+
+  // Pace and projection (server-computed, safe math)
+  streetsPerWeek: number;
+  projectedFinishDate: string | null; // ISO or null
+
+  // Engagement
+  currentStreak: number; // Consecutive days with a run (ending today or yesterday)
+  longestStreak: number;
 
   // Warnings
   newStreetsDetected?: number;
@@ -132,30 +175,37 @@ export interface ProjectMapStreet {
   };
 }
 
-/** Boundary for project map (circle) */
-export interface ProjectMapBoundary {
-  type: "circle";
-  center: { lat: number; lng: number };
-  radiusMeters: number;
-}
+/** Boundary for project map (circle or polygon) */
+export type ProjectMapBoundary =
+  | {
+      type: "circle";
+      center: { lat: number; lng: number };
+      radiusMeters: number;
+    }
+  | { type: "polygon"; coordinates: [number, number][] };
 
-/** Stats for project map view */
+/** Stats for project map view (segment counts; use *StreetNames for display consistency with list). */
 export interface ProjectMapStats {
   totalStreets: number;
   completedStreets: number;
   partialStreets: number;
   notRunStreets: number;
   completionPercentage: number;
+  /** Distinct street names in this view (for "X of Y streets completed"). */
+  totalStreetNames: number;
+  /** Street names where every segment is completed. */
+  completedStreetNames: number;
 }
 
 export interface ProjectMapData {
   id: string;
   name: string;
-  centerLat: number;
-  centerLng: number;
-  radiusMeters: number;
+  /** Present for circle projects; null for polygon */
+  centerLat: number | null;
+  centerLng: number | null;
+  radiusMeters: number | null;
   progress: number;
-  /** Circle boundary for map centering/fitting */
+  /** Boundary for map centering/fitting */
   boundary: ProjectMapBoundary;
   /** Street counts by status */
   stats: ProjectMapStats;
@@ -240,6 +290,21 @@ export interface ProjectRefreshResponse {
 // ============================================
 
 /**
+ * Input for previewing a project (circle or polygon).
+ * Circle: centerLat, centerLng, radiusMeters required.
+ * Polygon: polygonCoordinates required.
+ */
+export interface PreviewProjectInput {
+  boundaryType: "circle" | "polygon";
+  centerLat?: number;
+  centerLng?: number;
+  radiusMeters?: number;
+  polygonCoordinates?: [number, number][];
+  boundaryMode?: BoundaryMode;
+  includeStreets?: boolean;
+}
+
+/**
  * Project preview response (before creating project)
  *
  * Allows users to see street count and total length before committing
@@ -253,6 +318,7 @@ export interface ProjectRefreshResponse {
  * {
  *   "success": true,
  *   "preview": {
+ *     "boundaryType": "circle",
  *     "centerLat": 50.788,
  *     "centerLng": -1.089,
  *     "radiusMeters": 2000,
@@ -266,20 +332,25 @@ export interface ProjectRefreshResponse {
  * }
  */
 export interface ProjectPreview {
-  /** Center latitude of the preview area */
-  centerLat: number;
+  boundaryType: "circle" | "polygon";
 
-  /** Center longitude of the preview area */
-  centerLng: number;
+  /** Center latitude (circle only) */
+  centerLat?: number;
 
-  /** Requested radius in meters */
-  radiusMeters: number;
+  /** Center longitude (circle only) */
+  centerLng?: number;
+
+  /** Requested radius in meters (circle only) */
+  radiusMeters?: number;
 
   /**
-   * Actual radius in cache (may be larger than requested)
+   * Actual radius in cache (circle only; may be larger than requested)
    * If larger, results were filtered to requested radius
    */
-  cachedRadiusMeters: number;
+  cachedRadiusMeters?: number;
+
+  /** Polygon ring [lng, lat][] (polygon only) */
+  polygonCoordinates?: [number, number][];
 
   /**
    * Cache key to pass to create endpoint
@@ -287,8 +358,11 @@ export interface ProjectPreview {
    */
   cacheKey: string;
 
-  /** Total number of streets in the area */
+  /** Total number of street segments in the area */
   totalStreets: number;
+
+  /** Total unique street names (for consistent display with detail page) */
+  totalStreetNames: number;
 
   /** Combined length of all streets in meters */
   totalLengthMeters: number;
@@ -304,6 +378,17 @@ export interface ProjectPreview {
    * @example ["Large area: 500+ streets. Consider reducing radius."]
    */
   warnings: string[];
+
+  /**
+   * Optional: Street names list (only included when includeStreets=true)
+   * Grouped by name, showing unique street names with segment counts
+   */
+  streets?: Array<{
+    name: string;
+    segmentCount: number;
+    totalLengthMeters: number;
+    highwayType: string;
+  }>;
 }
 
 /**

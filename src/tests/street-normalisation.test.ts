@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   normalizeStreetNameForMatching,
   streetNamesMatch,
-} from "../engines/v1/street-aggregation.js";
+} from "../utils/normalize-street-name.js";
 
 describe("normalizeStreetNameForMatching", () => {
   describe("Road Classification Removal", () => {

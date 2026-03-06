@@ -479,7 +479,12 @@ async function main(): Promise<void> {
     console.log("Pass 1: Reading PBF and building node→way and way→totalEdges index...");
     const result = pbfToNodeWays(resolved);
     referencedNodeIds = result.referencedNodeIds;
-    const { nodeToWays, wayTotals, wayToNodeIds } = result;
+
+    // Extract what we need, then free the PbfResult wrapper
+    let nodeToWays: Map<bigint, WayEntry[]> | null = result.nodeToWays;
+    let wayTotals: Map<number, WayTotal> | null = result.wayTotals;
+    let wayToNodeIds: Map<number, bigint[]> | null = result.wayToNodeIds;
+
     console.log(
       `  Found ${nodeToWays.size} nodes, ${wayTotals.size} ways, ${referencedNodeIds.size} referenced node IDs.`,
     );
@@ -491,13 +496,34 @@ async function main(): Promise<void> {
     const { inserted } = await upsertWayCacheBatches(nodeToWays, expiresAt);
     console.log("WayCache rows:", inserted);
 
+    // Free nodeToWays — no longer needed (largest structure: ~7M entries with nested arrays)
+    nodeToWays.clear();
+    nodeToWays = null;
+    console.log("  [Memory] Freed nodeToWays map.");
+
     console.log("Upserting into WayTotalEdges (batches of", WAY_TOTAL_BATCH, ")...");
     const { inserted: wayTotalRows } = await upsertWayTotalEdgesBatches(wayTotals);
     console.log("WayTotalEdges rows:", wayTotalRows);
 
+    // Free wayTotals — no longer needed
+    wayTotals.clear();
+    wayTotals = null;
+    console.log("  [Memory] Freed wayTotals map.");
+
     console.log("Pass 3: Upserting WayNode and totalNodes...");
     const { wayNodesInserted, waysUpdated } = await upsertWayNodesAndTotalNodes(wayToNodeIds);
     console.log("WayNode rows:", wayNodesInserted, "| Ways updated:", waysUpdated);
+
+    // Free wayToNodeIds — no longer needed
+    wayToNodeIds.clear();
+    wayToNodeIds = null;
+    console.log("  [Memory] Freed wayToNodeIds map.");
+
+    // Hint GC to reclaim freed memory before Pass 2 reads the PBF buffer again
+    if (global.gc) {
+      console.log("  [Memory] Running manual GC...");
+      global.gc();
+    }
   }
 
   console.log("Pass 2: Streaming node coordinates to NodeCache (temp file + batched upsert)...");
