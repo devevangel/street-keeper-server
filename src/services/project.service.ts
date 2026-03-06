@@ -147,6 +147,19 @@ export async function previewProject(
     polygonCoordinates = coords;
   }
 
+  // When "Include streets that cross your area" is checked (intersects mode),
+  // expand to include ALL segments of streets that touch the boundary
+  if (boundaryMode === "intersects") {
+    filteredStreets = await expandStreetsToFullByName(
+      filteredStreets,
+      boundaryType,
+      centerLat,
+      centerLng,
+      radiusMeters,
+      polygonCoordinates
+    );
+  }
+
   const totalLengthMeters = filteredStreets.reduce(
     (sum, s) => sum + s.lengthMeters,
     0
@@ -257,6 +270,114 @@ async function getStreetsWithCache(
 }
 
 // ============================================
+// Expand Streets by Name (for "intersects" mode)
+// ============================================
+
+/**
+ * Expand streets to include ALL segments of streets that intersect the boundary.
+ * 
+ * When a user checks "Include streets that cross your area", we want to include
+ * the ENTIRE street (all segments), not just the parts that touch the boundary.
+ * 
+ * Example: If "St John Street" has 4 segments (A, B, C, D) and only segment B
+ * touches the boundary, we want to include ALL segments A, B, C, D - the entire street.
+ * 
+ * This function:
+ * 1. Gets unique street names from streets that touch the boundary
+ * 2. Queries a MUCH larger area (10x radius for circle, 10x expanded bbox for polygon)
+ *    to capture streets that extend far beyond the boundary
+ * 3. Finds ALL segments with matching street names (normalized)
+ * 4. Returns the expanded list (original segments + all other segments of same streets)
+ * 
+ * @param filteredStreets - Streets that already intersect the boundary
+ * @param boundaryType - "circle" or "polygon"
+ * @param centerLat - Circle center (if circle)
+ * @param centerLng - Circle center (if circle)
+ * @param radiusMeters - Circle radius (if circle)
+ * @param polygonCoordinates - Polygon coordinates (if polygon)
+ * @returns Expanded list of streets including ALL segments by name
+ */
+async function expandStreetsToFullByName(
+  filteredStreets: OsmStreet[],
+  boundaryType: "circle" | "polygon",
+  centerLat?: number,
+  centerLng?: number,
+  radiusMeters?: number,
+  polygonCoordinates?: [number, number][]
+): Promise<OsmStreet[]> {
+  if (filteredStreets.length === 0) return filteredStreets;
+
+  // Get unique normalized street names from filtered streets
+  const existingNames = new Set(
+    filteredStreets.map((s) => normalizeStreetName(s.name || "Unnamed"))
+  );
+  const existingOsmIds = new Set(filteredStreets.map((s) => s.osmId));
+
+  // Query a MUCH larger area to find ALL segments of streets that touch the boundary
+  // Streets can extend far beyond the boundary, so we need to search a wide area
+  let expandedStreets: OsmStreet[] = [];
+
+  if (boundaryType === "circle") {
+    if (centerLat == null || centerLng == null || radiusMeters == null) {
+      return filteredStreets;
+    }
+    // Query 10x the radius (or max 50km) to capture entire streets
+    // Example: 1km radius → 10km search; 5km radius → 50km search
+    const expandedRadius = Math.min(radiusMeters * 10, PROJECTS.RADIUS_MAX);
+    console.log(
+      `[Project] Expanding streets: querying ${expandedRadius}m radius (${(expandedRadius / 1000).toFixed(1)}km) to find all segments`
+    );
+    expandedStreets = await queryStreetsInRadius(centerLat, centerLng, expandedRadius);
+  } else {
+    if (!polygonCoordinates || polygonCoordinates.length < 3) {
+      return filteredStreets;
+    }
+    // For polygon, expand the bounding box by 10x to capture entire streets
+    const bbox = polygonCoordinates.reduce(
+      (acc, [lng, lat]) => ({
+        minLat: Math.min(acc.minLat, lat),
+        maxLat: Math.max(acc.maxLat, lat),
+        minLng: Math.min(acc.minLng, lng),
+        maxLng: Math.max(acc.maxLng, lng),
+      }),
+      { minLat: Infinity, maxLat: -Infinity, minLng: Infinity, maxLng: -Infinity }
+    );
+    const latSpan = bbox.maxLat - bbox.minLat;
+    const lngSpan = bbox.maxLng - bbox.minLng;
+    // Expand by 10x (5x on each side) to capture entire streets
+    const latPadding = latSpan * 5;
+    const lngPadding = lngSpan * 5;
+    const expandedPolygon: [number, number][] = [
+      [bbox.minLng - lngPadding, bbox.minLat - latPadding],
+      [bbox.maxLng + lngPadding, bbox.minLat - latPadding],
+      [bbox.maxLng + lngPadding, bbox.maxLat + latPadding],
+      [bbox.minLng - lngPadding, bbox.maxLat + latPadding],
+    ];
+    console.log(
+      `[Project] Expanding streets: querying expanded polygon (${latSpan.toFixed(4)}° × ${lngSpan.toFixed(4)}° → ${(latSpan + latPadding * 2).toFixed(4)}° × ${(lngSpan + lngPadding * 2).toFixed(4)}°) to find all segments`
+    );
+    expandedStreets = await queryStreetsInPolygon(expandedPolygon, "intersects");
+  }
+
+  // Filter to only streets with matching names that aren't already in the list
+  const newSegments: OsmStreet[] = expandedStreets.filter((s) => {
+    const normalizedName = normalizeStreetName(s.name || "Unnamed");
+    return existingNames.has(normalizedName) && !existingOsmIds.has(s.osmId);
+  });
+
+  if (newSegments.length === 0) {
+    return filteredStreets;
+  }
+
+  console.log(
+    `[Project] Expanding streets: ${filteredStreets.length} → ${filteredStreets.length + newSegments.length} segments (+${newSegments.length})`
+  );
+
+  // Return original streets + new segments
+  return [...filteredStreets, ...newSegments];
+}
+
+// ============================================
 // Project Creation
 // ============================================
 
@@ -352,6 +473,18 @@ export async function createProject(
       progress: 0,
       deadline: deadline ? new Date(deadline) : null,
     };
+
+    // When "Include streets that cross your area" is checked (intersects mode),
+    // expand to include ALL segments of streets that touch the boundary
+    if (boundaryMode === "intersects") {
+      streets = await expandStreetsToFullByName(
+        streets,
+        "circle",
+        centerLat,
+        centerLng,
+        radiusMeters
+      );
+    }
   } else {
     const polygonCoordinates = input.polygonCoordinates;
     if (!polygonCoordinates || polygonCoordinates.length < 3) {
@@ -381,6 +514,19 @@ export async function createProject(
       progress: 0,
       deadline: deadline ? new Date(deadline) : null,
     };
+
+    // When "Include streets that cross your area" is checked (intersects mode),
+    // expand to include ALL segments of streets that touch the boundary
+    if (boundaryMode === "intersects") {
+      streets = await expandStreetsToFullByName(
+        streets,
+        "polygon",
+        undefined,
+        undefined,
+        undefined,
+        polygonCoordinates
+      );
+    }
   }
 
   if (streets.length === 0) {
@@ -714,6 +860,41 @@ export async function getProjectMapData(
     );
     const filterFn = resolvePolygonFilter(boundaryMode);
     streetsWithGeometry = filterFn(streetsWithGeometry, polygonCoordinates);
+
+    // If the project used "intersects" mode, some snapshot streets may extend beyond
+    // the boundary. Expand the search area to find their geometry too.
+    if (boundaryMode === "intersects") {
+      const foundOsmIds = new Set(streetsWithGeometry.map((s) => s.osmId));
+      const missingOsmIds = [...snapshotOsmIds].filter((id) => !foundOsmIds.has(id));
+      if (missingOsmIds.length > 0) {
+        const bbox = polygonCoordinates.reduce(
+          (acc, [lng, lat]) => ({
+            minLat: Math.min(acc.minLat, lat),
+            maxLat: Math.max(acc.maxLat, lat),
+            minLng: Math.min(acc.minLng, lng),
+            maxLng: Math.max(acc.maxLng, lng),
+          }),
+          { minLat: Infinity, maxLat: -Infinity, minLng: Infinity, maxLng: -Infinity }
+        );
+        const latSpan = bbox.maxLat - bbox.minLat;
+        const lngSpan = bbox.maxLng - bbox.minLng;
+        const latPadding = latSpan * 5;
+        const lngPadding = lngSpan * 5;
+        const expandedPolygon: [number, number][] = [
+          [bbox.minLng - lngPadding, bbox.minLat - latPadding],
+          [bbox.maxLng + lngPadding, bbox.minLat - latPadding],
+          [bbox.maxLng + lngPadding, bbox.maxLat + latPadding],
+          [bbox.minLng - lngPadding, bbox.maxLat + latPadding],
+        ];
+        const expandedStreets = await queryStreetsInPolygon(expandedPolygon, "intersects");
+        const additionalStreets = expandedStreets.filter(
+          (s) =>
+            snapshotOsmIds.has(s.osmId) && !foundOsmIds.has(s.osmId)
+        );
+        streetsWithGeometry = [...streetsWithGeometry, ...additionalStreets];
+      }
+    }
+
     streetsWithGeometry = streetsWithGeometry.filter((s) =>
       snapshotOsmIds.has(s.osmId)
     );
@@ -774,6 +955,27 @@ export async function getProjectMapData(
         );
         await setCachedGeometries(exactKey, streetsWithGeometry);
         geometryCacheHit = false;
+      }
+    }
+
+    // If the project used "intersects" mode, some snapshot streets may extend beyond
+    // the boundary. Expand the search radius to find their geometry too.
+    if (boundaryMode === "intersects") {
+      const foundOsmIds = new Set(streetsWithGeometry.map((s) => s.osmId));
+      const missingOsmIds = [...snapshotOsmIds].filter((id) => !foundOsmIds.has(id));
+      if (missingOsmIds.length > 0) {
+        const expandedRadius = Math.min(radiusMeters * 10, PROJECTS.RADIUS_MAX);
+        const expandedStreets = await queryStreetsInRadius(centerLat, centerLng, expandedRadius);
+        const additionalStreets = expandedStreets.filter(
+          (s) =>
+            snapshotOsmIds.has(s.osmId) && !foundOsmIds.has(s.osmId)
+        );
+        if (additionalStreets.length > 0) {
+          console.log(
+            `[Project] Map data: found ${additionalStreets.length} expanded segments for project "${project.name}"`
+          );
+          streetsWithGeometry = [...streetsWithGeometry, ...additionalStreets];
+        }
       }
     }
 
@@ -1695,6 +1897,160 @@ function computeStreaks(
   }
 
   return { currentStreak, longestStreak };
+}
+
+// ============================================
+// Expand Project to Full Streets
+// ============================================
+
+/**
+ * Expand a project to include ALL segments of streets that are already in the project.
+ * 
+ * This solves the issue where a street like "Burnaby Road" might have only 1 segment
+ * captured because only that segment intersected the boundary, but the road actually
+ * has more segments outside the boundary.
+ * 
+ * The function:
+ * 1. Gets all unique street names from the current snapshot
+ * 2. Queries a larger area (2x radius) to find more segments
+ * 3. Adds any new segments that have matching street names
+ * 4. Preserves progress for existing segments
+ * 
+ * @param projectId - Project ID to expand
+ * @param userId - User ID for authorization
+ * @returns Updated project detail with any new segments added
+ */
+export async function expandProjectToFullStreets(
+  projectId: string,
+  userId: string
+): Promise<{ project: ProjectDetail; addedSegments: number }> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+  });
+
+  if (!project) {
+    throw new ProjectNotFoundError(projectId);
+  }
+
+  if (project.userId !== userId) {
+    throw new ProjectAccessDeniedError(projectId);
+  }
+
+  const snapshot = project.streetsSnapshot as StreetSnapshot;
+  if (!snapshot?.streets?.length) {
+    const { project: detail } = await getProjectById(projectId, userId, {
+      includeStreets: true,
+    });
+    return { project: detail, addedSegments: 0 };
+  }
+
+  // Get unique normalized street names from current snapshot
+  const existingNames = new Set(
+    snapshot.streets.map((s) => normalizeStreetName(s.name || "Unnamed"))
+  );
+  const existingOsmIds = new Set(snapshot.streets.map((s) => s.osmId));
+
+  // Query a larger area to find additional segments
+  const boundaryType = (project as { boundaryType?: string }).boundaryType ?? "circle";
+  let expandedStreets: OsmStreet[] = [];
+
+  if (boundaryType === "polygon") {
+    const polygonCoordinates = (project as { polygonCoordinates?: [number, number][] })
+      .polygonCoordinates;
+    if (!polygonCoordinates || polygonCoordinates.length < 3) {
+      throw new Error("Project has invalid polygon boundary.");
+    }
+    // For polygon, expand the bounding box by 50%
+    const bbox = polygonCoordinates.reduce(
+      (acc, [lng, lat]) => ({
+        minLat: Math.min(acc.minLat, lat),
+        maxLat: Math.max(acc.maxLat, lat),
+        minLng: Math.min(acc.minLng, lng),
+        maxLng: Math.max(acc.maxLng, lng),
+      }),
+      { minLat: Infinity, maxLat: -Infinity, minLng: Infinity, maxLng: -Infinity }
+    );
+    const latPadding = (bbox.maxLat - bbox.minLat) * 0.5;
+    const lngPadding = (bbox.maxLng - bbox.minLng) * 0.5;
+    const expandedPolygon: [number, number][] = [
+      [bbox.minLng - lngPadding, bbox.minLat - latPadding],
+      [bbox.maxLng + lngPadding, bbox.minLat - latPadding],
+      [bbox.maxLng + lngPadding, bbox.maxLat + latPadding],
+      [bbox.minLng - lngPadding, bbox.maxLat + latPadding],
+    ];
+    expandedStreets = await queryStreetsInPolygon(expandedPolygon, "intersects");
+  } else {
+    const centerLat = project.centerLat;
+    const centerLng = project.centerLng;
+    const radiusMeters = project.radiusMeters;
+    if (centerLat == null || centerLng == null || radiusMeters == null) {
+      throw new Error("Project has invalid circle boundary.");
+    }
+    // Query 2x the radius to find more segments
+    const expandedRadius = Math.min(radiusMeters * 2, PROJECTS.RADIUS_MAX);
+    expandedStreets = await queryStreetsInRadius(centerLat, centerLng, expandedRadius);
+  }
+
+  // Filter to only streets with matching names that aren't already in the snapshot
+  const newSegments: OsmStreet[] = expandedStreets.filter((s) => {
+    const normalizedName = normalizeStreetName(s.name || "Unnamed");
+    return existingNames.has(normalizedName) && !existingOsmIds.has(s.osmId);
+  });
+
+  if (newSegments.length === 0) {
+    const { project: detail } = await getProjectById(projectId, userId, {
+      includeStreets: true,
+    });
+    return { project: detail, addedSegments: 0 };
+  }
+
+  // Create new snapshot streets from the new segments
+  const newSnapshotStreets: SnapshotStreet[] = newSegments.map((s) => ({
+    osmId: s.osmId,
+    name: s.name,
+    lengthMeters: Math.round(s.lengthMeters * 100) / 100,
+    highwayType: s.highwayType,
+    completed: false,
+    percentage: 0,
+    lastRunDate: null,
+    isNew: true,
+  }));
+
+  // Merge with existing snapshot
+  const updatedStreets = [...snapshot.streets, ...newSnapshotStreets];
+  const newSnapshot: StreetSnapshot = {
+    streets: updatedStreets,
+    snapshotDate: new Date().toISOString(),
+  };
+
+  // Recalculate stats
+  const totalLengthMeters = updatedStreets.reduce((sum, s) => sum + s.lengthMeters, 0);
+  const completedStreets = updatedStreets.filter((s) => s.completed).length;
+  const progress = updatedStreets.length > 0
+    ? (completedStreets / updatedStreets.length) * 100
+    : 0;
+  const { totalStreetNames, completedStreetNames } = groupSnapshotByStreetName(newSnapshot);
+
+  await prisma.project.update({
+    where: { id: projectId },
+    data: {
+      streetsSnapshot: newSnapshot as object,
+      snapshotDate: new Date(),
+      totalStreets: updatedStreets.length,
+      totalLengthMeters,
+      completedStreets,
+      progress,
+    },
+  });
+
+  console.log(
+    `[Project] Expanded project "${project.name}": +${newSegments.length} segments added, now ${totalStreetNames} unique names`
+  );
+
+  const { project: detail } = await getProjectById(projectId, userId, {
+    includeStreets: true,
+  });
+  return { project: detail, addedSegments: newSegments.length };
 }
 
 // ============================================

@@ -51,6 +51,7 @@ import {
   restoreProject,
   deleteProjectPermanently,
   refreshProjectSnapshot,
+  expandProjectToFullStreets,
   resizeProject,
   recomputeProjectProgressFromV2,
   ProjectNotFoundError,
@@ -184,7 +185,11 @@ function parseAndValidatePolygon(
 router.get("/preview", async (req: Request, res: Response) => {
   const boundaryType = (req.query.boundaryType as string) || "circle";
   const boundaryMode =
-    req.query.boundaryMode === "strict" ? "strict" : "centroid";
+    req.query.boundaryMode === "strict"
+      ? "strict"
+      : req.query.boundaryMode === "intersects"
+        ? "intersects"
+        : "centroid";
   const includeStreets = req.query.includeStreets === "true";
 
   let input: import("../types/project.types.js").PreviewProjectInput;
@@ -1234,6 +1239,71 @@ router.post("/:id/refresh", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Refresh error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+/**
+ * POST /routes/:id/expand-streets
+ * Expand project to include ALL segments of streets that are already in the project.
+ * 
+ * This solves the issue where a street might have only 1 segment captured because
+ * only that segment intersected the boundary, but the road actually has more segments.
+ * 
+ * The endpoint queries a larger area (2x radius) and adds any segments that have
+ * the same street name as existing streets in the project.
+ */
+router.post("/:id/expand-streets", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    const { project, addedSegments } = await expandProjectToFullStreets(
+      projectId,
+      userId
+    );
+
+    res.status(200).json({
+      success: true,
+      project,
+      addedSegments,
+      message: addedSegments > 0
+        ? `Expanded: ${addedSegments} additional segment${addedSegments === 1 ? "" : "s"} added`
+        : "No additional segments found",
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+
+    if (error instanceof OverpassError) {
+      res.status(502).json({
+        success: false,
+        error: "Failed to expand street data. Please try again.",
+        code: ERROR_CODES.OVERPASS_API_ERROR,
+      });
+      return;
+    }
+
+    console.error("[Projects] Expand streets error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
