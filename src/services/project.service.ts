@@ -69,6 +69,33 @@ import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.j
 import { normalizeStreetName } from "../utils/normalize-street-name.js";
 import { STREET_AGGREGATION } from "../config/constants.js";
 
+// In-memory cache for project map geometry to avoid duplicate Overpass calls
+// (React StrictMode fires effects twice; users revisiting a project reuse cached geometry)
+const projectGeometryCache = new Map<string, { streets: OsmStreet[]; timestamp: number }>();
+const PROJECT_GEO_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const PROJECT_GEO_CACHE_MAX = 20;
+
+// Deduplication: if a map data request is already in-flight for a project, reuse it
+const inflightMapRequests = new Map<string, Promise<ProjectMapData>>();
+
+function getProjectGeoCache(projectId: string): OsmStreet[] | null {
+  const entry = projectGeometryCache.get(projectId);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > PROJECT_GEO_CACHE_TTL_MS) {
+    projectGeometryCache.delete(projectId);
+    return null;
+  }
+  return entry.streets;
+}
+
+function setProjectGeoCache(projectId: string, streets: OsmStreet[]): void {
+  if (projectGeometryCache.size >= PROJECT_GEO_CACHE_MAX) {
+    const oldest = projectGeometryCache.keys().next().value;
+    if (oldest) projectGeometryCache.delete(oldest);
+  }
+  projectGeometryCache.set(projectId, { streets, timestamp: Date.now() });
+}
+
 // ============================================
 // Project Preview (Before Creation)
 // ============================================
@@ -848,7 +875,13 @@ export async function getProjectMapData(
   let streetsWithGeometry: OsmStreet[];
   let geometryCacheHit: boolean;
 
-  if (boundaryType === "polygon") {
+  // Check in-memory project geometry cache first (avoids duplicate Overpass calls)
+  const cachedGeo = getProjectGeoCache(projectId);
+  if (cachedGeo) {
+    console.log(`[Project] Map geometry cache hit for project ${projectId.slice(0, 8)}…`);
+    streetsWithGeometry = cachedGeo.filter((s) => snapshotOsmIds.has(s.osmId));
+    geometryCacheHit = true;
+  } else if (boundaryType === "polygon") {
     const polygonCoordinates = (project as { polygonCoordinates?: [number, number][] })
       .polygonCoordinates;
     if (!polygonCoordinates || polygonCoordinates.length < 3) {
@@ -861,8 +894,6 @@ export async function getProjectMapData(
     const filterFn = resolvePolygonFilter(boundaryMode);
     streetsWithGeometry = filterFn(streetsWithGeometry, polygonCoordinates);
 
-    // If the project used "intersects" mode, some snapshot streets may extend beyond
-    // the boundary. Expand the search area to find their geometry too.
     if (boundaryMode === "intersects") {
       const foundOsmIds = new Set(streetsWithGeometry.map((s) => s.osmId));
       const missingOsmIds = [...snapshotOsmIds].filter((id) => !foundOsmIds.has(id));
@@ -895,6 +926,7 @@ export async function getProjectMapData(
       }
     }
 
+    setProjectGeoCache(projectId, streetsWithGeometry);
     streetsWithGeometry = streetsWithGeometry.filter((s) =>
       snapshotOsmIds.has(s.osmId)
     );
@@ -979,6 +1011,7 @@ export async function getProjectMapData(
       }
     }
 
+    setProjectGeoCache(projectId, streetsWithGeometry);
     streetsWithGeometry = streetsWithGeometry.filter((s) =>
       snapshotOsmIds.has(s.osmId)
     );
@@ -988,9 +1021,31 @@ export async function getProjectMapData(
   let partialCount = 0;
   let notRunCount = 0;
 
+  const [userProgressRows, projectActivities] = await Promise.all([
+    prisma.userStreetProgress.findMany({
+      where: { userId, osmId: { in: [...snapshotOsmIds] } },
+      select: { osmId: true, runCount: true, firstRunDate: true, lastRunDate: true },
+    }),
+    prisma.projectActivity.findMany({
+      where: { projectId },
+      include: { activity: { select: { distanceMeters: true, startDate: true } } },
+    }),
+  ]);
+  const progressByOsmIdWithStats = new Map(
+    userProgressRows.map((r) => [
+      r.osmId,
+      {
+        runCount: r.runCount,
+        firstRunDate: r.firstRunDate?.toISOString() ?? null,
+        lastRunDate: r.lastRunDate?.toISOString() ?? null,
+      },
+    ])
+  );
+
   const mapStreets: ProjectMapStreet[] = streetsWithGeometry.map((osm) => {
     const progress = progressByOsmId.get(osm.osmId);
     const percentage = progress?.percentage ?? 0;
+    const stats = progressByOsmIdWithStats.get(osm.osmId);
 
     let status: ProjectMapStreet["status"];
     if (percentage >= MAP_COMPLETION_THRESHOLD) {
@@ -1012,6 +1067,9 @@ export async function getProjectMapData(
       percentage: Math.round(percentage * 100) / 100,
       status,
       geometry: osm.geometry,
+      runCount: stats?.runCount,
+      firstRunDate: stats?.firstRunDate ?? null,
+      lastRunDate: stats?.lastRunDate ?? null,
     };
   });
 
@@ -1093,6 +1151,46 @@ export async function getProjectMapData(
         radiusMeters: project.radiusMeters!,
       };
 
+  const totalDistanceMeters = projectActivities.reduce(
+    (sum, pa) => sum + (pa.activity?.distanceMeters ?? 0),
+    0
+  );
+  const totalDistanceKm = Math.round((totalDistanceMeters / 1000) * 100) / 100;
+  const dates = projectActivities
+    .map((pa) => pa.activity?.startDate)
+    .filter((d): d is Date => d != null);
+  const firstRun = dates.length > 0 ? new Date(Math.min(...dates.map((d) => d.getTime()))) : null;
+  const lastRun = dates.length > 0 ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null;
+
+  const projectStats = {
+    totalRuns: projectActivities.length,
+    totalDistanceKm,
+    firstRunDate: firstRun?.toISOString() ?? null,
+    lastRunDate: lastRun?.toISOString() ?? null,
+  };
+
+  const quickWins: Array<{ osmId: string; name: string; percentage: number; remainingMeters: number }> = [];
+  for (const [key, data] of streetDataByName) {
+    if (data.percentage >= 75 && data.percentage < 100) {
+      const segments = segmentsByName.get(key) ?? [];
+      const remainingMeters = segments.reduce(
+        (sum, s) => sum + s.lengthMeters * (1 - s.percentage / 100),
+        0
+      );
+      const firstSegment = segments[0];
+      if (firstSegment) {
+        quickWins.push({
+          osmId: firstSegment.osmId,
+          name: firstSegment.name || "Unnamed",
+          percentage: data.percentage,
+          remainingMeters: Math.round(remainingMeters),
+        });
+      }
+    }
+  }
+  quickWins.sort((a, b) => b.percentage - a.percentage);
+  const quickWinsSlice = quickWins.slice(0, 5);
+
   const mapData: ProjectMapData = {
     id: project.id,
     name: project.name,
@@ -1112,9 +1210,34 @@ export async function getProjectMapData(
     },
     streets: mapStreets,
     geometryCacheHit,
+    projectStats,
+    quickWins: quickWinsSlice,
   };
 
   return mapData;
+}
+
+/**
+ * Deduplicated wrapper for getProjectMapData.
+ * If a request for the same project is already in-flight, returns the same promise
+ * instead of starting a second Overpass-heavy computation.
+ */
+export async function getProjectMapDataDeduped(
+  projectId: string,
+  userId: string
+): Promise<ProjectMapData> {
+  const key = `${projectId}:${userId}`;
+  const inflight = inflightMapRequests.get(key);
+  if (inflight) {
+    console.log(`[Project] Map request deduped for project ${projectId.slice(0, 8)}…`);
+    return inflight;
+  }
+
+  const promise = getProjectMapData(projectId, userId).finally(() => {
+    inflightMapRequests.delete(key);
+  });
+  inflightMapRequests.set(key, promise);
+  return promise;
 }
 
 /** Haversine distance in meters (for heatmap point filter) */

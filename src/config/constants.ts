@@ -432,9 +432,9 @@ export const ACTIVITIES = {
 export const GEOMETRY_CACHE = {
   /**
    * Cache time-to-live in hours
-   * Street geometries don't change often, 24h is reasonable
+   * Street geometries rarely change; 7 days reduces Overpass load significantly
    */
-  TTL_HOURS: 24,
+  TTL_HOURS: 168,
 
   /**
    * Prefix for cache keys
@@ -471,9 +471,9 @@ export const QUEUE = {
 
   /**
    * Number of concurrent jobs to process
-   * Higher = faster processing, but more load on external APIs
+   * Reduced to 2 to avoid Overpass rate limits during sync
    */
-  CONCURRENCY: 5,
+  CONCURRENCY: 2,
 
   /**
    * Job retry configuration

@@ -46,6 +46,7 @@ import {
   listProjects,
   getProjectById,
   getProjectMapData,
+  getProjectMapDataDeduped,
   getProjectHeatmapData,
   archiveProject,
   restoreProject,
@@ -756,7 +757,11 @@ router.get("/:id/map", async (req: Request, res: Response) => {
   const projectId = req.params.id;
 
   try {
-    const mapData = await getProjectMapData(projectId, userId);
+    console.log(`[Projects] GET /${projectId.slice(0, 8)}…/map — user: ${userId.slice(0, 8)}…`);
+    const mapData = await getProjectMapDataDeduped(projectId, userId);
+    const streetCount = mapData.streets?.length ?? 0;
+    const completedCount = mapData.streets?.filter((s: { status: string }) => s.status === "completed").length ?? 0;
+    console.log(`[Projects] GET /map — returned ${streetCount} streets (${completedCount} completed)`);
 
     res.status(200).json({
       success: true,

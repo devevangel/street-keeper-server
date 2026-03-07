@@ -63,7 +63,7 @@ export async function getHomepageData(
 
   const timezone = prefs?.timezone ?? "UTC";
 
-  const [streakData, nextMilestone, lastActivity, activityCount, user] = await Promise.all([
+  const [streakData, nextMilestone, lastActivity, activityCount, user, favoriteStreetsRows, totalDistanceResult, progressCounts] = await Promise.all([
     getStreak(userId, timezone),
     getNextMilestone(userId, contextProjectId),
     prisma.activity.findFirst({
@@ -79,6 +79,21 @@ export async function getHomepageData(
     prisma.user.findUnique({
       where: { id: userId },
       select: { name: true, createdAt: true },
+    }),
+    prisma.userStreetProgress.findMany({
+      where: { userId },
+      orderBy: { runCount: "desc" },
+      take: 5,
+      select: { name: true, runCount: true },
+    }),
+    prisma.activity.aggregate({
+      where: { userId },
+      _sum: { distanceMeters: true },
+    }),
+    prisma.userStreetProgress.groupBy({
+      by: ["runCount"],
+      where: { userId },
+      _count: true,
     }),
   ]);
 
@@ -148,6 +163,26 @@ export async function getHomepageData(
     firstStreet = await getNearestShortStreet(userLatNum, userLngNum, 500);
   }
 
+  const totalDistanceKm = totalDistanceResult._sum.distanceMeters != null
+    ? Math.round((totalDistanceResult._sum.distanceMeters / 1000) * 100) / 100
+    : 0;
+  const newStreetCount = progressCounts.find((g) => g.runCount === 1)?._count ?? 0;
+  const revisitStreetCount = progressCounts
+    .filter((g) => g.runCount > 1)
+    .reduce((sum, g) => sum + g._count, 0);
+  const newVsRevisitRatio = revisitStreetCount > 0 ? newStreetCount / revisitStreetCount : (newStreetCount > 0 ? 2 : 1);
+  const explorationStyle =
+    newVsRevisitRatio >= 2 ? "trailblazer" : newVsRevisitRatio <= 0.5 ? "habitual" : "balanced";
+
+  const userStats = {
+    totalActivities: activityCount,
+    totalDistanceKm,
+    accountCreatedAt: user?.createdAt?.toISOString() ?? new Date().toISOString(),
+    favoriteStreets: favoriteStreetsRows.map((r) => ({ name: r.name, runCount: r.runCount })),
+    explorationStyle,
+    newVsRevisitRatio: Math.round(newVsRevisitRatio * 100) / 100,
+  };
+
   const payload: HomepagePayload = {
     hero,
     streak: streakData,
@@ -165,6 +200,7 @@ export async function getHomepageData(
     isNewUser,
     userName: user?.name,
     ...(firstStreet && { firstStreet }),
+    userStats,
   };
 
   return payload;

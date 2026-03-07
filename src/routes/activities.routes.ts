@@ -166,11 +166,13 @@ router.post("/sync", async (req: Request, res: Response) => {
   }
 
   try {
+    console.log(`[Activities] POST /sync — user: ${userId.slice(0, 8)}… after: ${after ?? "default"}, perPage: ${perPage ?? "default"}`);
     const result = await syncRecentActivities(userId, {
       after: after ? after : undefined,
       before: before ? before : undefined,
       perPage,
     });
+    console.log(`[Activities] POST /sync complete — synced: ${result.synced}, processed: ${result.processed}, skipped: ${result.skipped}, errors: ${result.errors.length}`);
     res.status(200).json({
       success: true,
       synced: result.synced,

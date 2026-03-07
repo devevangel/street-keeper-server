@@ -119,10 +119,10 @@ async function processOneActivity(
   const existing = await getActivityByStravaId(stravaId);
   if (existing) {
     if (!existing.isProcessed) {
+      console.log(`[Sync] Activity ${stravaId} exists in DB but unprocessed — processing now`);
       await processActivity(existing.id, userId);
       return { status: "processed" };
     }
-    // Already processed: still check for new projects (created before this activity, date+time)
     const newProjectsUpdated = await recheckActivityForNewProjects(
       existing.id,
       userId
@@ -200,6 +200,9 @@ export async function syncRecentActivities(
   userId: string,
   options?: SyncRecentOptions
 ): Promise<SyncRecentResult> {
+  const syncStart = Date.now();
+  console.log(`[Sync] Starting sync for user ${userId.slice(0, 8)}…`);
+
   const accessToken = await getValidAccessToken(userId);
 
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -207,6 +210,10 @@ export async function syncRecentActivities(
   const after = options?.after ?? defaultAfter;
   const before = options?.before;
   const perPage = Math.min(200, Math.max(1, options?.perPage ?? 30));
+
+  console.log(
+    `[Sync] Fetching from Strava: after=${new Date(after * 1000).toISOString()}, perPage=${perPage}`
+  );
 
   let summaries;
   try {
@@ -223,6 +230,8 @@ export async function syncRecentActivities(
     throw err;
   }
 
+  console.log(`[Sync] Strava returned ${summaries.length} activities`);
+
   const result: SyncRecentResult = {
     synced: 0,
     processed: 0,
@@ -230,10 +239,12 @@ export async function syncRecentActivities(
     errors: [],
   };
 
+  // Phase 1: Process activities returned by Strava
   for (const summary of summaries) {
     const stravaId = String(summary.id);
     try {
       const one = await processOneActivity(userId, stravaId, accessToken);
+      console.log(`[Sync] Strava activity ${stravaId}: ${one.status}${"reason" in one ? ` (${one.reason})` : ""}`);
       switch (one.status) {
         case "synced":
           result.synced += 1;
@@ -249,12 +260,45 @@ export async function syncRecentActivities(
           break;
       }
     } catch (err) {
-      result.errors.push({
-        stravaId,
-        reason: err instanceof Error ? err.message : "Unknown error",
-      });
+      const reason = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[Sync] Error processing Strava activity ${stravaId}:`, reason);
+      result.errors.push({ stravaId, reason });
     }
   }
+
+  // Phase 2: Process any remaining unprocessed activities already in the DB.
+  // This catches activities older than the Strava time window or beyond the page size
+  // (e.g. after running reset:everything).
+  const unprocessed = await prisma.activity.findMany({
+    where: { userId, isProcessed: false },
+    select: { id: true, stravaId: true, startDate: true },
+    orderBy: { startDate: "asc" },
+  });
+
+  if (unprocessed.length > 0) {
+    console.log(
+      `[Sync] Found ${unprocessed.length} unprocessed activities in DB (not covered by Strava window). Processing…`
+    );
+  }
+
+  for (const act of unprocessed) {
+    try {
+      await processActivity(act.id, userId);
+      result.processed += 1;
+      console.log(
+        `[Sync] DB activity ${act.stravaId} (${act.startDate.toISOString().slice(0, 10)}): processed`
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[Sync] Error processing DB activity ${act.stravaId}:`, reason);
+      result.errors.push({ stravaId: act.stravaId, reason });
+    }
+  }
+
+  const elapsed = Date.now() - syncStart;
+  console.log(
+    `[Sync] Done in ${elapsed}ms — synced: ${result.synced}, processed: ${result.processed}, skipped: ${result.skipped}, errors: ${result.errors.length}`
+  );
 
   return result;
 }

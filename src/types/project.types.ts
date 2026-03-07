@@ -173,6 +173,26 @@ export interface ProjectMapStreet {
     type: "LineString";
     coordinates: [number, number][];
   };
+  /** From UserStreetProgress: times user ran on this street */
+  runCount?: number;
+  firstRunDate?: string | null; // ISO
+  lastRunDate?: string | null; // ISO
+}
+
+/** Quick win: street at 75%+ completion, with remaining meters to finish */
+export interface ProjectQuickWin {
+  osmId: string;
+  name: string;
+  percentage: number;
+  remainingMeters: number;
+}
+
+/** Project-level run stats for sidebar */
+export interface ProjectMapProjectStats {
+  totalRuns: number;
+  totalDistanceKm: number;
+  firstRunDate: string | null;
+  lastRunDate: string | null;
 }
 
 /** Boundary for project map (circle or polygon) */
@@ -212,6 +232,10 @@ export interface ProjectMapData {
   streets: ProjectMapStreet[];
   /** Whether geometry came from cache (vs fresh Overpass query) */
   geometryCacheHit: boolean;
+  /** Run stats for this project (activities in project) */
+  projectStats?: ProjectMapProjectStats;
+  /** Streets at 75%+ completion (almost there) */
+  quickWins?: ProjectQuickWin[];
 }
 
 // ============================================

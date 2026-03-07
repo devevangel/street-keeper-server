@@ -5,6 +5,7 @@ import type { HeroState } from "../services/hero.service.js";
 import type { StreakData } from "../services/streak.service.js";
 import type { HomepageSuggestion } from "../services/suggestion.service.js";
 import type { MilestoneWithProgress } from "./milestone.types.js";
+import type { UserStats } from "./user-stats.types.js";
 
 export type { HeroState, StreakData, HomepageSuggestion };
 
@@ -45,6 +46,8 @@ export interface HomepagePayload {
     geometry: Array<{ lat: number; lng: number }>;
     bbox: [number, number, number, number];
   };
+  /** User-level stats for sidebar (favorites, exploration style, totals) */
+  userStats?: UserStats;
 }
 
 export interface MapContextQuery {

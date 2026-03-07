@@ -40,7 +40,9 @@ router.get("/", async (req: Request, res: Response): Promise<void> => {
     userLat: req.query.userLat as string | undefined,
     userLng: req.query.userLng as string | undefined,
   };
+  console.log(`[Homepage] GET / — user: ${userId.slice(0, 8)}… lat: ${query.lat ?? "-"}, lng: ${query.lng ?? "-"}`);
   const data = await getHomepageData(userId, query);
+  console.log(`[Homepage] GET / — hero: ${data.hero?.type ?? "none"}, suggestion: ${data.primarySuggestion?.type ?? "none"}`);
   res.json({ success: true, data });
 });
 
