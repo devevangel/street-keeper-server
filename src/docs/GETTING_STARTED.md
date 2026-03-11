@@ -74,25 +74,16 @@ npx prisma migrate dev
 
 This applies all migrations and generates the Prisma client. The client is emitted under `src/generated/prisma` (see `schema.prisma`).
 
-### 4. PBF seed (for V2 engine)
+### 4. V2 engine data (on-demand city sync)
 
-If you use the **V2** engine (`GPX_ENGINE_VERSION=v2` or `both`), you must populate **NodeCache**, **WayCache**, **WayNode**, and **WayTotalEdges** from an OpenStreetMap PBF extract.
+If you use the **V2** engine (`GPX_ENGINE_VERSION=v2` or `both`), map data (**NodeCache**, **WayNode**, **WayTotalEdges**) is filled **automatically** when a user creates a project: we detect the city from their center point (Overpass), then query Overpass for all streets in that city and cache them. No PBF file or seed script is required.
 
-1. **Download a PBF** for your region (e.g. from [Geofabrik](https://download.geofabrik.de/)).
-2. **Run the seed script:**
+- **First project in a new city:** One Overpass query (30–60 s); then the city is cached.
+- **Optional pre-sync:** Run `npm run sync:city -- --lat <lat> --lng <lng>` to sync a city without creating a project.
+- **Legacy (optional):** You can still pre-load a full region from a PBF with `npm run seed:way-cache -- path/to/region.osm.pbf` if you prefer. See [SCRIPTS](/docs/scripts).
+- **Env:** `CITY_SYNC_EXPIRY_DAYS` (default 42) controls how often cities are re-synced from Overpass.
 
-   ```bash
-   npm run seed:way-cache -- path/to/region.osm.pbf
-   ```
-
-   This can take a long time and use significant memory for large regions. Optional flags:
-
-   - `--node-cache-only` — Only populate NodeCache (first pass).
-   - `--way-nodes-only` — Only populate WayNode and WayTotalEdges from existing WayCache (run after a full seed that wrote WayCache).
-
-3. **Optional:** Set `SKIP_OVERPASS=true` in `.env` so V2 does not call Overpass (all data comes from the seeded tables).
-
-See [SCRIPTS](/docs/scripts) for full script documentation.
+See [How Engines Work](/docs/how-engines-work) (section 8) and [SCRIPTS](/docs/scripts) for details.
 
 ### 5. Run the server
 

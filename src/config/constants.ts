@@ -450,6 +450,14 @@ export const GEOMETRY_CACHE = {
 } as const;
 
 // ============================================
+// City Sync (On-Demand: CityStrides Model)
+// ============================================
+export const CITY_SYNC = {
+  /** Days after which a city is re-synced from Overpass (match CityStrides ~6 weeks) */
+  EXPIRY_DAYS: parseInt(process.env.CITY_SYNC_EXPIRY_DAYS ?? "42", 10),
+} as const;
+
+// ============================================
 // Job Queue Configuration (pg-boss)
 // ============================================
 

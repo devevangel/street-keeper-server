@@ -1,6 +1,12 @@
 /**
  * Seed WayCache from a local OSM PBF file (e.g. Hampshire).
  *
+ * @deprecated LEGACY: The app now uses on-demand city sync (CityStrides model). When a user
+ * creates a project, we detect the city from their location and sync that city from the Overpass
+ * API into NodeCache, WayNode, WayTotalEdges. No PBF file or pre-seeding is required. This script
+ * is kept for optional/legacy use (e.g. offline or full-region preload). Prefer `npm run sync:city`
+ * for single-city sync, or rely on automatic sync on project creation.
+ *
  * Reads the PBF with tiny-osmpbf (supports current Geofabrik PBFs), builds
  * node→way mappings (WayCache) and way→totalEdges (WayTotalEdges). After
  * running this, the v2 engine (engine-v2) can resolve ways and street completion without Overpass.

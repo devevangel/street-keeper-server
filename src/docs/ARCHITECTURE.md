@@ -154,7 +154,7 @@ The codebase follows a strict three-layer architecture:
 - **Purpose:** GPS-to-street matching using node proximity (no external matching service)
 - **Used for:** Marking which OSM nodes a user has been within 25 metres of; street completion is derived from node hit counts
 - **Implementation:** For each GPS point, query **NodeCache** for nodes within a 25-metre radius; mark hits in **UserNodeHit**. Street completion is derived at query time from **UserNodeHit** + **WayNode** + **WayTotalEdges** using a 90% node completion rule (100% for streets with ≤10 nodes).
-- **No external APIs for matching:** V2 uses only pre-seeded local data (NodeCache, WayNode, WayTotalEdges) after running the PBF seed script.
+- **Data source (on-demand city sync):** NodeCache, WayNode, and WayTotalEdges are filled **per city** from the **Overpass API** when a user creates a project: we detect the city (Overpass `is_in`), check **CitySync**, and if missing we query Overpass for all streets in that city and upsert. One sync per city; no PBF file required. See [How Engines Work](/docs/how-engines-work) section 8.
 
 ---
 

@@ -55,9 +55,26 @@ export async function getHomepageData(
     mapLat = prefs.lastViewedLat;
     mapLng = prefs.lastViewedLng;
     mapRadius = prefs.lastViewedRadius ?? DEFAULT_RADIUS;
+  } else if (userLatNum != null && userLngNum != null && !Number.isNaN(userLatNum) && !Number.isNaN(userLngNum)) {
+    // New user with no preferences — use their browser geolocation as map center
+    mapLat = userLatNum;
+    mapLng = userLngNum;
+    mapRadius = DEFAULT_RADIUS;
   } else {
-    mapLat = 0;
-    mapLng = 0;
+    // Last resort: try to infer location from the user's most recent activity
+    const recentActivity = await prisma.activity.findFirst({
+      where: { userId },
+      orderBy: { startDate: "desc" },
+      select: { coordinates: true },
+    });
+    const coords = recentActivity?.coordinates as Array<{ lat: number; lng: number }> | null;
+    if (coords && coords.length > 0) {
+      mapLat = coords[0].lat;
+      mapLng = coords[0].lng;
+    } else {
+      mapLat = 0;
+      mapLng = 0;
+    }
     mapRadius = DEFAULT_RADIUS;
   }
 

@@ -274,6 +274,26 @@ model WayCache {
 }
 
 // ============================================
+// City Sync (On-Demand: CityStrides Model)
+// ============================================
+// Tracks which OSM cities have been synced from Overpass. One sync per city;
+// subsequent projects in the same city reuse cached NodeCache/WayNode/WayTotalEdges.
+
+model CitySync {
+  id         String   @id @default(uuid())
+  relationId BigInt   @unique // OSM relation ID (area id in Overpass = 3600000000 + relationId)
+  name       String // City name from OSM
+  adminLevel Int // OSM admin_level (typically 8 for city)
+  nodeCount  Int      @default(0)
+  wayCount   Int      @default(0)
+  syncedAt   DateTime @default(now())
+  expiresAt  DateTime // Re-sync after this (e.g. syncedAt + 6 weeks)
+
+  @@index([relationId])
+  @@index([expiresAt])
+}
+
+// ============================================
 // Way Total Edges (Parser-Test: Street Completion)
 // ============================================
 // One row per way: total edge count (nodes.length - 1). Filled by seed script.

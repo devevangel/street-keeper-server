@@ -254,7 +254,30 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 
 **Relations:** None. This is a standalone cache keyed by nodeId.
 
-**Design choice:** Overpass (the map API) is rate-limited and slow. By caching node → way data (from a PBF file or from Overpass the first time we see a node), we avoid repeated calls. When `SKIP_OVERPASS=true`, we rely only on this cache (after seeding from a PBF).
+**Design choice:** Overpass (the map API) is rate-limited and slow. By caching node → way data (from a PBF file or from Overpass the first time we see a node), we avoid repeated calls. **Note:** The app has pivoted to **on-demand city sync** (CityStrides model). V2 data (NodeCache, WayNode, WayTotalEdges) is now populated per city from the Overpass API when a user creates a project, not from a PBF seed. WayCache is **deprecated** for V2 runtime (V2 does not use it at query time); it is only populated by the legacy PBF seed script if used.
+
+---
+
+## 10b. CitySync (On-Demand City Sync)
+
+**What it is:** Tracks which OSM cities have been synced from the Overpass API. One row per city (by OSM relation ID). When a user creates a project, we detect the city from their center point, check this table, and if the city is missing or expired we query Overpass for all streets in that city and populate NodeCache, WayNode, and WayTotalEdges. Subsequent projects in the same city reuse the cached data.
+
+**Analogy:** A checklist of "which cities do we already have map data for?" So we only call Overpass once per city.
+
+| Column | Type | What it stores | Why |
+|--------|------|----------------|-----|
+| `id` | UUID | Unique identifier | Primary key |
+| `relationId` | BigInt (unique) | OSM relation ID of the city boundary | Overpass area ID = 3600000000 + relationId |
+| `name` | string | City name from OSM | For display and logging |
+| `adminLevel` | int | OSM admin_level (typically 8) | How we selected this boundary |
+| `nodeCount` | int | Number of nodes synced | For monitoring |
+| `wayCount` | int | Number of ways synced | For monitoring |
+| `syncedAt` | datetime | When we last synced | Auditing |
+| `expiresAt` | datetime | When to re-sync (e.g. 6 weeks) | So map updates from OSM eventually apply |
+
+**Relations:** None. Standalone table.
+
+**Design choice:** Matches the CityStrides approach: one Overpass query per city on first use, then use the database. Enables free-tier hosting (no 7.5 GB PBF pre-seed).
 
 ---
 
@@ -294,9 +317,9 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 
 **Index:** `(lat, lon)` for bounding-box queries (e.g. 25 m around a GPS point).
 
-**Relations:** None. Standalone cache. Populated by the PBF seed script.
+**Relations:** None. Standalone cache. Populated by **on-demand city sync** (Overpass per city when a user creates a project) or, optionally, by the legacy PBF seed script.
 
-**Design choice:** NodeCache is the only spatial data V2 needs for matching; no Overpass or OSRM. Seeded from the same PBF as WayCache and WayNode.
+**Design choice:** NodeCache is the only spatial data V2 needs for matching. It is now filled per city from the Overpass API (CityStrides model) instead of requiring a full PBF pre-seed.
 
 ---
 
@@ -334,7 +357,7 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 | ProjectActivity | Project | Many-to-one | Delete project → delete ProjectActivity rows |
 | ProjectActivity | Activity | Many-to-one | Delete activity → delete ProjectActivity rows |
 
-WayCache, WayTotalEdges, WayNode, NodeCache, and GeometryCache have no foreign keys; they are lookup/cache tables.
+WayCache, WayTotalEdges, WayNode, NodeCache, CitySync, and GeometryCache have no foreign keys; they are lookup/cache tables.
 
 ---
 

@@ -26,8 +26,8 @@ See [How Engines Work](/docs/how-engines-work) for the full V1 pipeline and [Eng
 
 **In one sentence:** For each GPS point we ask "which map nodes are within 25 metres?" We record those as **node hits**; street completion is **derived** at query time using a 90% node rule.
 
-- **Data source:** Pre-seeded local database: **NodeCache** (node coordinates), **WayNode** (way→node list), **WayTotalEdges** (total nodes per way), and **WayCache**. No Overpass or Mapbox needed for matching after seed.
-- **Tables:** **UserNodeHit** — one row per user per OSM node that was within 25 m of a GPS point. Completion is not stored per street; it is computed when needed: (nodes hit / total nodes) per way, with **90%** threshold (or **100%** for streets with ≤10 nodes).
-- **When to use it:** Best accuracy and consistency (comparable to CityStrides). Requires running the **PBF seed script** for your region. Can run fully offline after seeding. No external matching API.
+- **Data source:** **On-demand city sync** (CityStrides model): when a user creates a project, we detect the city from their center point (Overpass `is_in`), then query Overpass for all streets in that city and populate **NodeCache**, **WayNode**, and **WayTotalEdges**. One sync per city; subsequent projects in the same city use the DB. No PBF file required. Optional legacy: PBF seed script can still pre-fill a region.
+- **Tables:** **UserNodeHit** — one row per user per OSM node that was within 25 m of a GPS point. **CitySync** — which cities have been synced and when. Completion is not stored per street; it is computed when needed: (nodes hit / total nodes) per way, with **90%** threshold (or **100%** for streets with ≤10 nodes).
+- **When to use it:** Best accuracy and consistency (comparable to CityStrides). No PBF seed required; cities sync automatically on first project creation. Optional: run `npm run sync:city` to pre-sync a city.
 
 See [How Engines Work](/docs/how-engines-work) for the full V2 pipeline and [Engine Comparison](/docs/engines) for the comparison table.

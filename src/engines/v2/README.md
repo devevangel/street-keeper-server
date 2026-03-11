@@ -19,7 +19,8 @@ Node-based street coverage system. Mounted at `/api/v1/engine-v2`. Tracks which 
 
 ## Setup
 
-- **NodeCache, WayNode, WayTotalEdges, WayCache (required):** Seed from a regional PBF: `npm run seed:way-cache -- path/to/region.pbf`. This populates NodeCache, WayCache, WayTotalEdges, and WayNode. Use `--node-cache-only` or `--way-nodes-only` to run in stages. Then set `SKIP_OVERPASS=true` to avoid Overpass for matching.
+- **NodeCache, WayNode, WayTotalEdges (on-demand):** No PBF required. When a user creates a project, we detect the city from their center point (Overpass `is_in`), check **CitySync**, and if the city is not synced we query Overpass for all streets in that city and populate NodeCache, WayNode, and WayTotalEdges. One sync per city; subsequent projects in the same city use the DB. Optional: run `npm run sync:city -- --lat <lat> --lng <lng>` to pre-sync a city.
+- **Legacy (optional):** You can still seed from a regional PBF with `npm run seed:way-cache -- path/to/region.pbf`. WayCache is not used by V2 at query time.
 
 ## Node completion rule
 

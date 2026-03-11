@@ -16,11 +16,13 @@ export const NODE_PROXIMITY_CONFIG = {
 
 /**
  * Overpass and cache (used by WayCache seeding; optional for runtime).
+ * @deprecated skipOverpass is no longer used; V2 data comes from on-demand city sync (Overpass per city), not PBF seed.
  */
 export const PARSER_CONFIG = {
   overpass: {
     baseUrl: "https://overpass-api.de/api/interpreter",
     timeout: 30000,
+    /** @deprecated No longer needed; city sync uses Overpass on-demand. Kept for backward compatibility. */
     skipOverpass: process.env.SKIP_OVERPASS === "true",
   },
   cache: {

@@ -109,12 +109,19 @@ export interface GpxErrorResponse {
   code: string;
 }
 
-/** Overpass API element response */
+/** Overpass API element response (way or node from recurse-down / out body geom) */
 export interface OverpassElement {
-  type: "way";
+  type: "way" | "node";
   id: number;
-  geometry: { lat: number; lon: number }[];
-  tags: {
+  /** Node IDs (present on ways when using out body or recurse) */
+  nodes?: number[];
+  /** Present on node elements */
+  lat?: number;
+  /** Present on node elements */
+  lon?: number;
+  /** Present on ways when using out body geom */
+  geometry?: { lat: number; lon: number }[];
+  tags?: {
     name?: string;
     highway?: string;
     [key: string]: string | undefined;

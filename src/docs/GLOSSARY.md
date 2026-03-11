@@ -78,4 +78,10 @@ Definitions of terms, abbreviations, and concepts used in the Street Keeper back
 
 **90% rule** — A street is “complete” in V2 when the user has hit at least 90% of its nodes (or 100% if the street has ≤10 nodes).
 
-**Seeded data** — Data loaded once from a PBF (NodeCache, WayCache, WayNode, WayTotalEdges) so V2 can run without calling Overpass for matching.
+**CitySync** — Table that records which OSM cities have been synced from Overpass (relation ID, name, sync time, expiry). Used to avoid re-querying Overpass for the same city.
+
+**On-demand sync** — Filling NodeCache, WayNode, and WayTotalEdges **per city** from the Overpass API when a user creates a project (CityStrides model). One Overpass query per city; subsequent projects in that city use the DB.
+
+**Relation ID** — OpenStreetMap identifier for a relation (e.g. an administrative boundary). In Overpass, the area ID for a relation is 3600000000 + relation_id. We use it to query “all streets in this city.”
+
+**Seeded data** — Data that populates NodeCache, WayNode, WayTotalEdges (and optionally WayCache). Now primarily from **on-demand city sync** (Overpass per city). Legacy: can still be loaded from a PBF via the seed script.

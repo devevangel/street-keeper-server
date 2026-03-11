@@ -35,6 +35,7 @@ import {
   queryStreetsInPolygon,
   OverpassError,
 } from "./overpass.service.js";
+import { ensureCitySynced } from "./city-sync.service.js";
 // Note: reverseGeocode will be enabled after migration
 // import { reverseGeocode } from "./geocoding.service.js";
 import {
@@ -141,6 +142,7 @@ export async function previewProject(
         "Circle preview requires centerLat, centerLng, and radiusMeters."
       );
     }
+    await ensureCitySynced(centerLatIn, centerLngIn);
     const { streets, cacheKey: key, cachedRadius } = await getStreetsWithCache(
       centerLatIn,
       centerLngIn,
@@ -462,6 +464,7 @@ export async function createProject(
         "Invalid radius. Must be 100–10000 meters in 100 m increments."
       );
     }
+    await ensureCitySynced(centerLat, centerLng);
     const filterFn = resolveRadiusFilter(boundaryMode);
 
     if (cacheKey) {
