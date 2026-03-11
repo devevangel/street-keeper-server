@@ -25,7 +25,8 @@
     "clear:app-data": "tsx src/scripts/clear-app-data.ts",
     "recompute:project-progress": "tsx src/scripts/recompute-project-progress.ts",
     "delete:archived-project-data": "tsx src/scripts/delete-archived-project-data.ts",
-    "delete:all-projects": "tsx src/scripts/delete-all-projects.ts"
+    "delete:all-projects": "tsx src/scripts/delete-all-projects.ts",
+    "db:size": "tsx src/scripts/db-size.ts"
   },
   "keywords": [],
   "author": "",
