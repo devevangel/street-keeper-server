@@ -307,6 +307,33 @@ The codebase follows a strict three-layer architecture:
 
 ## Data Flow Diagrams
 
+### Background Sync Architecture
+
+Background Strava sync (onboarding / initial import) uses a **durable queue** (pg-boss) so work survives server restarts, deploys, and container replacement. Fire-and-forget (e.g. `setImmediate`) would lose in-flight jobs on process death.
+
+```mermaid
+flowchart LR
+  Request["POST /sync?background=true"]
+  Guard["Duplicate guard"]
+  Fetch["Paginated Strava fetch"]
+  Create["Create SyncJob"]
+  Enqueue["Enqueue pg-boss"]
+  Return["Return syncId, total"]
+  Worker["Sync worker"]
+  Token["getValidAccessToken from DB"]
+  Loop["Process activities sequentially"]
+  Update["Update SyncJob progress"]
+  Done["status=completed"]
+
+  Request --> Guard --> Fetch --> Create --> Enqueue --> Return
+  Enqueue --> Worker
+  Worker --> Token --> Loop --> Update --> Done
+```
+
+- **Phase 1:** Check for existing queued/running SyncJob (single-flight per user). Fetch all activity pages from Strava (200 per page). Create SyncJob, enqueue job with `syncJobId` and `userId`, return immediately.
+- **Phase 2:** Worker loads fresh credentials from DB (never uses a token from the request). Re-fetches activity list, processes from `SyncJob.processed` onward with 300ms delay between activities. Updates progress after each; sets `completed` or `failed` at the end.
+- **Empty database:** Homepage and map services handle null/zero/empty query results; the map shows base tiles and zero streets until sync populates data.
+
 ### Strava OAuth Flow
 
 ```mermaid

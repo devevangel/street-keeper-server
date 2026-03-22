@@ -41,7 +41,7 @@ export async function getPreferences(userId: string) {
   });
   if (!prefs) {
     prefs = await prisma.userPreferences.create({
-      data: { userId },
+      data: { userId, mapStyle: "satellite" },
     });
   }
   return prefs;

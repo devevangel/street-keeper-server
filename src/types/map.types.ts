@@ -97,3 +97,25 @@ export interface MapStreetsResponse {
   /** Count of partial streets (yellow) */
   partialCount: number;
 }
+
+// ============================================
+// GPS Traces (Activity Paths for Map)
+// ============================================
+
+/**
+ * Single GPS trace for map rendering (simplified coordinates)
+ */
+export interface GpsTraceItem {
+  activityId: string;
+  name: string;
+  startDate: string; // ISO 8601
+  coordinates: [number, number][]; // [lat, lng] simplified
+}
+
+/**
+ * Response for GET /api/v1/map/traces
+ */
+export interface GpsTracesResponse {
+  success: true;
+  traces: GpsTraceItem[];
+}

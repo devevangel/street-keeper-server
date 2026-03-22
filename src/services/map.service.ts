@@ -28,12 +28,16 @@ import {
   deriveStreetCompletionForArea,
   osmIdToWayId,
 } from "../engines/v2/street-completion.js";
-import type { OsmStreet } from "../types/run.types.js";
+import type { OsmStreet, GpxPoint } from "../types/run.types.js";
 import type {
   MapStreet,
   MapStreetStats,
   MapStreetsResponse,
+  GpsTraceItem,
+  GpsTracesResponse,
 } from "../types/map.types.js";
+import { simplifyCoordinates } from "../utils/geometry.js";
+import prisma from "../lib/prisma.js";
 import {
   MAP,
   STREET_AGGREGATION,
@@ -546,4 +550,145 @@ export async function getGeometriesInArea(
   );
   await setCachedGeometries(cacheKey, streets);
   return streets;
+}
+
+// ============================================
+// GPS Traces
+// ============================================
+
+const TRACES_DEFAULT_RADIUS_METERS = 5000;
+const TRACES_MAX_ACTIVITIES = 200;
+
+/**
+ * Check if a bounding box (from activity coordinates) intersects a circle (center + radius).
+ * Uses approximate degrees: ~111km per degree at mid-latitudes.
+ */
+function bboxIntersectsCircle(
+  minLat: number,
+  maxLat: number,
+  minLng: number,
+  maxLng: number,
+  centerLat: number,
+  centerLng: number,
+  radiusMeters: number
+): boolean {
+  const radiusDeg = radiusMeters / 111000;
+  const expandedMinLat = minLat - radiusDeg;
+  const expandedMaxLat = maxLat + radiusDeg;
+  const expandedMinLng = minLng - radiusDeg;
+  const expandedMaxLng = maxLng + radiusDeg;
+  return (
+    centerLat >= expandedMinLat &&
+    centerLat <= expandedMaxLat &&
+    centerLng >= expandedMinLng &&
+    centerLng <= expandedMaxLng
+  );
+}
+
+/**
+ * Get simplified GPS traces for the user's processed activities.
+ * Optionally filter by area (lat, lng, radius). Limit 200 activities.
+ */
+export async function getMapTraces(
+  userId: string,
+  lat?: number,
+  lng?: number,
+  radiusMeters: number = TRACES_DEFAULT_RADIUS_METERS
+): Promise<GpsTracesResponse> {
+  const activities = await prisma.activity.findMany({
+    where: { userId, isProcessed: true },
+    orderBy: { startDate: "desc" },
+    take: TRACES_MAX_ACTIVITIES,
+    select: { id: true, name: true, startDate: true, coordinates: true },
+  });
+
+  const traces: GpsTraceItem[] = [];
+  const hasAreaFilter =
+    lat != null &&
+    lng != null &&
+    !Number.isNaN(lat) &&
+    !Number.isNaN(lng);
+
+  for (const a of activities) {
+    const coords = a.coordinates as GpxPoint[] | null;
+    if (!coords || !Array.isArray(coords) || coords.length < 2) continue;
+
+    if (hasAreaFilter) {
+      const lats = coords.map((p) => p.lat);
+      const lngs = coords.map((p) => p.lng);
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      const minLng = Math.min(...lngs);
+      const maxLng = Math.max(...lngs);
+      if (
+        !bboxIntersectsCircle(
+          minLat,
+          maxLat,
+          minLng,
+          maxLng,
+          lat,
+          lng,
+          radiusMeters
+        )
+      ) {
+        continue;
+      }
+    }
+
+    const simplified = simplifyCoordinates(coords);
+    if (simplified.length < 2) continue;
+
+    traces.push({
+      activityId: a.id,
+      name: a.name,
+      startDate: a.startDate.toISOString(),
+      coordinates: simplified,
+    });
+  }
+
+  return { success: true, traces };
+}
+
+/**
+ * Get simplified GPS traces for activities linked to a project.
+ * @throws ProjectNotFoundError if project does not exist
+ * @throws ProjectAccessDeniedError if user does not own the project
+ */
+export async function getProjectTraces(
+  projectId: string,
+  userId: string
+): Promise<GpsTracesResponse> {
+  const { getProjectById } = await import("./project.service.js");
+  await getProjectById(projectId, userId);
+  const projectActivities = await prisma.projectActivity.findMany({
+    where: {
+      projectId,
+      project: { userId },
+    },
+    include: {
+      activity: {
+        select: { id: true, name: true, startDate: true, coordinates: true, isProcessed: true },
+      },
+    },
+  });
+
+  const traces: GpsTraceItem[] = [];
+  for (const pa of projectActivities) {
+    const a = pa.activity;
+    if (!a || !a.isProcessed) continue;
+    const coords = a.coordinates as GpxPoint[] | null;
+    if (!coords || !Array.isArray(coords) || coords.length < 2) continue;
+
+    const simplified = simplifyCoordinates(coords);
+    if (simplified.length < 2) continue;
+
+    traces.push({
+      activityId: a.id,
+      name: a.name,
+      startDate: a.startDate.toISOString(),
+      coordinates: simplified,
+    });
+  }
+
+  return { success: true, traces };
 }

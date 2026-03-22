@@ -144,17 +144,20 @@ export async function getHomepageData(
     daysSinceLast,
   });
 
-  const suggestions = await getHomepageSuggestions(
-    userId,
-    {
-      projectId: contextProjectId,
-      lat: mapLat,
-      lng: mapLng,
-      radius: mapRadius,
-    },
-    streakData,
-    nextMilestone
-  );
+  const hasRealLocation = mapLat !== 0 || mapLng !== 0;
+  const suggestions = hasRealLocation
+    ? await getHomepageSuggestions(
+        userId,
+        {
+          projectId: contextProjectId,
+          lat: mapLat,
+          lng: mapLng,
+          radius: mapRadius,
+        },
+        streakData,
+        nextMilestone
+      )
+    : { primary: null, alternates: [] };
 
   const lastRun =
     lastActivityDate != null && lastActivity != null
@@ -200,6 +203,11 @@ export async function getHomepageData(
     newVsRevisitRatio: Math.round(newVsRevisitRatio * 100) / 100,
   };
 
+  const mapSegments =
+    "mapStreetsResponse" in suggestions && suggestions.mapStreetsResponse?.segments?.length
+      ? suggestions.mapStreetsResponse.segments
+      : undefined;
+
   const payload: HomepagePayload = {
     hero,
     streak: streakData,
@@ -212,6 +220,7 @@ export async function getHomepageData(
       radius: mapRadius,
       ...(contextProjectId && { projectId: contextProjectId }),
     },
+    ...(mapSegments && mapSegments.length > 0 && { mapSegments }),
     ...(lastRun && { lastRun }),
     ...(recentHighlights && { recentHighlights }),
     isNewUser,

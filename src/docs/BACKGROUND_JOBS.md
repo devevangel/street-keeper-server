@@ -42,6 +42,33 @@ Street Keeper uses **pg-boss** for asynchronous activity processing. Jobs are st
 
 ---
 
+---
+
+## Sync Queue (background Strava sync)
+
+A second pg-boss queue, **`background-sync`**, handles onboarding and large initial imports. It is **durable** (survives server restarts, deploys, container replacement) because jobs are stored in PostgreSQL, not in-process.
+
+**Why pg-boss instead of setImmediate:** In-process fire-and-forget would lose work on process death (restart, deploy, OOM kill). pg-boss persists jobs so they can be retried and observed.
+
+**Two-phase flow:**
+
+1. **Phase 1 (fast):** `POST /activities/sync?background=true` checks for an existing queued/running **SyncJob** for the user (single-flight guard). If none, it fetches the Strava activity list **with pagination** (all pages, 200 per page), creates a **SyncJob** row (`status = "queued"`), enqueues a job with `{ syncJobId, userId }`, and returns immediately with `{ syncId, total, status }`.
+2. **Phase 2 (worker):** The sync worker picks up the job, loads **fresh credentials** from the DB via `getValidAccessToken(userId)` (never uses a token passed from the request — tokens expire; the worker may run minutes later). It re-fetches the activity list with the same time window, then processes activities **sequentially** with a **300ms delay** between each. After each activity it updates `SyncJob.processed` / `skipped` / `errors` / `updatedAt`. On completion it sets `status = "completed"` and `completedAt`.
+
+**Duplicate-job guard:** Only one sync job per user can be queued or running at a time. If the client calls sync again while one is active, the API returns the existing job.
+
+**Retry and idempotent resume:** pg-boss retries failed jobs (3 attempts, 30s delay, exponential backoff). The worker resumes from `SyncJob.processed`, skipping already-processed activities, so retries do not duplicate work.
+
+**Key files:**
+
+- **`queues/activity.queue.ts`** — `addSyncJob`, `registerSyncWorker`; sync queue uses `singletonKey: sync-${userId}`.
+- **`services/sync.service.ts`** — `startBackgroundSync`, `processSyncJob`, paginated `fetchAllActivitySummaries`.
+- **`workers/sync.worker.ts`** — Registers the sync worker; calls `processSyncJob` and marks job failed on unhandled errors.
+
+**Startup:** The server calls `startQueue()`, `startActivityWorker()`, and `startSyncWorker()` on boot (see `server.ts`). Without this, pg-boss would not process any jobs.
+
+---
+
 ## Disabling the queue
 
 For tests or special setups, set **`DISABLE_QUEUE=true`**. The app will then process activities **synchronously** when requested (e.g. sync or webhook), without enqueueing. Useful to avoid starting pg-boss in unit tests.

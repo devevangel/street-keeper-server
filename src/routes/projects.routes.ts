@@ -65,6 +65,7 @@ import {
 } from "../services/milestone.service.js";
 import { getSuggestions } from "../services/suggestion.service.js";
 import { listActivitiesForProject } from "../services/activity.service.js";
+import { getProjectTraces } from "../services/map.service.js";
 import prisma from "../lib/prisma.js";
 import { ERROR_CODES, isValidRadius } from "../config/constants.js";
 import { OverpassError } from "../services/overpass.service.js";
@@ -830,6 +831,43 @@ router.get("/:id/heatmap", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Heatmap error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// GPS Traces (activity paths for project map)
+// ============================================
+
+router.get("/:id/traces", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    const result = await getProjectTraces(projectId, userId);
+    res.status(200).json(result);
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+    console.error("[Projects] Traces error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

@@ -9,7 +9,7 @@ import { getProjectById, getProjectMapData } from "./project.service.js";
 import { getMapStreets, getGeometriesInArea } from "./map.service.js";
 import { pointToLineDistance } from "./geo.service.js";
 import type { ProjectMapStreet } from "../types/project.types.js";
-import type { MapStreet } from "../types/map.types.js";
+import type { MapStreet, MapStreetsResponse } from "../types/map.types.js";
 import type { StreakData } from "./streak.service.js";
 import type { MilestoneWithProgress } from "../types/milestone.types.js";
 import type { OsmStreet } from "../types/run.types.js";
@@ -39,6 +39,11 @@ export interface HomepageSuggestionsResult {
   primary: HomepageSuggestion | null;
   alternates: HomepageSuggestion[];
 }
+
+/** Result of getHomepageSuggestions when area context is used; includes map data to avoid a second GET /map/streets. */
+export type HomepageSuggestionsWithMap = HomepageSuggestionsResult & {
+  mapStreetsResponse?: MapStreetsResponse;
+};
 
 export interface StreetSuggestion {
   osmId: string;
@@ -386,6 +391,7 @@ function mapStreetToBbox(street: MapStreet): [number, number, number, number] {
  * Get homepage suggestions: one primary + up to 2 alternates.
  * Fallback ladder: streak_saver > quick_win > milestone_push > repeat_street > explore > null.
  * With projectId: project-scoped suggestions; with lat/lng/radius only: area-only suggestions.
+ * When using lat/lng/radius, also returns mapStreetsResponse so the homepage payload can inline map segments.
  */
 export async function getHomepageSuggestions(
   userId: string,
@@ -397,8 +403,9 @@ export async function getHomepageSuggestions(
   },
   streakData: StreakData,
   nextMilestone: MilestoneWithProgress | null
-): Promise<HomepageSuggestionsResult> {
+): Promise<HomepageSuggestionsWithMap> {
   const candidates: HomepageSuggestion[] = [];
+  let mapStreetsResponse: MapStreetsResponse | undefined;
 
   if (context.projectId) {
     const response = await getSuggestions(context.projectId, userId, {
@@ -417,7 +424,8 @@ export async function getHomepageSuggestions(
   } else if (
     context.lat != null &&
     context.lng != null &&
-    context.radius != null
+    context.radius != null &&
+    (context.lat !== 0 || context.lng !== 0)
   ) {
     const mapResult = await getMapStreets(
       userId,
@@ -425,6 +433,7 @@ export async function getHomepageSuggestions(
       context.lng,
       context.radius,
     );
+    mapStreetsResponse = mapResult;
     buildCandidatesFromMapStreets(
       context.lat,
       context.lng,
@@ -435,7 +444,9 @@ export async function getHomepageSuggestions(
   }
 
   if (candidates.length === 0) {
-    return { primary: null, alternates: [] };
+    return mapStreetsResponse != null
+      ? { primary: null, alternates: [], mapStreetsResponse }
+      : { primary: null, alternates: [] };
   }
 
   const filtered: HomepageSuggestion[] = [];
@@ -467,7 +478,9 @@ export async function getHomepageSuggestions(
     .filter((c) => c.cooldownKey !== primary?.cooldownKey)
     .slice(0, 2);
 
-  return { primary, alternates };
+  return mapStreetsResponse != null
+    ? { primary, alternates, mapStreetsResponse }
+    : { primary, alternates };
 }
 
 async function buildCandidatesFromProjectResponse(

@@ -15,6 +15,7 @@ erDiagram
   User ||--o{ UserStreetProgress : "has"
   User ||--o{ UserEdge : "legacy"
   User ||--o{ UserNodeHit : "has"
+  User ||--o{ SyncJob : "has"
   Project ||--o{ ProjectActivity : "links"
   Activity ||--o{ ProjectActivity : "links"
   Project }o--|| ProjectActivity : "projectId"
@@ -50,9 +51,36 @@ erDiagram
 | `stravaTokenExpiresAt` | datetime (optional) | When the access token expires | We refresh before this time so sync keeps working |
 | `createdAt` / `updatedAt` | datetime | When the row was created or last updated | Auditing and debugging |
 
-**Relations:** A user **owns** many Projects, has many Activities, has many UserStreetProgress rows (V1 map), has many UserNodeHit rows (V2 map — node proximity), and has many UserEdge rows (legacy; no longer written by V2). If a user is deleted, all of those are deleted too (cascade).
+**Relations:** A user **owns** many Projects, has many Activities, has many UserStreetProgress rows (V1 map), has many UserNodeHit rows (V2 map — node proximity), has many SyncJob rows (background sync state), and has many UserEdge rows (legacy; no longer written by V2). If a user is deleted, all of those are deleted too (cascade).
 
 **Design choice:** We store Strava tokens so we can sync your activities in the background and when you tap "Sync." Without storing them, you would have to log in with Strava every time.
+
+---
+
+## 2a. SyncJob
+
+**What it is:** A record for one background Strava sync (onboarding or large import). The frontend polls `GET /activities/sync/status` to show progress; the pg-boss worker updates this row as it processes activities.
+
+**Lifecycle:** `queued` (created and enqueued) → `running` (worker started) → `completed` or `failed`. The `updatedAt` field (set on every progress update) supports stale-job detection and debugging.
+
+| Column | Type | What it stores | Why |
+|--------|------|----------------|-----|
+| `id` | UUID | Unique identifier for this sync job | Primary key; returned as `syncId` to the client |
+| `userId` | UUID | Who this sync belongs to | Links to User; cascade delete |
+| `status` | string | `queued`, `running`, `completed`, or `failed` | So the client and workers know the state |
+| `type` | string | `initial` or `incremental` | Distinguishes first-time import from later syncs |
+| `total` | int | Number of activities to process | Denominator for progress (e.g. "8 of 15") |
+| `processed` | int | Number processed so far | Numerator; worker increments after each activity; used for idempotent resume on retry |
+| `skipped` | int | Number skipped (e.g. unsupported type) | For reporting |
+| `errors` | int | Number of activities that errored | For reporting |
+| `lastErrorMessage` | string (optional) | Last error message | Debugging without reading server logs |
+| `after` | int (optional) | Unix timestamp; fetch activities after this | Worker re-fetches list with this window |
+| `before` | int (optional) | Unix timestamp; fetch activities before this | Same |
+| `startedAt` | datetime | When the job was created | Auditing |
+| `updatedAt` | datetime | Last progress update | Stale-job detection; Prisma `@updatedAt` |
+| `completedAt` | datetime (optional) | When status became completed or failed | Auditing |
+
+**Relations:** A SyncJob belongs to one User. Deleted when the user is deleted.
 
 ---
 

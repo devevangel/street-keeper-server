@@ -23,7 +23,8 @@ All activity routes require authentication.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/activities` | List the current user's activities (paginated). Query: `limit`, `offset`, `sort`. |
-| POST | `/activities/sync` | Sync recent activities from Strava. Query: optional `after` (Unix timestamp). Returns count of new/updated. |
+| POST | `/activities/sync` | Sync recent activities from Strava. Query: optional `after`, `before`, `perPage`. If **`background=true`**, starts a background sync and returns immediately with `{ syncId, total, status }`; duplicate guard: if user already has a queued/running job, returns that job. |
+| GET | `/activities/sync/status` | Get the latest SyncJob for the user (queued, running, completed, or failed). Returns `{ syncId, status, type, total, processed, skipped, errors, lastErrorMessage, updatedAt }`. Poll every few seconds while status is `queued` or `running`. |
 | GET | `/activities/:id` | Get a single activity by ID (metadata, coordinates, isProcessed, etc.). |
 | DELETE | `/activities/:id` | Delete an activity (recalculates project progress). |
 

@@ -85,3 +85,11 @@ Definitions of terms, abbreviations, and concepts used in the Street Keeper back
 **Relation ID** — OpenStreetMap identifier for a relation (e.g. an administrative boundary). In Overpass, the area ID for a relation is 3600000000 + relation_id. We use it to query “all streets in this city.”
 
 **Seeded data** — Data that populates NodeCache, WayNode, WayTotalEdges (and optionally WayCache). Now primarily from **on-demand city sync** (Overpass per city). Legacy: can still be loaded from a PBF via the seed script.
+
+**SyncJob** — A database record tracking the state of a background Strava sync. Status lifecycle: `queued` → `running` → `completed` or `failed`. Used so the frontend can poll progress and show a non-blocking banner while the pg-boss worker processes activities.
+
+**Background sync** — The two-phase pattern for onboarding / initial import: Phase 1 enqueues work (paginated Strava fetch, create SyncJob, enqueue pg-boss job) and returns immediately; Phase 2 is the worker processing activities sequentially and updating SyncJob progress. Durable (survives restarts) and retryable.
+
+**Single-flight** — The guard that ensures only one sync job per user can be queued or running at a time. Prevents duplicate API calls, wasted Strava rate limit, and confusing UI state.
+
+**Idempotent resume** — When a sync worker retries after a crash, it reads `SyncJob.processed` and skips already-processed activities. No duplicate writes or Strava calls.

@@ -56,6 +56,16 @@ Strava access tokens expire (typically 6 hours). Before any Strava API call that
 
 ---
 
+## Paginated Activity Fetch
+
+For **initial / background sync**, we fetch the full activity list with **pagination**. Strava returns at most **200 activities per page**. We call `GET /athlete/activities` with `page=1`, then `page=2`, and so on until a page returns fewer than 200 items (or empty). This ensures users with 200+ activities get an accurate total and progress (e.g. "45 of 312 processed"). Without pagination, only the first 200 would be synced and the progress bar would be wrong.
+
 ## Rate limits
 
 Strava enforces **100 requests per 15 minutes** and **1000 per day** (per app). The backend avoids unnecessary calls by storing activity coordinates and reusing them for processing. Token refresh and activity/stream fetches are the main consumers. If you hit limits, Strava returns 429; the backend should back off and retry (e.g. in the worker) rather than failing permanently.
+
+**Rate limit budget for background sync:** Each activity needs 1–2 Strava API calls (detail + streams). With a **300ms delay** between processing each activity, 30 activities use ~9 seconds of Strava calls; 200 activities use ~60 seconds. This stays within the 100/15min window. The sync worker also re-fetches the access token every 10 activities so long-running jobs do not fail when the token expires.
+
+## Token Refresh in Background Jobs
+
+Background sync jobs can run **minutes** after the HTTP request. Strava access tokens expire in about **6 hours**. Passing a token from the request into the worker would create a time bomb: the job might start with a valid token but hit an expired one mid-run. Therefore the **worker never accepts a token from the request**. It loads credentials from the database and calls **getValidAccessToken(userId)**, which checks expiry (with a 5-minute buffer) and refreshes if needed. The worker also re-fetches the token every 10 activities so that long syncs stay valid. This makes the job **restart-safe**: if the worker retries after a crash, it can still obtain a fresh token and continue.

@@ -33,13 +33,18 @@
  */
 
 import { Router, Request, Response } from "express";
+import prisma from "../lib/prisma.js";
 import {
   listActivities,
   getActivityById,
   deleteActivity,
   ActivityNotFoundError,
 } from "../services/activity.service.js";
-import { syncRecentActivities, SyncError } from "../services/sync.service.js";
+import {
+  syncRecentActivities,
+  startBackgroundSync,
+  SyncError,
+} from "../services/sync.service.js";
 import { ERROR_CODES } from "../config/constants.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
 
@@ -54,6 +59,111 @@ const router = Router();
  * The user object is attached to req.user by the middleware.
  */
 router.use(requireAuth);
+
+// ============================================
+// Sync status (must be before /sync to match /sync/status)
+// ============================================
+
+/**
+ * @openapi
+ * /activities/sync/status:
+ *   get:
+ *     summary: Get current background sync status
+ *     description: Returns the latest SyncJob for the user (queued, running, completed, or failed). Used for polling to show progress. Returns idle status if no job exists.
+ *     tags: [Activities]
+ *     security:
+ *       - DevAuth: []
+ *     responses:
+ *       200:
+ *         description: Sync job status (active job) or idle status (no job)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 syncId:
+ *                   type: string
+ *                   format: uuid
+ *                   nullable: true
+ *                   description: Job ID if active, null if idle
+ *                 status:
+ *                   type: string
+ *                   enum: [queued, running, completed, failed, idle]
+ *                 type:
+ *                   type: string
+ *                   enum: [initial, incremental]
+ *                   nullable: true
+ *                 total:
+ *                   type: integer
+ *                 processed:
+ *                   type: integer
+ *                 skipped:
+ *                   type: integer
+ *                 errors:
+ *                   type: integer
+ *                 lastErrorMessage:
+ *                   type: string
+ *                   nullable: true
+ *                 updatedAt:
+ *                   type: string
+ *                   format: date-time
+ *                   nullable: true
+ */
+router.get("/sync/status", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+
+  try {
+    const job = await prisma.syncJob.findFirst({
+      where: { userId },
+      orderBy: { startedAt: "desc" },
+      select: {
+        id: true,
+        status: true,
+        type: true,
+        total: true,
+        processed: true,
+        skipped: true,
+        errors: true,
+        lastErrorMessage: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!job) {
+      res.status(200).json({
+        syncId: null,
+        status: "idle",
+        type: null,
+        total: 0,
+        processed: 0,
+        skipped: 0,
+        errors: 0,
+        lastErrorMessage: null,
+        updatedAt: null,
+      });
+      return;
+    }
+
+    res.status(200).json({
+      syncId: job.id,
+      status: job.status,
+      type: job.type,
+      total: job.total,
+      processed: job.processed,
+      skipped: job.skipped,
+      errors: job.errors,
+      lastErrorMessage: job.lastErrorMessage,
+      updatedAt: job.updatedAt.toISOString(),
+    });
+  } catch (err) {
+    console.error("[Activities] GET /sync/status error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
 
 // ============================================
 // Sync from Strava (must be before /:id to avoid "sync" as id)
@@ -126,6 +236,7 @@ router.use(requireAuth);
  */
 router.post("/sync", async (req: Request, res: Response) => {
   const userId = req.user!.id;
+  const background = req.query.background === "true";
 
   const after = req.query.after
     ? parseInt(req.query.after as string, 10)
@@ -166,6 +277,21 @@ router.post("/sync", async (req: Request, res: Response) => {
   }
 
   try {
+    if (background) {
+      console.log(`[Activities] POST /sync?background=true — user: ${userId.slice(0, 8)}…`);
+      const result = await startBackgroundSync(userId, {
+        after: after ?? undefined,
+        before: before ?? undefined,
+      });
+      res.status(200).json({
+        success: true,
+        syncId: result.syncId,
+        total: result.total,
+        status: result.status,
+      });
+      return;
+    }
+
     console.log(`[Activities] POST /sync — user: ${userId.slice(0, 8)}… after: ${after ?? "default"}, perPage: ${perPage ?? "default"}`);
     const result = await syncRecentActivities(userId, {
       after: after ? after : undefined,
@@ -203,6 +329,15 @@ router.post("/sync", async (req: Request, res: Response) => {
           success: false,
           error: err.message,
           code: ERROR_CODES.AUTH_TOKEN_EXPIRED,
+        });
+        return;
+      }
+      if (err.code === "SYNC_RATE_LIMITED") {
+        res.status(429).json({
+          success: false,
+          error: err.message,
+          code: ERROR_CODES.SYNC_RATE_LIMITED,
+          nextSyncAt: err.nextSyncAt?.toISOString(),
         });
         return;
       }

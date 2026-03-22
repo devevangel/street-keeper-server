@@ -80,6 +80,7 @@ export const ERROR_CODES = {
   ACTIVITY_NOT_FOUND: "ACTIVITY_NOT_FOUND",
   ACTIVITY_ALREADY_EXISTS: "ACTIVITY_ALREADY_EXISTS",
   ACTIVITY_PROCESSING_FAILED: "ACTIVITY_PROCESSING_FAILED",
+  SYNC_RATE_LIMITED: "SYNC_RATE_LIMITED",
 
   // Map errors
   MAP_INVALID_COORDINATES: "MAP_INVALID_COORDINATES",
@@ -414,6 +415,11 @@ export const ACTIVITIES = {
    * Prevents processing very old backlog if webhook was delayed
    */
   MAX_AGE_DAYS: 30,
+
+  /**
+   * Minimum hours between manual Strava syncs (CityStrides-style once per day).
+   */
+  SYNC_COOLDOWN_HOURS: 24,
 } as const;
 
 // ============================================
@@ -478,6 +484,11 @@ export const QUEUE = {
   ACTIVITY_PROCESSING: "activity-processing",
 
   /**
+   * Queue name for background Strava sync (onboarding / initial import)
+   */
+  BACKGROUND_SYNC: "background-sync",
+
+  /**
    * Number of concurrent jobs to process
    * Reduced to 2 to avoid Overpass rate limits during sync
    */
@@ -493,10 +504,23 @@ export const QUEUE = {
   },
 
   /**
+   * Sync job retry (longer delay for Strava/Overpass)
+   */
+  SYNC_RETRY: {
+    MAX_ATTEMPTS: 3,
+    DELAY_SECONDS: 30,
+  },
+
+  /**
    * Job timeout in milliseconds
    * Jobs taking longer than this are considered failed
    */
   JOB_TIMEOUT_MS: 120000, // 2 minutes (allows for slow Overpass)
+
+  /**
+   * Sync job timeout (initial sync can have many activities)
+   */
+  SYNC_JOB_TIMEOUT_MS: 600000, // 10 minutes
 } as const;
 
 // ============================================

@@ -37,6 +37,33 @@ model User {
   nodeHits       UserNodeHit[]
   milestones     UserMilestone[]
   preferences    UserPreferences?
+  syncJobs       SyncJob[]
+}
+
+// ============================================
+// SyncJob Model (background Strava sync)
+// ============================================
+
+model SyncJob {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status           String    @default("queued") // "queued" | "running" | "completed" | "failed"
+  type             String    @default("initial") // "initial" | "incremental"
+  total            Int       @default(0)
+  processed        Int       @default(0)
+  skipped          Int       @default(0)
+  errors           Int       @default(0)
+  lastErrorMessage String?
+  /** Unix timestamp (seconds) - fetch activities after this time. Used by worker to re-fetch list. */
+  after            Int?
+  /** Unix timestamp (seconds) - fetch activities before this time. */
+  before           Int?
+  startedAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  completedAt      DateTime?
+
+  @@index([userId])
 }
 
 // ============================================
@@ -439,7 +466,7 @@ model UserPreferences {
   distanceUnit         String @default("km") // "km" | "miles" | "meters"
   theme                String @default("system") // "dark" | "light" | "system"
   dateFormat           String @default("short") // "short" | "long" | "numeric"
-  mapStyle             String @default("standard") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
+  mapStyle             String @default("satellite") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
   defaultMapZoom       Int    @default(15) // 13-19
   defaultProjectRadius Int    @default(300) // meters
   defaultStreetFilter  String @default("all") // "all" | "completed" | "inProgress" | "notStarted"

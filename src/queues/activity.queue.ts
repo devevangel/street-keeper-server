@@ -182,8 +182,13 @@ async function initializeBoss(): Promise<PgBoss> {
     console.error("[Queue] pg-boss error:", error.message);
   });
 
-  // Start the boss (creates tables if needed)
+  // Start the boss (creates internal tables if needed)
   await newBoss.start();
+  
+  // pg-boss v10+ requires explicit queue creation before workers can subscribe
+  await newBoss.createQueue(QUEUE.ACTIVITY_PROCESSING);
+  await newBoss.createQueue(QUEUE.BACKGROUND_SYNC);
+  console.log("[Queue] Created queues: activity-processing, background-sync");
   
   boss = newBoss;
   console.log("[Queue] pg-boss queue initialized successfully");
@@ -225,6 +230,19 @@ export function getQueueError(): Error | null {
  * Workers subscribe to this queue to process jobs.
  */
 const ACTIVITY_QUEUE_NAME = QUEUE.ACTIVITY_PROCESSING;
+
+/**
+ * Queue name for background Strava sync (onboarding / initial import)
+ */
+const SYNC_QUEUE_NAME = QUEUE.BACKGROUND_SYNC;
+
+/**
+ * Payload for background sync job (worker receives this)
+ */
+export interface SyncJobPayload {
+  syncJobId: string;
+  userId: string;
+}
 
 /**
  * Add an activity processing job to the queue
@@ -294,6 +312,65 @@ export async function addActivityProcessingJob(
   }
 
   return jobId;
+}
+
+/**
+ * Add a background sync job to the queue
+ *
+ * Single-flight per user via singletonKey. Used by onboarding / initial import.
+ */
+export async function addSyncJob(payload: SyncJobPayload): Promise<string | null> {
+  const bossInstance = await getBoss();
+
+  if (!bossInstance) {
+    console.warn("[Queue] Queue is disabled, sync job not queued");
+    throw new QueueUnavailableError("Queue is disabled");
+  }
+
+  const jobId = await bossInstance.send(
+    SYNC_QUEUE_NAME,
+    payload,
+    {
+      singletonKey: `sync-${payload.userId}`,
+      expireInSeconds: QUEUE.SYNC_JOB_TIMEOUT_MS / 1000,
+      retryLimit: QUEUE.SYNC_RETRY.MAX_ATTEMPTS,
+      retryDelay: QUEUE.SYNC_RETRY.DELAY_SECONDS,
+      retryBackoff: true,
+    }
+  );
+
+  if (jobId) {
+    console.log(`[Queue] Added sync job: ${jobId} (user: ${payload.userId.slice(0, 8)})`);
+  }
+
+  return jobId;
+}
+
+/**
+ * Register the sync job worker (processSyncJob handler)
+ */
+export async function registerSyncWorker(
+  handler: (payload: SyncJobPayload) => Promise<void>
+): Promise<string | undefined> {
+  const bossInstance = await getBoss();
+
+  if (!bossInstance) {
+    console.warn("[Queue] Queue is disabled, sync worker not registered");
+    return undefined;
+  }
+
+  const workerId = await bossInstance.work<SyncJobPayload>(
+    SYNC_QUEUE_NAME,
+    { batchSize: 1, pollingIntervalSeconds: 1 },
+    async (jobs) => {
+      for (const job of jobs) {
+        await handler(job.data);
+      }
+    }
+  );
+
+  console.log(`[Queue] Sync worker registered (worker: ${workerId})`);
+  return workerId;
 }
 
 /**

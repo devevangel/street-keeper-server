@@ -6,6 +6,7 @@ import type { StreakData } from "../services/streak.service.js";
 import type { HomepageSuggestion } from "../services/suggestion.service.js";
 import type { MilestoneWithProgress } from "./milestone.types.js";
 import type { UserStats } from "./user-stats.types.js";
+import type { MapStreet } from "./map.types.js";
 
 export type { HeroState, StreakData, HomepageSuggestion };
 
@@ -21,6 +22,8 @@ export interface HomepagePayload {
     radius: number;
     projectId?: string;
   };
+  /** Inlined street segments for the map (same data as GET /map/streets). Omitted when no real location. */
+  mapSegments?: MapStreet[];
   /** Last run summary – set whenever user has any processed activity (so homepage can show "Last run: X days ago · Y km"). */
   lastRun?: {
     date: string; // ISO

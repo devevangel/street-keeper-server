@@ -121,6 +121,40 @@
 
 ---
 
+## Background Sync (Onboarding)
+
+**When:** New user completes Strava OAuth and has no activities; onboarding modal reaches step 3 "Syncing your runs."
+
+**Test flow:**
+
+| Step | User action | What happens | API endpoint |
+|------|-------------|--------------|--------------|
+| 1 | User reaches sync step | Frontend calls sync with `background=true` | `POST /api/v1/activities/sync?background=true` |
+| 2 | Backend | Duplicate guard; paginated Strava fetch (all pages); create SyncJob; enqueue pg-boss job; return immediately | Returns `{ success, syncId, total, status: "queued" }` |
+| 3 | After ~4s | Onboarding modal closes; user is navigated to homepage | — |
+| 4 | Homepage | SyncBanner appears: "Preparing to sync…" then "Syncing your runs… X of Y processed" with progress bar | Frontend polls `GET /api/v1/activities/sync/status` every 3s while status is queued/running |
+| 5 | Worker | Processes activities sequentially (300ms delay); updates SyncJob after each | — |
+| 6 | Sync completes | Banner shows "Sync complete! N activities synced."; auto-dismisses after 5s; map refetches streets | Status transitions to `completed`; frontend triggers map + homepage refetch once |
+
+**Empty database test:** Reset DB (e.g. `npm run db:reset`). Log in as new user. Homepage loads with base map and zero streets; no errors. Start onboarding; after background sync starts, homepage shows SyncBanner and streets appear progressively as sync runs.
+
+---
+
+## Returning User Test Flow
+
+**When:** User who already has activities logs in again (e.g. different device, or cleared localStorage).
+
+| Step | User action | What happens | API endpoint |
+|------|-------------|--------------|--------------|
+| 1 | User completes Strava OAuth | Redirect to `/auth/callback?userId=...` | — |
+| 2 | Callback page | Sets user; fetches activity count | `GET /api/v1/activities?page=1&pageSize=1` (uses `total`) |
+| 3 | If total > 0 | User is treated as returning; navigate to HOME immediately; onboarding is skipped | — |
+| 4 | If total === 0 | Check localStorage; if onboarding not completed, show onboarding; otherwise go HOME | — |
+
+**Test:** Clear localStorage, log in with an account that has synced activities. You should land on the homepage with no onboarding modal.
+
+---
+
 ## Strava Sync
 
 ### Trigger: "Sync from Strava" button on homepage
