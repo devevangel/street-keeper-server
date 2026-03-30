@@ -1192,7 +1192,41 @@ export async function getProjectMapData(
     }
   }
   quickWins.sort((a, b) => b.percentage - a.percentage);
-  const quickWinsSlice = quickWins.slice(0, 5);
+  let quickWinsSlice = quickWins.slice(0, 5);
+
+  if (quickWins.length === 0) {
+    let bestKey: string | null = null;
+    let bestPct = -1;
+    for (const [key, data] of streetDataByName) {
+      if (
+        data.percentage > 0 &&
+        data.percentage < 100 &&
+        data.percentage > bestPct
+      ) {
+        bestPct = data.percentage;
+        bestKey = key;
+      }
+    }
+    if (bestKey != null) {
+      const segments = segmentsByName.get(bestKey) ?? [];
+      const data = streetDataByName.get(bestKey);
+      const remainingMeters = segments.reduce(
+        (sum, s) => sum + s.lengthMeters * (1 - s.percentage / 100),
+        0
+      );
+      const firstSegment = segments[0];
+      if (firstSegment && data) {
+        quickWinsSlice = [
+          {
+            osmId: firstSegment.osmId,
+            name: firstSegment.name || "Unnamed",
+            percentage: data.percentage,
+            remainingMeters: Math.round(remainingMeters),
+          },
+        ];
+      }
+    }
+  }
 
   const mapData: ProjectMapData = {
     id: project.id,

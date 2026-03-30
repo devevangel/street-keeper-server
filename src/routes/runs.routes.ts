@@ -152,10 +152,6 @@ router.post(
 
       const gpxData = parseGpxBuffer(req.file.buffer);
 
-      console.log(
-        `[GPX] Parsed ${gpxData.points.length} points from "${gpxData.name || "unnamed"}"`
-      );
-
       // ========================================
       // Step 2: Calculate run statistics
       // ========================================
@@ -165,10 +161,6 @@ router.post(
       const totalDistance = calculateTotalDistance(gpxData.points);
       const duration = calculateDuration(gpxData.points);
 
-      console.log(
-        `[GPX] Run stats: ${totalDistance.toFixed(0)}m, ${duration}s`
-      );
-
       // ========================================
       // Step 3: Calculate bounding box
       // ========================================
@@ -176,10 +168,6 @@ router.post(
       // Used to query only relevant streets from OpenStreetMap
 
       const bbox = calculateBoundingBox(gpxData.points);
-
-      console.log(
-        `[GPX] Bounding box: ${bbox.south.toFixed(4)},${bbox.west.toFixed(4)} to ${bbox.north.toFixed(4)},${bbox.east.toFixed(4)}`
-      );
 
       // ========================================
       // Step 4: Query streets from OpenStreetMap
@@ -202,16 +190,10 @@ router.post(
       const useHybrid = isMapboxConfigured();
 
       if (useHybrid) {
-        console.log("[GPX] Using hybrid Mapbox + Overpass matching");
         matchedStreets = await matchPointsToStreetsHybrid(gpxData.points, streets);
       } else {
-        console.log("[GPX] Using Overpass-only matching (Mapbox not configured)");
         matchedStreets = matchPointsToStreets(gpxData.points, streets);
       }
-
-      console.log(
-        `[GPX] Matched ${matchedStreets.length} streets (${matchedStreets.filter((s) => s.completionStatus === "FULL").length} full, ${matchedStreets.filter((s) => s.completionStatus === "PARTIAL").length} partial)`
-      );
 
       // ========================================
       // Step 5b: Safety net - Filter streets with too few points
@@ -224,13 +206,6 @@ router.post(
         (s) => s.matchedPointsCount >= STREET_MATCHING.MIN_POINTS_PER_STREET
       );
 
-      if (filteredMatchedStreets.length < matchedStreets.length) {
-        const removed = matchedStreets.length - filteredMatchedStreets.length;
-        console.log(
-          `[GPX] Filtered out ${removed} street(s) with < ${STREET_MATCHING.MIN_POINTS_PER_STREET} matched points`
-        );
-      }
-
       // ========================================
       // Step 6: Aggregate segments into logical streets (Phase 4)
       // ========================================
@@ -240,10 +215,6 @@ router.post(
 
       const aggregationResult = aggregateSegmentsIntoLogicalStreets(
         filteredMatchedStreets
-      );
-
-      console.log(
-        `[GPX] Aggregated into ${aggregationResult.streets.length} logical streets, ${aggregationResult.unnamedBuckets.length} unnamed road buckets`
       );
 
       // ========================================

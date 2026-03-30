@@ -165,7 +165,7 @@ export async function getStreak(userId: string, timezone = "UTC"): Promise<Strea
     if (i + 1 < sortedWeeks.length) {
       const thisStart = new Date(sortedWeeks[i]).getTime();
       const nextStart = new Date(sortedWeeks[i + 1]).getTime();
-      if (nextStart < thisStart - oneWeekMs - 1) {
+      if (nextStart > thisStart + oneWeekMs + 1) {
         longestStreak = Math.max(longestStreak, run);
         run = 0;
       }

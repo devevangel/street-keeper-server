@@ -1,15 +1,27 @@
 /**
- * Homepage aggregation: single payload (hero, streak, suggestion, milestone, mapContext).
+ * Homepage aggregation: single payload (suggestion, milestone, mapContext).
  * Resolves context: projectId > lat/lng > last viewed > null.
  */
 import prisma from "../lib/prisma.js";
-import { getStreak } from "./streak.service.js";
 import { getNextMilestone } from "./milestone.service.js";
-import { getHeroState } from "./hero.service.js";
 import { getHomepageSuggestions, getNearestShortStreet } from "./suggestion.service.js";
-import type { HomepagePayload } from "../types/homepage.types.js";
+import type { HomepagePayload, UserState } from "../types/homepage.types.js";
 
 const DEFAULT_RADIUS = 1200;
+
+function computeUserState(
+  activityCount: number,
+  activeSyncJob: boolean,
+  activeProjectCount: number,
+  anyProjectHasProgress: boolean,
+): UserState {
+  if (activityCount === 0) {
+    return activeSyncJob ? "syncing" : "brand_new";
+  }
+  if (activeProjectCount === 0) return "has_runs_no_project";
+  if (!anyProjectHasProgress) return "project_processing";
+  return "active";
+}
 
 export async function getHomepageData(
   userId: string,
@@ -56,12 +68,10 @@ export async function getHomepageData(
     mapLng = prefs.lastViewedLng;
     mapRadius = prefs.lastViewedRadius ?? DEFAULT_RADIUS;
   } else if (userLatNum != null && userLngNum != null && !Number.isNaN(userLatNum) && !Number.isNaN(userLngNum)) {
-    // New user with no preferences — use their browser geolocation as map center
     mapLat = userLatNum;
     mapLng = userLngNum;
     mapRadius = DEFAULT_RADIUS;
   } else {
-    // Last resort: try to infer location from the user's most recent activity
     const recentActivity = await prisma.activity.findFirst({
       where: { userId },
       orderBy: { startDate: "desc" },
@@ -78,11 +88,15 @@ export async function getHomepageData(
     mapRadius = DEFAULT_RADIUS;
   }
 
-  const timezone = prefs?.timezone ?? "UTC";
-
-  const [streakData, nextMilestone, lastActivity, activityCount, user, favoriteStreetsRows, totalDistanceResult, progressCounts] = await Promise.all([
-    getStreak(userId, timezone),
-    getNextMilestone(userId, contextProjectId),
+  const [
+    lastActivity,
+    activityCount,
+    user,
+    activeSyncJob,
+    activeProjectCount,
+    projectsWithProgressCount,
+    totalDistanceResult,
+  ] = await Promise.all([
     prisma.activity.findFirst({
       where: { userId, isProcessed: true },
       orderBy: { startDate: "desc" },
@@ -97,27 +111,30 @@ export async function getHomepageData(
       where: { id: userId },
       select: { name: true, createdAt: true },
     }),
-    prisma.userStreetProgress.findMany({
-      where: { userId },
-      orderBy: { runCount: "desc" },
-      take: 5,
-      select: { name: true, runCount: true },
+    prisma.syncJob.findFirst({
+      where: { userId, status: { in: ["queued", "running"] } },
+      select: { id: true },
+    }),
+    prisma.project.count({
+      where: { userId, isArchived: false },
+    }),
+    prisma.project.count({
+      where: { userId, isArchived: false, completedStreets: { gt: 0 } },
     }),
     prisma.activity.aggregate({
       where: { userId },
       _sum: { distanceMeters: true },
     }),
-    prisma.userStreetProgress.groupBy({
-      by: ["runCount"],
-      where: { userId },
-      _count: true,
-    }),
   ]);
 
+  const userState = computeUserState(
+    activityCount,
+    activeSyncJob != null,
+    activeProjectCount,
+    projectsWithProgressCount > 0,
+  );
+
   const lastActivityDate = lastActivity?.startDate ?? null;
-  const hasAnyActivity = activityCount > 0;
-  const isNewUser = !hasAnyActivity;
-  const isFirstRunRecent = activityCount === 1 && lastActivityDate != null;
   const daysSinceLast =
     lastActivityDate != null
       ? Math.floor(
@@ -131,33 +148,21 @@ export async function getHomepageData(
     ) ?? 0;
 
   const distanceKm =
-    Math.round((lastActivity?.distanceMeters ?? 0) / 1000) / 100;
-
-  const hero = getHeroState({
-    streak: streakData,
-    nextMilestone,
-    lastActivityDate,
-    hasAnyActivity,
-    isFirstRunRecent: isFirstRunRecent && daysSinceLast != null && daysSinceLast <= 1,
-    lastRunNewStreets,
-    lastRunDistanceKm: distanceKm,
-    daysSinceLast,
-  });
+    Math.round(((lastActivity?.distanceMeters ?? 0) / 1000) * 100) / 100;
 
   const hasRealLocation = mapLat !== 0 || mapLng !== 0;
   const suggestions = hasRealLocation
-    ? await getHomepageSuggestions(
-        userId,
-        {
-          projectId: contextProjectId,
-          lat: mapLat,
-          lng: mapLng,
-          radius: mapRadius,
-        },
-        streakData,
-        nextMilestone
-      )
-    : { primary: null, alternates: [] };
+    ? await getHomepageSuggestions(userId, {
+        projectId: contextProjectId,
+        lat: mapLat,
+        lng: mapLng,
+        radius: mapRadius,
+      })
+    : null;
+
+  const nextMilestone = suggestions
+    ? suggestions.nextMilestone
+    : await getNextMilestone(userId, contextProjectId);
 
   const lastRun =
     lastActivityDate != null && lastActivity != null
@@ -169,50 +174,30 @@ export async function getHomepageData(
         }
       : undefined;
 
-  const recentHighlights =
-    lastActivityDate != null && daysSinceLast != null && daysSinceLast <= 7
-      ? {
-          newStreets: lastRunNewStreets,
-          distanceKm,
-        }
-      : undefined;
-
-  // For new users, find the nearest short street if we have their location
   let firstStreet = undefined;
-  if (isNewUser && userLatNum != null && userLngNum != null && !Number.isNaN(userLatNum) && !Number.isNaN(userLngNum)) {
+  if (
+    (userState === "brand_new" || userState === "has_runs_no_project") &&
+    userLatNum != null &&
+    userLngNum != null &&
+    !Number.isNaN(userLatNum) &&
+    !Number.isNaN(userLngNum)
+  ) {
     firstStreet = await getNearestShortStreet(userLatNum, userLngNum, 500);
   }
 
-  const totalDistanceKm = totalDistanceResult._sum.distanceMeters != null
-    ? Math.round((totalDistanceResult._sum.distanceMeters / 1000) * 100) / 100
-    : 0;
-  const newStreetCount = progressCounts.find((g) => g.runCount === 1)?._count ?? 0;
-  const revisitStreetCount = progressCounts
-    .filter((g) => g.runCount > 1)
-    .reduce((sum, g) => sum + g._count, 0);
-  const newVsRevisitRatio = revisitStreetCount > 0 ? newStreetCount / revisitStreetCount : (newStreetCount > 0 ? 2 : 1);
-  const explorationStyle =
-    newVsRevisitRatio >= 2 ? "trailblazer" : newVsRevisitRatio <= 0.5 ? "habitual" : "balanced";
-
-  const userStats = {
-    totalActivities: activityCount,
-    totalDistanceKm,
-    accountCreatedAt: user?.createdAt?.toISOString() ?? new Date().toISOString(),
-    favoriteStreets: favoriteStreetsRows.map((r) => ({ name: r.name, runCount: r.runCount })),
-    explorationStyle,
-    newVsRevisitRatio: Math.round(newVsRevisitRatio * 100) / 100,
-  };
-
   const mapSegments =
-    "mapStreetsResponse" in suggestions && suggestions.mapStreetsResponse?.segments?.length
+    suggestions?.mapStreetsResponse?.segments?.length
       ? suggestions.mapStreetsResponse.segments
       : undefined;
 
+  const totalDistanceKm =
+    userState === "has_runs_no_project"
+      ? Math.round(((totalDistanceResult._sum.distanceMeters ?? 0) / 1000) * 100) / 100
+      : undefined;
+
   const payload: HomepagePayload = {
-    hero,
-    streak: streakData,
-    primarySuggestion: suggestions.primary,
-    alternates: suggestions.alternates,
+    primarySuggestion: suggestions?.primary ?? null,
+    alternates: suggestions?.alternates ?? [],
     nextMilestone,
     mapContext: {
       lat: mapLat,
@@ -222,11 +207,13 @@ export async function getHomepageData(
     },
     ...(mapSegments && mapSegments.length > 0 && { mapSegments }),
     ...(lastRun && { lastRun }),
-    ...(recentHighlights && { recentHighlights }),
-    isNewUser,
+    userState,
+    ...(userState === "has_runs_no_project" && {
+      totalActivities: activityCount,
+      totalDistanceKm,
+    }),
     userName: user?.name,
     ...(firstStreet && { firstStreet }),
-    userStats,
   };
 
   return payload;

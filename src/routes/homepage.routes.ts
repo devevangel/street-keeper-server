@@ -1,7 +1,7 @@
 /**
  * Homepage API – single aggregated payload
  *
- * GET /homepage – returns hero, streak, primarySuggestion, alternates, nextMilestone, mapContext, recentHighlights
+ * GET /homepage – returns primarySuggestion, alternates, nextMilestone, mapContext, lastRun, etc.
  */
 import { Router, Request, Response } from "express";
 import { requireAuth } from "../middleware/auth.middleware.js";
@@ -15,7 +15,7 @@ router.use(requireAuth);
  * @openapi
  * /homepage:
  *   get:
- *     summary: Get homepage payload (hero, streak, suggestion, milestone, mapContext)
+ *     summary: Get homepage payload (suggestion, milestone, mapContext)
  *     parameters:
  *       - in: query
  *         name: lat
@@ -40,9 +40,7 @@ router.get("/", async (req: Request, res: Response): Promise<void> => {
     userLat: req.query.userLat as string | undefined,
     userLng: req.query.userLng as string | undefined,
   };
-  console.log(`[Homepage] GET / — user: ${userId.slice(0, 8)}… lat: ${query.lat ?? "-"}, lng: ${query.lng ?? "-"}`);
   const data = await getHomepageData(userId, query);
-  console.log(`[Homepage] GET / — hero: ${data.hero?.type ?? "none"}, suggestion: ${data.primarySuggestion?.type ?? "none"}`);
   res.json({ success: true, data });
 });
 

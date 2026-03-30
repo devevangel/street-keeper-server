@@ -8,6 +8,8 @@ import prisma from "../lib/prisma.js";
 import { getProjectById, getProjectMapData } from "./project.service.js";
 import { getMapStreets, getGeometriesInArea } from "./map.service.js";
 import { pointToLineDistance } from "./geo.service.js";
+import { getStreak } from "./streak.service.js";
+import { getNextMilestone } from "./milestone.service.js";
 import type { ProjectMapStreet } from "../types/project.types.js";
 import type { MapStreet, MapStreetsResponse } from "../types/map.types.js";
 import type { StreakData } from "./streak.service.js";
@@ -43,6 +45,8 @@ export interface HomepageSuggestionsResult {
 /** Result of getHomepageSuggestions when area context is used; includes map data to avoid a second GET /map/streets. */
 export type HomepageSuggestionsWithMap = HomepageSuggestionsResult & {
   mapStreetsResponse?: MapStreetsResponse;
+  /** Same milestone as used for milestone_push suggestions (single fetch for homepage payload). */
+  nextMilestone: MilestoneWithProgress | null;
 };
 
 export interface StreetSuggestion {
@@ -164,8 +168,8 @@ export async function getSuggestions(
   const centerLat = mapData.centerLat;
   const centerLng = mapData.centerLng;
   const useRef = refLat != null && refLng != null;
-  const refPointLat = useRef ? refLat : centerLat;
-  const refPointLng = useRef ? refLng : centerLng;
+  const refPointLat = useRef ? refLat : (centerLat ?? 0);
+  const refPointLng = useRef ? refLng : (centerLng ?? 0);
 
   const currentProgressPct =
     project.totalStreets > 0
@@ -387,6 +391,157 @@ function mapStreetToBbox(street: MapStreet): [number, number, number, number] {
     : ([0, 0, 0, 0] as [number, number, number, number]);
 }
 
+/** Distance from map center to street midpoint (same heuristic as explore sorting). */
+function distanceMapStreetToPoint(
+  street: MapStreet,
+  centerLat: number,
+  centerLng: number,
+): number {
+  const coords = street.geometry?.coordinates ?? [];
+  if (coords.length === 0) return Infinity;
+  const mid = Math.floor(coords.length / 2);
+  const [lng, lat] = coords[mid] ?? [0, 0];
+  return haversineMeters(centerLat, centerLng, lat, lng);
+}
+
+/**
+ * Tiered ladder for area-only map suggestions. Returns one candidate or null.
+ * Tries 500m radius first, then caller may retry with 1000m.
+ */
+function findBestCandidate(
+  streets: MapStreet[],
+  centerLat: number,
+  centerLng: number,
+  maxDistM: number,
+): HomepageSuggestion | null {
+  const withDist = streets.map((street) => ({
+    street,
+    dist: distanceMapStreetToPoint(street, centerLat, centerLng),
+  }));
+  const inBand = withDist.filter((x) => x.dist <= maxDistM);
+  const pickNearest = (items: typeof withDist): (typeof withDist)[0] | undefined =>
+    [...items].sort((a, b) => a.dist - b.dist)[0];
+
+  // 1. Near + almost done: 75–100%, remaining ≤200m
+  const tier1 = inBand.filter(({ street: s }) => {
+    if (s.percentage < 75 || s.percentage >= 100) return false;
+    const remaining = s.lengthMeters * (1 - s.percentage / 100);
+    return remaining <= 200;
+  });
+  const w1 = pickNearest(tier1);
+  if (w1) {
+    const s = w1.street;
+    const rem = Math.round(s.lengthMeters * (1 - s.percentage / 100));
+    const bbox = mapStreetToBbox(s);
+    const coords = s.geometry?.coordinates ?? [];
+    return {
+      type: "quick_win",
+      title: s.name,
+      shortCopy: `${rem}m left to finish · ${Math.round(s.percentage)}% done`,
+      cooldownKey: `quick_win:street:${s.osmId}`,
+      reason: `${rem}m left on ${s.name}`,
+      focus: {
+        bbox,
+        streetIds: [osmIdToNum(s.osmId)],
+        startPoint:
+          coords[0] != null
+            ? { lat: coords[0][1], lng: coords[0][0] }
+            : undefined,
+      },
+    };
+  }
+
+  // 2. Near + any progress: 0–100%, length 50–500m
+  const tier2 = inBand.filter(
+    ({ street: s }) =>
+      s.percentage > 0 &&
+      s.percentage < 100 &&
+      s.lengthMeters >= 50 &&
+      s.lengthMeters <= 500,
+  );
+  const w2 = pickNearest(tier2);
+  if (w2) {
+    const s = w2.street;
+    const pct = Math.round(s.percentage);
+    const bbox = mapStreetToBbox(s);
+    const coords = s.geometry?.coordinates ?? [];
+    return {
+      type: "quick_win",
+      title: s.name,
+      shortCopy: `${Math.round(s.lengthMeters)}m long · you're at ${pct}%`,
+      cooldownKey: `quick_win:street:${s.osmId}`,
+      reason: `In progress on ${s.name}`,
+      focus: {
+        bbox,
+        streetIds: [osmIdToNum(s.osmId)],
+        startPoint:
+          coords[0] != null
+            ? { lat: coords[0][1], lng: coords[0][0] }
+            : undefined,
+      },
+    };
+  }
+
+  // 3. Unrun, good length: 100–500m
+  const tier3 = inBand.filter(
+    ({ street: s }) =>
+      s.percentage === 0 &&
+      s.lengthMeters >= 100 &&
+      s.lengthMeters <= 500,
+  );
+  const w3 = pickNearest(tier3);
+  if (w3) {
+    const s = w3.street;
+    const len = Math.round(s.lengthMeters);
+    const bbox = mapStreetToBbox(s);
+    const coords = s.geometry?.coordinates ?? [];
+    return {
+      type: "explore",
+      title: s.name,
+      shortCopy: `${len}m long · new street for you`,
+      cooldownKey: `explore:street:${s.osmId}`,
+      reason: `Discover ${s.name}`,
+      focus: {
+        bbox,
+        streetIds: [osmIdToNum(s.osmId)],
+        startPoint:
+          coords[0] != null
+            ? { lat: coords[0][1], lng: coords[0][0] }
+            : undefined,
+      },
+    };
+  }
+
+  // 4. Unrun, any reasonable length: >50m
+  const tier4 = inBand.filter(
+    ({ street: s }) => s.percentage === 0 && s.lengthMeters > 50,
+  );
+  const w4 = pickNearest(tier4);
+  if (w4) {
+    const s = w4.street;
+    const len = Math.round(s.lengthMeters);
+    const bbox = mapStreetToBbox(s);
+    const coords = s.geometry?.coordinates ?? [];
+    return {
+      type: "explore",
+      title: s.name,
+      shortCopy: `${len}m long · nearby`,
+      cooldownKey: `explore:street:${s.osmId}`,
+      reason: `Discover ${s.name}`,
+      focus: {
+        bbox,
+        streetIds: [osmIdToNum(s.osmId)],
+        startPoint:
+          coords[0] != null
+            ? { lat: coords[0][1], lng: coords[0][0] }
+            : undefined,
+      },
+    };
+  }
+
+  return null;
+}
+
 /**
  * Get homepage suggestions: one primary + up to 2 alternates.
  * Fallback ladder: streak_saver > quick_win > milestone_push > repeat_street > explore > null.
@@ -401,9 +556,17 @@ export async function getHomepageSuggestions(
     lng?: number;
     radius?: number;
   },
-  streakData: StreakData,
-  nextMilestone: MilestoneWithProgress | null
 ): Promise<HomepageSuggestionsWithMap> {
+  const prefs = await prisma.userPreferences.findUnique({
+    where: { userId },
+    select: { timezone: true },
+  });
+  const timezone = prefs?.timezone ?? "UTC";
+  const [streakData, nextMilestone] = await Promise.all([
+    getStreak(userId, timezone),
+    getNextMilestone(userId, context.projectId),
+  ]);
+
   const candidates: HomepageSuggestion[] = [];
   let mapStreetsResponse: MapStreetsResponse | undefined;
 
@@ -427,26 +590,58 @@ export async function getHomepageSuggestions(
     context.radius != null &&
     (context.lat !== 0 || context.lng !== 0)
   ) {
-    const mapResult = await getMapStreets(
-      userId,
-      context.lat,
-      context.lng,
-      context.radius,
-    );
+    const [mapResult, rawGeometries] = await Promise.all([
+      getMapStreets(userId, context.lat, context.lng, context.radius),
+      getGeometriesInArea(context.lat, context.lng, context.radius),
+    ]);
     mapStreetsResponse = mapResult;
+
+    const progressOsmIds = new Set(mapResult.streets.map((s) => s.osmId));
+    const unrunStreets: MapStreet[] = rawGeometries
+      .filter(
+        (g) =>
+          !progressOsmIds.has(g.osmId) &&
+          g.name &&
+          g.name.trim() !== "" &&
+          g.lengthMeters > 50 &&
+          g.geometry?.coordinates?.length >= 2,
+      )
+      .map((g) => ({
+        osmId: g.osmId,
+        name: g.name,
+        highwayType: g.highwayType,
+        lengthMeters: g.lengthMeters,
+        percentage: 0,
+        status: "partial" as const,
+        geometry: g.geometry,
+        stats: {
+          runCount: 0,
+          completionCount: 0,
+          firstRunDate: null,
+          lastRunDate: null,
+          totalLengthMeters: g.lengthMeters,
+          currentPercentage: 0,
+          everCompleted: false,
+          weightedCompletionRatio: 0,
+          segmentCount: 1,
+          connectorCount: 0,
+        },
+      }));
+
+    const allStreets = [...mapResult.streets, ...unrunStreets];
     buildCandidatesFromMapStreets(
       context.lat,
       context.lng,
       streakData,
-      mapResult.streets,
+      allStreets,
       candidates,
     );
   }
 
   if (candidates.length === 0) {
     return mapStreetsResponse != null
-      ? { primary: null, alternates: [], mapStreetsResponse }
-      : { primary: null, alternates: [] };
+      ? { primary: null, alternates: [], mapStreetsResponse, nextMilestone }
+      : { primary: null, alternates: [], nextMilestone };
   }
 
   const filtered: HomepageSuggestion[] = [];
@@ -479,8 +674,8 @@ export async function getHomepageSuggestions(
     .slice(0, 2);
 
   return mapStreetsResponse != null
-    ? { primary, alternates, mapStreetsResponse }
-    : { primary, alternates };
+    ? { primary, alternates, mapStreetsResponse, nextMilestone }
+    : { primary, alternates, nextMilestone };
 }
 
 async function buildCandidatesFromProjectResponse(
@@ -501,8 +696,8 @@ async function buildCandidatesFromProjectResponse(
         : ([0, 0, 0, 0] as [number, number, number, number]);
       candidates.push({
         type: "streak_saver",
-        title: "One short run keeps your streak",
-        shortCopy: `~${(nearest.lengthMeters / 1000).toFixed(1)} km — ${nearest.name}`,
+        title: nearest.name,
+        shortCopy: `${Math.round(nearest.lengthMeters)}m · keep your streak going`,
         cooldownKey: "streak_saver",
         reason: "Streak at risk this week",
         focus: {
@@ -522,8 +717,8 @@ async function buildCandidatesFromProjectResponse(
       : ([0, 0, 0, 0] as [number, number, number, number]);
     candidates.push({
       type: "quick_win",
-      title: `Finish ${almostOne.name}`,
-      shortCopy: `~5 min to complete it — you're at ${Math.round(almostOne.currentProgress)}%`,
+      title: almostOne.name,
+      shortCopy: `${Math.round(almostOne.remainingMeters ?? 0)}m left to finish · ${Math.round(almostOne.currentProgress)}% done`,
       cooldownKey: `quick_win:street:${almostOne.osmId}`,
       reason: `You're at ${Math.round(almostOne.currentProgress)}% on ${almostOne.name}`,
       focus: {
@@ -548,7 +743,7 @@ async function buildCandidatesFromProjectResponse(
       title: `${response.milestone.streetsNeeded} streets to ${nextMilestone.name}`,
       shortCopy: `${response.milestone.streetsNeeded} street(s) to reach ${response.milestone.target}%`,
       cooldownKey: `milestone_push:milestone:${nextMilestone.id}`,
-      reason: `${response.milestone.streetsNeeded} streets to your ${response.milestone.name} milestone`,
+      reason: `${response.milestone.streetsNeeded} streets to your ${nextMilestone.name} milestone`,
       focus: {
         bbox,
         streetIds: streets.map((s) => osmIdToNum(s.osmId)),
@@ -565,8 +760,8 @@ async function buildCandidatesFromProjectResponse(
         : ([0, 0, 0, 0] as [number, number, number, number]);
     candidates.push({
       type: "repeat_street",
-      title: `Run ${r.name} again`,
-      shortCopy: `${r.reason}`,
+      title: r.name,
+      shortCopy: `Run ${(r as unknown as { runCount?: number }).runCount ?? "?"} of 5 · one more to master it`,
       cooldownKey: `repeat_street:street:${r.osmId}`,
       reason: r.reason,
       focus: {
@@ -585,8 +780,8 @@ async function buildCandidatesFromProjectResponse(
       : ([0, 0, 0, 0] as [number, number, number, number]);
     candidates.push({
       type: "explore",
-      title: `Run ${n.name}`,
-      shortCopy: `New street — ${(n.lengthMeters / 1000).toFixed(1)} km`,
+      title: n.name,
+      shortCopy: `${Math.round(n.lengthMeters)}m long · new street for you`,
       cooldownKey: `explore:street:${n.osmId}`,
       reason: `Discover ${n.name}`,
       focus: {
@@ -607,26 +802,35 @@ function buildCandidatesFromMapStreets(
 ): void {
   if (streets.length === 0) return;
 
-  const byPercentage = [...streets].sort((a, b) => b.percentage - a.percentage);
-  const quickWin = byPercentage.find((s) => s.percentage >= 85 && s.percentage < 100);
-  if (quickWin) {
-    const bbox = mapStreetToBbox(quickWin);
-    const coords = quickWin.geometry?.coordinates ?? [];
-    candidates.push({
-      type: "quick_win",
-      title: `Finish ${quickWin.name}`,
-      shortCopy: `~5 min to complete it — you're at ${Math.round(quickWin.percentage)}%`,
-      cooldownKey: `quick_win:street:${quickWin.osmId}`,
-      reason: `You're at ${Math.round(quickWin.percentage)}% on ${quickWin.name}`,
-      focus: {
-        bbox,
-        streetIds: [osmIdToNum(quickWin.osmId)],
-        startPoint:
-          coords[0] != null
-            ? { lat: coords[0][1], lng: coords[0][0] }
-            : undefined,
-      },
-    });
+  // streak_saver and repeat_street run before the tiered ladder
+  if (streakData.isAtRisk && streakData.currentWeeks > 0) {
+    const unrun = streets.filter((s) => s.percentage === 0);
+    if (unrun.length > 0) {
+      const byDist = unrun
+        .map((s) => ({
+          street: s,
+          dist: distanceMapStreetToPoint(s, centerLat, centerLng),
+        }))
+        .sort((a, b) => a.dist - b.dist);
+      const explore = byDist[0].street;
+      const bbox = mapStreetToBbox(explore);
+      const coords = explore.geometry?.coordinates ?? [];
+      candidates.push({
+        type: "streak_saver",
+        title: explore.name,
+        shortCopy: `${Math.round(explore.lengthMeters)}m · keep your streak going`,
+        cooldownKey: "streak_saver",
+        reason: "Streak at risk this week",
+        focus: {
+          bbox,
+          streetIds: [osmIdToNum(explore.osmId)],
+          startPoint:
+            coords[0] != null
+              ? { lat: coords[0][1], lng: coords[0][0] }
+              : undefined,
+        },
+      });
+    }
   }
 
   const repeatStreet = streets.find(
@@ -637,8 +841,8 @@ function buildCandidatesFromMapStreets(
     const coords = repeatStreet.geometry?.coordinates ?? [];
     candidates.push({
       type: "repeat_street",
-      title: `Run ${repeatStreet.name} again`,
-      shortCopy: `${repeatStreet.stats.runCount}/5 runs — one more gets you closer`,
+      title: repeatStreet.name,
+      shortCopy: `Run ${repeatStreet.stats.runCount} of 5 · one more to master it`,
       cooldownKey: `repeat_street:street:${repeatStreet.osmId}`,
       reason: `${repeatStreet.stats.runCount} runs on ${repeatStreet.name}`,
       focus: {
@@ -652,57 +856,11 @@ function buildCandidatesFromMapStreets(
     });
   }
 
-  const unrun = streets.filter((s) => s.percentage === 0);
-  if (unrun.length > 0) {
-    const byDist = unrun
-      .map((s) => {
-        const coords = s.geometry?.coordinates ?? [];
-        const mid =
-          coords.length > 0
-            ? Math.floor(coords.length / 2)
-            : 0;
-        const [lng, lat] = coords[mid] ?? [0, 0];
-        const dist = haversineMeters(centerLat, centerLng, lat, lng);
-        return { street: s, dist };
-      })
-      .sort((a, b) => a.dist - b.dist);
-    const explore = byDist[0].street;
-    const bbox = mapStreetToBbox(explore);
-    const coords = explore.geometry?.coordinates ?? [];
-    if (streakData.isAtRisk && streakData.currentWeeks > 0) {
-      candidates.push({
-        type: "streak_saver",
-        title: "One short run keeps your streak",
-        shortCopy: `~${(explore.lengthMeters / 1000).toFixed(1)} km — ${explore.name}`,
-        cooldownKey: "streak_saver",
-        reason: "Streak at risk this week",
-        focus: {
-          bbox,
-          streetIds: [osmIdToNum(explore.osmId)],
-          startPoint:
-            coords[0] != null
-              ? { lat: coords[0][1], lng: coords[0][0] }
-              : undefined,
-        },
-      });
-    }
-    if (!candidates.some((c) => c.type === "streak_saver")) {
-      candidates.push({
-        type: "explore",
-        title: `Run ${explore.name}`,
-        shortCopy: `New street — ${(explore.lengthMeters / 1000).toFixed(1)} km`,
-        cooldownKey: `explore:street:${explore.osmId}`,
-        reason: `Discover ${explore.name}`,
-        focus: {
-          bbox,
-          streetIds: [osmIdToNum(explore.osmId)],
-          startPoint:
-            coords[0] != null
-              ? { lat: coords[0][1], lng: coords[0][0] }
-              : undefined,
-        },
-      });
-    }
+  const ladder =
+    findBestCandidate(streets, centerLat, centerLng, 500) ??
+    findBestCandidate(streets, centerLat, centerLng, 1000);
+  if (ladder) {
+    candidates.push(ladder);
   }
 }
 
@@ -741,30 +899,31 @@ export async function getNearestShortStreet(
   for (const street of streets) {
     // Skip unnamed streets
     if (!street.name || street.name.trim() === "") continue;
-    
+
+    if (street.lengthMeters < 50 || street.lengthMeters > 500) continue;
+
     // Calculate distance from user point to street line
     const coords = street.geometry.coordinates;
     if (coords.length < 2) continue;
-    
+
     const distanceFromUser = pointToLineDistance(
       { lat: userLat, lng: userLng },
       coords
     );
-    
-    // Only consider streets within 300m of user
-    if (distanceFromUser <= 300) {
+
+    if (distanceFromUser <= radiusMeters) {
       candidates.push({ street, distanceFromUser });
     }
   }
 
   if (candidates.length === 0) return null;
 
-  // Sort by length (shortest first), then by distance (closest first)
+  // Nearest first; tie-break by shorter street length
   candidates.sort((a, b) => {
-    if (a.street.lengthMeters !== b.street.lengthMeters) {
-      return a.street.lengthMeters - b.street.lengthMeters;
+    if (a.distanceFromUser !== b.distanceFromUser) {
+      return a.distanceFromUser - b.distanceFromUser;
     }
-    return a.distanceFromUser - b.distanceFromUser;
+    return a.street.lengthMeters - b.street.lengthMeters;
   });
 
   const shortest = candidates[0].street;

@@ -132,11 +132,7 @@ router.get("/streets", async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    console.log(`[Map] GET /streets — user: ${userId.slice(0, 8)}… lat: ${lat.toFixed(4)}, lng: ${lng.toFixed(4)}, radius: ${radius}, minProgress: ${minPercentage}`);
     const result = await getMapStreets(userId, lat, lng, radius, minPercentage);
-    const streetCount = result.streets?.length ?? 0;
-    const completedCount = result.streets?.filter((s: { status: string }) => s.status === "completed").length ?? 0;
-    console.log(`[Map] GET /streets — returned ${streetCount} streets (${completedCount} completed)`);
     res.json(result);
   } catch (error) {
     console.error("[Map] Error fetching map streets:", error);

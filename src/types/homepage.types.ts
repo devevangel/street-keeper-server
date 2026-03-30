@@ -1,18 +1,20 @@
 /**
  * Homepage payload types (single aggregation response)
  */
-import type { HeroState } from "../services/hero.service.js";
-import type { StreakData } from "../services/streak.service.js";
 import type { HomepageSuggestion } from "../services/suggestion.service.js";
 import type { MilestoneWithProgress } from "./milestone.types.js";
-import type { UserStats } from "./user-stats.types.js";
 import type { MapStreet } from "./map.types.js";
 
-export type { HeroState, StreakData, HomepageSuggestion };
+export type { HomepageSuggestion };
+
+export type UserState =
+  | "brand_new"
+  | "syncing"
+  | "has_runs_no_project"
+  | "project_processing"
+  | "active";
 
 export interface HomepagePayload {
-  hero: HeroState;
-  streak: StreakData;
   primarySuggestion: HomepageSuggestion | null;
   alternates: HomepageSuggestion[];
   nextMilestone: MilestoneWithProgress | null;
@@ -31,16 +33,15 @@ export interface HomepagePayload {
     newStreets: number;
     daysAgo: number;
   };
-  /** Rich highlight for runs within last 7 days (new streets + distance). */
-  recentHighlights?: {
-    newStreets: number;
-    distanceKm: number;
-  };
-  /** Whether this is a new user (no activities yet) */
-  isNewUser: boolean;
+  /** Derived user state for panel content and copy */
+  userState: UserState;
+  /** Total synced activities count (when userState is has_runs_no_project) */
+  totalActivities?: number;
+  /** Total distance km across all activities (when userState is has_runs_no_project) */
+  totalDistanceKm?: number;
   /** User's display name for personalization */
   userName?: string;
-  /** First street suggestion for new users (nearest shortest street) */
+  /** First street suggestion for brand_new users (nearest short street near GPS) */
   firstStreet?: {
     osmId: string;
     name: string;
@@ -49,8 +50,6 @@ export interface HomepagePayload {
     geometry: Array<{ lat: number; lng: number }>;
     bbox: [number, number, number, number];
   };
-  /** User-level stats for sidebar (favorites, exploration style, totals) */
-  userStats?: UserStats;
 }
 
 export interface MapContextQuery {
