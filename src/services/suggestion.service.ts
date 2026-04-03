@@ -551,6 +551,7 @@ function buildClusterCandidates(
     }
 
     pool = pool.filter((item) => !picked.has(item.street.osmId));
+    if (group.length < 2) continue;
 
     const partiallyRun = group.filter((street) => street.percentage > 0);
     const anchor =
@@ -858,34 +859,43 @@ export async function getHomepageSuggestions(
       : { primary: null, alternates: [], nextMilestone };
   }
 
+  const MIN_SUGGESTIONS = 2;
+
   const filtered: HomepageSuggestion[] = [];
   for (const c of candidates) {
     const onCd = await isOnCooldown(userId, c.cooldownKey, COOLDOWN_DAYS_PRIMARY);
     if (!onCd) filtered.push(c);
   }
 
+  // If cooldown filtered too aggressively, fall back to all candidates so the
+  // user always sees at least MIN_SUGGESTIONS items.
+  const pool =
+    filtered.length >= MIN_SUGGESTIONS ? filtered : candidates;
+
   const primary =
-    filtered.length > 0
+    pool.length > 0
       ? (() => {
-          if (streakData.isAtRisk && filtered.some((c) => c.type === "streak_saver"))
-            return filtered.find((c) => c.type === "streak_saver")!;
-          if (filtered.some((c) => c.type === "quick_win"))
-            return filtered.find((c) => c.type === "quick_win")!;
-          if (filtered.some((c) => c.type === "milestone_push"))
-            return filtered.find((c) => c.type === "milestone_push")!;
-          if (filtered.some((c) => c.type === "repeat_street"))
-            return filtered.find((c) => c.type === "repeat_street")!;
-          return filtered[0];
+          if (streakData.isAtRisk && pool.some((c) => c.type === "streak_saver"))
+            return pool.find((c) => c.type === "streak_saver")!;
+          if (pool.some((c) => c.type === "quick_win"))
+            return pool.find((c) => c.type === "quick_win")!;
+          if (pool.some((c) => c.type === "milestone_push"))
+            return pool.find((c) => c.type === "milestone_push")!;
+          if (pool.some((c) => c.type === "repeat_street"))
+            return pool.find((c) => c.type === "repeat_street")!;
+          return pool[0];
         })()
       : null;
 
-  if (primary) {
+  // Only set cooldown when we had enough non-cooldown candidates
+  // (avoid re-cooling down items we already forced through).
+  if (primary && filtered.length >= MIN_SUGGESTIONS) {
     await setCooldown(userId, primary.cooldownKey, COOLDOWN_DAYS_PRIMARY);
   }
 
-  const alternates = filtered
+  const alternates = pool
     .filter((c) => c.cooldownKey !== primary?.cooldownKey)
-    .slice(0, 5);
+    .slice(0, 3);
 
   return mapStreetsResponse != null
     ? { primary, alternates, mapStreetsResponse, nextMilestone }
@@ -1243,6 +1253,7 @@ export async function getNearestShortStreets(
   userLng: number,
   radiusMeters: number = 500,
   max: number = 5,
+  maxLengthMeters: number = 500,
 ): Promise<NearestShortStreetItem[]> {
   const streets = await getGeometriesInArea(userLat, userLng, radiusMeters);
   if (streets.length === 0) return [];
@@ -1254,7 +1265,7 @@ export async function getNearestShortStreets(
 
   for (const street of streets) {
     if (!street.name || street.name.trim() === "") continue;
-    if (street.lengthMeters < 50 || street.lengthMeters > 500) continue;
+    if (street.lengthMeters < 50 || street.lengthMeters > maxLengthMeters) continue;
     const coords = street.geometry.coordinates;
     if (coords.length < 2) continue;
 

@@ -288,13 +288,19 @@ export async function getHomepageData(
   let nearbyStreets: HomepagePayload["nearbyStreets"];
   let firstStreet: HomepagePayload["firstStreet"];
   if (
-    (userState === "brand_new" || userState === "has_runs_no_project") &&
     userLatNum != null &&
     userLngNum != null &&
     !Number.isNaN(userLatNum) &&
     !Number.isNaN(userLngNum)
   ) {
-    const list = await getNearestShortStreets(userLatNum, userLngNum, 500, 5);
+    const isNewUser = userState === "brand_new" || userState === "has_runs_no_project";
+    const list = await getNearestShortStreets(
+      userLatNum,
+      userLngNum,
+      isNewUser ? 500 : 1000,
+      5,
+      isNewUser ? 500 : 3000,
+    );
     if (list.length > 0) {
       nearbyStreets = list;
       firstStreet = list[0];
