@@ -30,6 +30,13 @@ export interface HomepageSuggestion {
   shortCopy: string;
   cooldownKey: string;
   reason: string;
+  clusterStats?: {
+    newStreets: number;
+    toFinish: number;
+    totalDistanceM: number;
+    estimatedDistanceM: number;
+    streetCount: number;
+  };
   focus: {
     bbox: [number, number, number, number];
     streetIds?: number[];
@@ -327,6 +334,13 @@ export async function getSuggestions(
 const PADDING_DEGREES = 0.0001;
 const COOLDOWN_DAYS_PRIMARY = 4;
 const COOLDOWN_DAYS_ALTERNATE = 2;
+const CLUSTER_MAX_STREETS = 8;
+const CLUSTER_MAX_DISTANCE_M = 2000;
+const CLUSTER_MAX_BBOX_DIAMETER_M = 500;
+const CLUSTER_CANDIDATE_RADIUS_M = 1000;
+const CLUSTER_CONNECTING_OVERHEAD = 1.3;
+const CLUSTER_IN_PROGRESS_THRESHOLD = 50;
+const CLUSTER_MAX_COUNT = 5;
 
 function bboxFromGeometry(
   coords: Array<[number, number]>,
@@ -402,6 +416,206 @@ function distanceMapStreetToPoint(
   const mid = Math.floor(coords.length / 2);
   const [lng, lat] = coords[mid] ?? [0, 0];
   return haversineMeters(centerLat, centerLng, lat, lng);
+}
+
+function centroidMapStreet(street: MapStreet): { lat: number; lng: number } {
+  const coords = street.geometry?.coordinates ?? [];
+  if (coords.length === 0) return { lat: 0, lng: 0 };
+  const sumLat = coords.reduce((sum, point) => sum + point[1], 0);
+  const sumLng = coords.reduce((sum, point) => sum + point[0], 0);
+  return {
+    lat: sumLat / coords.length,
+    lng: sumLng / coords.length,
+  };
+}
+
+function bboxDiameterMeters(
+  minLat: number,
+  maxLat: number,
+  minLng: number,
+  maxLng: number,
+): number {
+  const avgLat = (minLat + maxLat) / 2;
+  const latSpanM = (maxLat - minLat) * 111_320;
+  const lngSpanM =
+    (maxLng - minLng) * 111_320 * Math.cos((avgLat * Math.PI) / 180);
+  return Math.max(latSpanM, lngSpanM);
+}
+
+function streetValue(
+  street: MapStreet,
+  distFromCenter: number,
+): number {
+  if (street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD) {
+    return 200 + street.percentage;
+  }
+  return 100 - Math.min(distFromCenter / 10, 99);
+}
+
+function buildClusterCandidates(
+  streets: MapStreet[],
+  centerLat: number,
+  centerLng: number,
+  max: number = CLUSTER_MAX_COUNT,
+): HomepageSuggestion[] {
+  const candidates = streets.filter((street) => {
+    if (!street.name || street.name.trim() === "") return false;
+    if (street.percentage >= 100) return false;
+    const coords = street.geometry?.coordinates ?? [];
+    if (coords.length < 2) return false;
+    if (
+      distanceMapStreetToPoint(street, centerLat, centerLng) >
+      CLUSTER_CANDIDATE_RADIUS_M
+    ) {
+      return false;
+    }
+    return (
+      street.percentage === 0 ||
+      street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD
+    );
+  });
+  if (candidates.length === 0) return [];
+
+  type ClusterPoolItem = {
+    street: MapStreet;
+    centroid: { lat: number; lng: number };
+    distFromCenter: number;
+  };
+
+  let pool: ClusterPoolItem[] = candidates.map((street) => ({
+    street,
+    centroid: centroidMapStreet(street),
+    distFromCenter: distanceMapStreetToPoint(street, centerLat, centerLng),
+  }));
+  const grouped: HomepageSuggestion[] = [];
+
+  for (let clusterIndex = 0; clusterIndex < max && pool.length > 0; clusterIndex++) {
+    const completionSeed =
+      [...pool]
+        .filter((item) => item.street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD)
+        .sort(
+          (a, b) =>
+            b.street.percentage - a.street.percentage ||
+            a.distFromCenter - b.distFromCenter,
+        )[0] ?? null;
+    const explorationSeed =
+      [...pool]
+        .filter((item) => item.street.percentage === 0)
+        .sort((a, b) => a.distFromCenter - b.distFromCenter)[0] ?? null;
+
+    const seed =
+      clusterIndex % 2 === 0
+        ? (completionSeed ??
+          [...pool].sort((a, b) => a.distFromCenter - b.distFromCenter)[0])
+        : (explorationSeed ??
+          [...pool].sort((a, b) => a.distFromCenter - b.distFromCenter)[0]);
+    if (!seed) break;
+
+    const group: MapStreet[] = [seed.street];
+    const picked = new Set<string>([seed.street.osmId]);
+    let remainingBudget = CLUSTER_MAX_DISTANCE_M - seed.street.lengthMeters;
+    let minLat = seed.centroid.lat;
+    let maxLat = seed.centroid.lat;
+    let minLng = seed.centroid.lng;
+    let maxLng = seed.centroid.lng;
+
+    while (group.length < CLUSTER_MAX_STREETS && remainingBudget > 0) {
+      const next = [...pool]
+        .filter((item) => !picked.has(item.street.osmId))
+        .filter((item) => item.street.lengthMeters <= remainingBudget)
+        .filter((item) => {
+          const nextMinLat = Math.min(minLat, item.centroid.lat);
+          const nextMaxLat = Math.max(maxLat, item.centroid.lat);
+          const nextMinLng = Math.min(minLng, item.centroid.lng);
+          const nextMaxLng = Math.max(maxLng, item.centroid.lng);
+          return (
+            bboxDiameterMeters(nextMinLat, nextMaxLat, nextMinLng, nextMaxLng) <=
+            CLUSTER_MAX_BBOX_DIAMETER_M
+          );
+        })
+        .sort(
+          (a, b) =>
+            streetValue(b.street, b.distFromCenter) -
+              streetValue(a.street, a.distFromCenter) ||
+            a.distFromCenter - b.distFromCenter,
+        )[0];
+
+      if (!next) break;
+      group.push(next.street);
+      picked.add(next.street.osmId);
+      remainingBudget -= next.street.lengthMeters;
+      minLat = Math.min(minLat, next.centroid.lat);
+      maxLat = Math.max(maxLat, next.centroid.lat);
+      minLng = Math.min(minLng, next.centroid.lng);
+      maxLng = Math.max(maxLng, next.centroid.lng);
+    }
+
+    pool = pool.filter((item) => !picked.has(item.street.osmId));
+
+    const partiallyRun = group.filter((street) => street.percentage > 0);
+    const anchor =
+      partiallyRun.length > 0
+        ? [...partiallyRun].sort((a, b) => b.percentage - a.percentage)[0]
+        : [...group].sort((a, b) => b.lengthMeters - a.lengthMeters)[0];
+
+    const newStreets = group.filter((street) => street.percentage === 0).length;
+    const toFinish = group.filter(
+      (street) =>
+        street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD &&
+        street.percentage < 100,
+    ).length;
+    const totalDistanceM = Math.round(
+      group.reduce((sum, street) => sum + street.lengthMeters, 0),
+    );
+    const estimatedDistanceM = Math.round(
+      totalDistanceM * CLUSTER_CONNECTING_OVERHEAD,
+    );
+    const allCoords = group.flatMap((street) => street.geometry?.coordinates ?? []);
+    const bbox =
+      allCoords.length > 0
+        ? bboxFromGeometry(allCoords)
+        : ([0, 0, 0, 0] as [number, number, number, number]);
+    const streetIds = group
+      .map((street) => osmIdToNum(street.osmId))
+      .filter((id) => id > 0);
+    const km = (estimatedDistanceM / 1000).toFixed(1);
+    const shortCopy = `${newStreets} new streets · ${toFinish} to finish · ~${km} km`;
+    grouped.push({
+      type: "nearby_cluster",
+      title: `Go for a run around ${anchor.name}`,
+      shortCopy,
+      cooldownKey: `nearby_cluster:anchor:${anchor.osmId}:size:${group.length}`,
+      reason: `Area run around ${anchor.name}`,
+      clusterStats: {
+        newStreets,
+        toFinish,
+        totalDistanceM,
+        estimatedDistanceM,
+        streetCount: newStreets + toFinish,
+      },
+      focus: {
+        bbox,
+        ...(streetIds.length > 0 && { streetIds }),
+        startPoint:
+          anchor.geometry?.coordinates?.[0] != null
+            ? {
+                lat: anchor.geometry.coordinates[0][1],
+                lng: anchor.geometry.coordinates[0][0],
+              }
+            : undefined,
+      },
+    });
+  }
+
+  return grouped
+    .sort(
+      (a, b) =>
+        (a.clusterStats?.estimatedDistanceM ?? Infinity) -
+          (b.clusterStats?.estimatedDistanceM ?? Infinity) ||
+        (a.clusterStats?.streetCount ?? Infinity) -
+          (b.clusterStats?.streetCount ?? Infinity),
+    )
+    .slice(0, max);
 }
 
 /**
@@ -671,7 +885,7 @@ export async function getHomepageSuggestions(
 
   const alternates = filtered
     .filter((c) => c.cooldownKey !== primary?.cooldownKey)
-    .slice(0, 2);
+    .slice(0, 5);
 
   return mapStreetsResponse != null
     ? { primary, alternates, mapStreetsResponse, nextMilestone }
@@ -791,6 +1005,65 @@ async function buildCandidatesFromProjectResponse(
       },
     });
   }
+
+  if (response.clusters.length > 0) {
+    const clusterCards = response.clusters.slice(0, 3).map((cluster, index) => {
+      const sorted = [...cluster.streets].sort(
+        (a, b) => b.currentProgress - a.currentProgress || b.lengthMeters - a.lengthMeters,
+      );
+      const anchor = sorted[0];
+      const newStreets = cluster.streets.filter((street) => street.currentProgress === 0).length;
+      const toFinish = cluster.streets.filter(
+        (street) =>
+          street.currentProgress >= CLUSTER_IN_PROGRESS_THRESHOLD &&
+          street.currentProgress < 100,
+      ).length;
+      const totalDistanceM = Math.round(cluster.totalLength);
+      const estimatedDistanceM = Math.round(
+        totalDistanceM * CLUSTER_CONNECTING_OVERHEAD,
+      );
+      const km = (estimatedDistanceM / 1000).toFixed(1);
+      const allCoords = cluster.streets.flatMap((street) =>
+        (street as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry ?? [],
+      );
+      const bbox =
+        allCoords.length > 0
+          ? bboxFromGeometry(allCoords.map((point) => [point.lng, point.lat]))
+          : ([0, 0, 0, 0] as [number, number, number, number]);
+      const streetIds = cluster.streets
+        .map((street) => osmIdToNum(street.osmId))
+        .filter((id) => id > 0);
+
+      const title =
+        anchor?.name && anchor.name.trim().length > 0
+          ? `Go for a run around ${anchor.name}`
+          : "Run suggestions nearby";
+
+      return {
+        type: "nearby_cluster" as const,
+        title,
+        shortCopy: `${newStreets} new streets · ${toFinish} to finish · ~${km} km`,
+        cooldownKey: `nearby_cluster:project:${context.projectId ?? "none"}:${index}:${anchor?.osmId ?? "na"}`,
+        reason: `${cluster.streetCount} streets in this nearby run area`,
+        clusterStats: {
+          newStreets,
+          toFinish,
+          totalDistanceM,
+          estimatedDistanceM,
+          streetCount: newStreets + toFinish,
+        },
+        focus: {
+          bbox,
+          ...(streetIds.length > 0 && { streetIds }),
+          startPoint:
+            anchor?.geometry?.[0] != null
+              ? { lat: anchor.geometry[0].lat, lng: anchor.geometry[0].lng }
+              : undefined,
+        },
+      };
+    });
+    candidates.push(...clusterCards);
+  }
 }
 
 function buildCandidatesFromMapStreets(
@@ -862,6 +1135,11 @@ function buildCandidatesFromMapStreets(
   if (ladder) {
     candidates.push(ladder);
   }
+
+  const clusters = buildClusterCandidates(streets, centerLat, centerLng);
+  if (clusters.length > 0) {
+    candidates.push(...clusters);
+  }
 }
 
 /**
@@ -873,18 +1151,20 @@ function buildCandidatesFromMapStreets(
  * @param radiusMeters - Search radius (default 500m)
  * @returns Street info with distance from user, or null if none found
  */
-export async function getNearestShortStreet(
-  userLat: number,
-  userLng: number,
-  radiusMeters: number = 500
-): Promise<{
+export interface NearestShortStreetItem {
   osmId: string;
   name: string;
   lengthMeters: number;
   distanceFromUser: number;
   geometry: Array<{ lat: number; lng: number }>;
   bbox: [number, number, number, number];
-} | null> {
+}
+
+export async function getNearestShortStreet(
+  userLat: number,
+  userLng: number,
+  radiusMeters: number = 500
+): Promise<NearestShortStreetItem | null> {
   // Get all streets in the area
   const streets = await getGeometriesInArea(userLat, userLng, radiusMeters);
   
@@ -928,7 +1208,7 @@ export async function getNearestShortStreet(
 
   const shortest = candidates[0].street;
   const distanceFromUser = candidates[0].distanceFromUser;
-  
+
   // Convert geometry to lat/lng array
   const geometry = shortest.geometry.coordinates.map(([lng, lat]) => ({
     lat,
@@ -953,4 +1233,76 @@ export async function getNearestShortStreet(
     geometry,
     bbox,
   };
+}
+
+/**
+ * Up to `max` nearest short streets for onboarding / browse list.
+ */
+export async function getNearestShortStreets(
+  userLat: number,
+  userLng: number,
+  radiusMeters: number = 500,
+  max: number = 5,
+): Promise<NearestShortStreetItem[]> {
+  const streets = await getGeometriesInArea(userLat, userLng, radiusMeters);
+  if (streets.length === 0) return [];
+
+  const candidates: Array<{
+    street: OsmStreet;
+    distanceFromUser: number;
+  }> = [];
+
+  for (const street of streets) {
+    if (!street.name || street.name.trim() === "") continue;
+    if (street.lengthMeters < 50 || street.lengthMeters > 500) continue;
+    const coords = street.geometry.coordinates;
+    if (coords.length < 2) continue;
+
+    const distanceFromUser = pointToLineDistance(
+      { lat: userLat, lng: userLng },
+      coords,
+    );
+
+    if (distanceFromUser <= radiusMeters) {
+      candidates.push({ street, distanceFromUser });
+    }
+  }
+
+  if (candidates.length === 0) return [];
+
+  candidates.sort((a, b) => {
+    if (a.distanceFromUser !== b.distanceFromUser) {
+      return a.distanceFromUser - b.distanceFromUser;
+    }
+    return a.street.lengthMeters - b.street.lengthMeters;
+  });
+
+  const seen = new Set<string>();
+  const out: NearestShortStreetItem[] = [];
+  for (const { street, distanceFromUser } of candidates) {
+    if (seen.has(street.osmId)) continue;
+    seen.add(street.osmId);
+    const geometry = street.geometry.coordinates.map(([lng, lat]) => ({
+      lat,
+      lng,
+    }));
+    const lats = geometry.map((p) => p.lat);
+    const lngs = geometry.map((p) => p.lng);
+    const bbox: [number, number, number, number] = [
+      Math.min(...lats),
+      Math.min(...lngs),
+      Math.max(...lats),
+      Math.max(...lngs),
+    ];
+    out.push({
+      osmId: street.osmId,
+      name: street.name,
+      lengthMeters: street.lengthMeters,
+      distanceFromUser: Math.round(distanceFromUser),
+      geometry,
+      bbox,
+    });
+    if (out.length >= max) break;
+  }
+  return out;
 }

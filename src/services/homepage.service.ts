@@ -4,8 +4,62 @@
  */
 import prisma from "../lib/prisma.js";
 import { getNextMilestone } from "./milestone.service.js";
-import { getHomepageSuggestions, getNearestShortStreet } from "./suggestion.service.js";
+import { getHomepageSuggestions, getNearestShortStreets } from "./suggestion.service.js";
 import type { HomepagePayload, UserState } from "../types/homepage.types.js";
+import type { ActivityImpact } from "../types/activity.types.js";
+import type { MapStreet } from "../types/map.types.js";
+
+function bboxFromCoords(
+  coords: Array<{ lat: number; lng: number }> | null | undefined,
+): [number, number, number, number] | undefined {
+  if (!coords || coords.length === 0) return undefined;
+  const lats = coords.map((c) => c.lat);
+  const lngs = coords.map((c) => c.lng);
+  return [
+    Math.min(...lats),
+    Math.min(...lngs),
+    Math.max(...lats),
+    Math.max(...lngs),
+  ];
+}
+
+function buildOsmIdToNameFromSegments(segments: MapStreet[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const s of segments) {
+    if (s.osmId && s.name) m.set(s.osmId, s.name);
+  }
+  return m;
+}
+
+function collectStreetNamesFromImpacts(
+  impacts: (ActivityImpact | null | undefined)[],
+  osmIdToName: Map<string, string>,
+): { completed: string[]; improved: string[] } {
+  const completed: string[] = [];
+  const improved: string[] = [];
+  const seenC = new Set<string>();
+  const seenI = new Set<string>();
+  for (const impact of impacts) {
+    if (!impact) continue;
+    if (Array.isArray(impact.completed)) {
+      for (const id of impact.completed) {
+        const label = osmIdToName.get(id) ?? id;
+        if (!seenC.has(label)) {
+          seenC.add(label);
+          completed.push(label);
+        }
+      }
+    }
+    for (const imp of impact.improved ?? []) {
+      const label = osmIdToName.get(imp.osmId) ?? imp.osmId;
+      if (!seenI.has(label)) {
+        seenI.add(label);
+        improved.push(label);
+      }
+    }
+  }
+  return { completed, improved };
+}
 
 const DEFAULT_RADIUS = 1200;
 
@@ -96,13 +150,19 @@ export async function getHomepageData(
     activeProjectCount,
     projectsWithProgressCount,
     totalDistanceResult,
+    recentActivitiesRaw,
+    projectForContext,
   ] = await Promise.all([
     prisma.activity.findFirst({
       where: { userId, isProcessed: true },
       orderBy: { startDate: "desc" },
       include: {
         projects: {
-          select: { streetsCompleted: true, streetsImproved: true },
+          select: {
+            streetsCompleted: true,
+            streetsImproved: true,
+            impactDetails: true,
+          },
         },
       },
     }),
@@ -125,6 +185,30 @@ export async function getHomepageData(
       where: { userId },
       _sum: { distanceMeters: true },
     }),
+    prisma.activity.findMany({
+      where: { userId, isProcessed: true },
+      orderBy: { startDate: "desc" },
+      take: 5,
+      select: {
+        id: true,
+        name: true,
+        distanceMeters: true,
+        startDate: true,
+        coordinates: true,
+      },
+    }),
+    contextProjectId
+      ? prisma.project.findFirst({
+          where: { id: contextProjectId, userId },
+          select: {
+            id: true,
+            name: true,
+            totalStreets: true,
+            completedStreets: true,
+            progress: true,
+          },
+        })
+      : Promise.resolve(null),
   ]);
 
   const userState = computeUserState(
@@ -164,6 +248,29 @@ export async function getHomepageData(
     ? suggestions.nextMilestone
     : await getNextMilestone(userId, contextProjectId);
 
+  const mapSegments =
+    suggestions?.mapStreetsResponse?.segments?.length
+      ? suggestions.mapStreetsResponse.segments
+      : undefined;
+
+  const osmIdToName =
+    mapSegments && mapSegments.length > 0
+      ? buildOsmIdToNameFromSegments(mapSegments)
+      : new Map<string, string>();
+
+  const impactList =
+    lastActivity?.projects?.map(
+      (p) => p.impactDetails as ActivityImpact | null | undefined,
+    ) ?? [];
+  const { completed: completedStreetNames, improved: improvedStreetNames } =
+    collectStreetNamesFromImpacts(impactList, osmIdToName);
+
+  const lastCoords = lastActivity?.coordinates as
+    | Array<{ lat: number; lng: number }>
+    | null
+    | undefined;
+  const lastBbox = bboxFromCoords(lastCoords ?? undefined);
+
   const lastRun =
     lastActivityDate != null && lastActivity != null
       ? {
@@ -171,10 +278,15 @@ export async function getHomepageData(
           distanceKm,
           newStreets: lastRunNewStreets,
           daysAgo: daysSinceLast ?? 0,
+          activityId: lastActivity.id,
+          ...(completedStreetNames.length > 0 && { completedStreetNames }),
+          ...(improvedStreetNames.length > 0 && { improvedStreetNames }),
+          ...(lastBbox && { bbox: lastBbox }),
         }
       : undefined;
 
-  let firstStreet = undefined;
+  let nearbyStreets: HomepagePayload["nearbyStreets"];
+  let firstStreet: HomepagePayload["firstStreet"];
   if (
     (userState === "brand_new" || userState === "has_runs_no_project") &&
     userLatNum != null &&
@@ -182,18 +294,51 @@ export async function getHomepageData(
     !Number.isNaN(userLatNum) &&
     !Number.isNaN(userLngNum)
   ) {
-    firstStreet = await getNearestShortStreet(userLatNum, userLngNum, 500);
+    const list = await getNearestShortStreets(userLatNum, userLngNum, 500, 5);
+    if (list.length > 0) {
+      nearbyStreets = list;
+      firstStreet = list[0];
+    }
   }
 
-  const mapSegments =
-    suggestions?.mapStreetsResponse?.segments?.length
-      ? suggestions.mapStreetsResponse.segments
-      : undefined;
-
   const totalDistanceKm =
-    userState === "has_runs_no_project"
+    activityCount > 0
       ? Math.round(((totalDistanceResult._sum.distanceMeters ?? 0) / 1000) * 100) / 100
       : undefined;
+
+  const recentRuns = recentActivitiesRaw.map((a) => {
+    const coords = a.coordinates as Array<{ lat: number; lng: number }> | null;
+    let bbox = bboxFromCoords(coords ?? undefined);
+    if (!bbox && mapLat !== 0 && mapLng !== 0) {
+      const d = 0.002;
+      bbox = [mapLat - d, mapLng - d, mapLat + d, mapLng + d];
+    }
+    return {
+      activityId: a.id,
+      name: a.name,
+      date: a.startDate.toISOString(),
+      distanceKm: Math.round((a.distanceMeters / 1000) * 100) / 100,
+      bbox: bbox ?? ([0, 0, 0, 0] as [number, number, number, number]),
+    };
+  });
+
+  const areaStats = suggestions?.mapStreetsResponse
+    ? {
+        totalStreets: suggestions.mapStreetsResponse.totalStreets,
+        completedCount: suggestions.mapStreetsResponse.completedCount,
+        partialCount: suggestions.mapStreetsResponse.partialCount,
+      }
+    : undefined;
+
+  const projectContext = projectForContext
+    ? {
+        id: projectForContext.id,
+        name: projectForContext.name,
+        totalStreets: projectForContext.totalStreets,
+        completedStreets: projectForContext.completedStreets,
+        progress: Math.round(projectForContext.progress * 100) / 100,
+      }
+    : undefined;
 
   const payload: HomepagePayload = {
     primarySuggestion: suggestions?.primary ?? null,
@@ -208,12 +353,16 @@ export async function getHomepageData(
     ...(mapSegments && mapSegments.length > 0 && { mapSegments }),
     ...(lastRun && { lastRun }),
     userState,
-    ...(userState === "has_runs_no_project" && {
+    ...(activityCount > 0 && {
       totalActivities: activityCount,
       totalDistanceKm,
     }),
     userName: user?.name,
     ...(firstStreet && { firstStreet }),
+    ...(nearbyStreets && nearbyStreets.length > 0 && { nearbyStreets }),
+    ...(recentRuns.length > 0 && { recentRuns }),
+    ...(areaStats && { areaStats }),
+    ...(projectContext && { projectContext }),
   };
 
   return payload;
