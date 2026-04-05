@@ -103,7 +103,7 @@ export async function getHomepageData(
       where: { id: projectId, userId },
       select: { centerLat: true, centerLng: true, radiusMeters: true },
     });
-    if (project) {
+    if (project && project.centerLat != null && project.centerLng != null && project.radiusMeters != null) {
       mapLat = project.centerLat;
       mapLng = project.centerLng;
       mapRadius = project.radiusMeters;
@@ -140,6 +140,17 @@ export async function getHomepageData(
       mapLng = 0;
     }
     mapRadius = DEFAULT_RADIUS;
+  }
+
+  if (!contextProjectId) {
+    const autoProject = await prisma.project.findFirst({
+      where: { userId, isArchived: false },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+    if (autoProject) {
+      contextProjectId = autoProject.id;
+    }
   }
 
   const [

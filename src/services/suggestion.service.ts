@@ -15,6 +15,15 @@ import type { MapStreet, MapStreetsResponse } from "../types/map.types.js";
 import type { StreakData } from "./streak.service.js";
 import type { MilestoneWithProgress } from "../types/milestone.types.js";
 import type { OsmStreet } from "../types/run.types.js";
+import { normalizeStreetName } from "../utils/normalize-street-name.js";
+
+/** Lightweight street data embedded in suggestions for frontend map rendering. */
+export interface SuggestionStreet {
+  osmId: string;
+  name: string;
+  percentage: number;
+  geometry: { type: "LineString"; coordinates: [number, number][] };
+}
 
 /** Homepage suggestion shape (one primary action + alternates) */
 export interface HomepageSuggestion {
@@ -42,6 +51,8 @@ export interface HomepageSuggestion {
     streetIds?: number[];
     startPoint?: { lat: number; lng: number };
   };
+  /** Street geometries for direct rendering on the frontend map. */
+  streets?: SuggestionStreet[];
 }
 
 export interface HomepageSuggestionsResult {
@@ -247,9 +258,26 @@ export async function getSuggestions(
         }
       : null;
 
+  // Aggregate segments by name so each "street" is one entry (same logic as
+  // the area-based path). This prevents clusters that count multiple OSM
+  // segments of the same road as separate streets.
+  const aggregatedByName = new Map<string, ProjectMapStreet>();
+  for (const s of streets) {
+    const key = normalizeStreetName(s.name || "Unnamed");
+    const existing = aggregatedByName.get(key);
+    if (!existing || s.lengthMeters > existing.lengthMeters) {
+      aggregatedByName.set(key, s);
+    }
+  }
+  const aggregatedStreets = [...aggregatedByName.values()];
+
+  const clusterEligible = aggregatedStreets.filter(
+    (s) => s.percentage === 0 || (s.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD && s.percentage < 100),
+  );
+
   const clusters: SuggestionsResponse["clusters"] = [];
-  if (unrun.length > 0) {
-    const withCentroid = unrun.map((s) => ({
+  if (clusterEligible.length > 0) {
+    const withCentroid = clusterEligible.map((s) => ({
       street: s,
       centroid: streetCentroid(s),
     }));
@@ -284,7 +312,7 @@ export async function getSuggestions(
             .map((st) =>
               toSuggestion(
                 st,
-                `${group.length} unrun streets in this area (${(totalLength / 1000).toFixed(1)} km)`,
+                `${group.length} streets in this area (${(totalLength / 1000).toFixed(1)} km)`,
               ),
             ),
           totalLength,
@@ -339,7 +367,7 @@ const CLUSTER_MAX_DISTANCE_M = 2000;
 const CLUSTER_MAX_BBOX_DIAMETER_M = 500;
 const CLUSTER_CANDIDATE_RADIUS_M = 1000;
 const CLUSTER_CONNECTING_OVERHEAD = 1.3;
-const CLUSTER_IN_PROGRESS_THRESHOLD = 50;
+const CLUSTER_IN_PROGRESS_THRESHOLD = 1;
 const CLUSTER_MAX_COUNT = 5;
 
 function bboxFromGeometry(
@@ -367,8 +395,40 @@ function bboxFromGeometry(
 }
 
 function osmIdToNum(osmId: string): number {
-  const n = parseInt(osmId, 10);
+  const raw = osmId.replace(/^way\//, "");
+  const n = parseInt(raw, 10);
   return Number.isNaN(n) ? 0 : n;
+}
+
+function toSuggestionStreet(s: MapStreet): SuggestionStreet | null {
+  if (!s.geometry?.coordinates || s.geometry.coordinates.length < 2) return null;
+  return {
+    osmId: s.osmId,
+    name: s.name,
+    percentage: s.percentage,
+    geometry: s.geometry,
+  };
+}
+
+function toSuggestionStreets(streets: MapStreet[]): SuggestionStreet[] {
+  return streets.map(toSuggestionStreet).filter((s): s is SuggestionStreet => s !== null);
+}
+
+function streetSuggestionToSuggestionStreet(s: StreetSuggestion): SuggestionStreet | null {
+  if (!s.geometry || s.geometry.length < 2) return null;
+  return {
+    osmId: s.osmId,
+    name: s.name,
+    percentage: s.currentProgress,
+    geometry: {
+      type: "LineString",
+      coordinates: s.geometry.map((p) => [p.lng, p.lat] as [number, number]),
+    },
+  };
+}
+
+function streetSuggestionsToSuggestionStreets(streets: StreetSuggestion[]): SuggestionStreet[] {
+  return streets.map(streetSuggestionToSuggestionStreet).filter((s): s is SuggestionStreet => s !== null);
 }
 
 async function isOnCooldown(
@@ -474,6 +534,7 @@ function buildClusterCandidates(
       street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD
     );
   });
+
   if (candidates.length === 0) return [];
 
   type ClusterPoolItem = {
@@ -605,6 +666,7 @@ function buildClusterCandidates(
               }
             : undefined,
       },
+      streets: toSuggestionStreets(group),
     });
   }
 
@@ -663,6 +725,7 @@ function findBestCandidate(
             ? { lat: coords[0][1], lng: coords[0][0] }
             : undefined,
       },
+      streets: toSuggestionStreets([s]),
     };
   }
 
@@ -694,6 +757,7 @@ function findBestCandidate(
             ? { lat: coords[0][1], lng: coords[0][0] }
             : undefined,
       },
+      streets: toSuggestionStreets([s]),
     };
   }
 
@@ -724,6 +788,7 @@ function findBestCandidate(
             ? { lat: coords[0][1], lng: coords[0][0] }
             : undefined,
       },
+      streets: toSuggestionStreets([s]),
     };
   }
 
@@ -751,6 +816,7 @@ function findBestCandidate(
             ? { lat: coords[0][1], lng: coords[0][0] }
             : undefined,
       },
+      streets: toSuggestionStreets([s]),
     };
   }
 
@@ -811,37 +877,64 @@ export async function getHomepageSuggestions(
     ]);
     mapStreetsResponse = mapResult;
 
-    const progressOsmIds = new Set(mapResult.streets.map((s) => s.osmId));
-    const unrunStreets: MapStreet[] = rawGeometries
-      .filter(
-        (g) =>
-          !progressOsmIds.has(g.osmId) &&
-          g.name &&
-          g.name.trim() !== "" &&
-          g.lengthMeters > 50 &&
-          g.geometry?.coordinates?.length >= 2,
-      )
-      .map((g) => ({
-        osmId: g.osmId,
-        name: g.name,
-        highwayType: g.highwayType,
-        lengthMeters: g.lengthMeters,
-        percentage: 0,
-        status: "partial" as const,
-        geometry: g.geometry,
-        stats: {
-          runCount: 0,
-          completionCount: 0,
-          firstRunDate: null,
-          lastRunDate: null,
-          totalLengthMeters: g.lengthMeters,
-          currentPercentage: 0,
-          everCompleted: false,
-          weightedCompletionRatio: 0,
-          segmentCount: 1,
-          connectorCount: 0,
-        },
-      }));
+    const progressSegmentIds = new Set(mapResult.segments.map((s) => s.osmId));
+    const progressNames = new Set(
+      mapResult.streets.map((s) => normalizeStreetName(s.name)),
+    );
+
+    const unrunSegments = rawGeometries.filter(
+      (g) =>
+        !progressSegmentIds.has(g.osmId) &&
+        !progressNames.has(normalizeStreetName(g.name ?? "")) &&
+        g.name &&
+        g.name.trim() !== "" &&
+        g.lengthMeters > 50 &&
+        g.geometry?.coordinates?.length >= 2,
+    );
+
+    const byName = new Map<string, OsmStreet[]>();
+    for (const seg of unrunSegments) {
+      const key = normalizeStreetName(seg.name);
+      if (!byName.has(key)) byName.set(key, []);
+      byName.get(key)!.push(seg);
+    }
+
+    const unrunStreets: MapStreet[] = Array.from(byName.values()).map(
+      (segments) => {
+        const allCoords: [number, number][] = segments.flatMap(
+          (s) => s.geometry?.coordinates ?? [],
+        );
+        const totalLength = segments.reduce(
+          (sum, s) => sum + s.lengthMeters,
+          0,
+        );
+        const base = segments.sort((a, b) => b.lengthMeters - a.lengthMeters)[0];
+        return {
+          osmId: base.osmId,
+          name: base.name,
+          highwayType: base.highwayType,
+          lengthMeters: totalLength,
+          percentage: 0,
+          status: "partial" as const,
+          geometry: {
+            type: "LineString" as const,
+            coordinates: allCoords,
+          },
+          stats: {
+            runCount: 0,
+            completionCount: 0,
+            firstRunDate: null,
+            lastRunDate: null,
+            totalLengthMeters: totalLength,
+            currentPercentage: 0,
+            everCompleted: false,
+            weightedCompletionRatio: 0,
+            segmentCount: segments.length,
+            connectorCount: 0,
+          },
+        };
+      },
+    );
 
     const allStreets = [...mapResult.streets, ...unrunStreets];
     buildCandidatesFromMapStreets(
@@ -929,6 +1022,7 @@ async function buildCandidatesFromProjectResponse(
           streetIds: [osmIdToNum(nearest.osmId)],
           startPoint: coords?.[0] ? { lat: coords[0].lat, lng: coords[0].lng } : undefined,
         },
+        streets: streetSuggestionsToSuggestionStreets([nearest]),
       });
     }
   }
@@ -950,6 +1044,7 @@ async function buildCandidatesFromProjectResponse(
         streetIds: [osmIdToNum(almostOne.osmId)],
         startPoint: geom?.[0] ? { lat: geom[0].lat, lng: geom[0].lng } : undefined,
       },
+      streets: streetSuggestionsToSuggestionStreets([almostOne]),
     });
   }
 
@@ -972,6 +1067,7 @@ async function buildCandidatesFromProjectResponse(
         bbox,
         streetIds: streets.map((s) => osmIdToNum(s.osmId)),
       },
+      streets: streetSuggestionsToSuggestionStreets(streets),
     });
   }
 
@@ -993,6 +1089,7 @@ async function buildCandidatesFromProjectResponse(
         streetIds: [osmIdToNum(r.osmId)],
         startPoint: geom?.[0] ? { lat: geom[0].lat, lng: geom[0].lng } : undefined,
       },
+      streets: streetSuggestionsToSuggestionStreets([r]),
     });
   }
 
@@ -1013,6 +1110,7 @@ async function buildCandidatesFromProjectResponse(
         streetIds: [osmIdToNum(n.osmId)],
         startPoint: geom?.[0] ? { lat: geom[0].lat, lng: geom[0].lng } : undefined,
       },
+      streets: streetSuggestionsToSuggestionStreets([n]),
     });
   }
 
@@ -1022,8 +1120,14 @@ async function buildCandidatesFromProjectResponse(
         (a, b) => b.currentProgress - a.currentProgress || b.lengthMeters - a.lengthMeters,
       );
       const anchor = sorted[0];
-      const newStreets = cluster.streets.filter((street) => street.currentProgress === 0).length;
-      const toFinish = cluster.streets.filter(
+      const uniqueByName = new Map<string, (typeof cluster.streets)[number]>();
+      for (const s of cluster.streets) {
+        const key = normalizeStreetName(s.name);
+        if (!uniqueByName.has(key)) uniqueByName.set(key, s);
+      }
+      const uniqueStreets = [...uniqueByName.values()];
+      const newStreets = uniqueStreets.filter((street) => street.currentProgress === 0).length;
+      const toFinish = uniqueStreets.filter(
         (street) =>
           street.currentProgress >= CLUSTER_IN_PROGRESS_THRESHOLD &&
           street.currentProgress < 100,
@@ -1070,6 +1174,7 @@ async function buildCandidatesFromProjectResponse(
               ? { lat: anchor.geometry[0].lat, lng: anchor.geometry[0].lng }
               : undefined,
         },
+        streets: streetSuggestionsToSuggestionStreets(cluster.streets),
       };
     });
     candidates.push(...clusterCards);
@@ -1112,6 +1217,7 @@ function buildCandidatesFromMapStreets(
               ? { lat: coords[0][1], lng: coords[0][0] }
               : undefined,
         },
+        streets: toSuggestionStreets([explore]),
       });
     }
   }
@@ -1136,6 +1242,7 @@ function buildCandidatesFromMapStreets(
             ? { lat: coords[0][1], lng: coords[0][0] }
             : undefined,
       },
+      streets: toSuggestionStreets([repeatStreet]),
     });
   }
 
