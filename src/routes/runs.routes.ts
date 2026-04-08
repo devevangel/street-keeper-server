@@ -8,7 +8,7 @@
  * 1. Receive GPX file upload (Multer middleware)
  * 2. Parse GPX to extract GPS points (gpx.service)
  * 3. Calculate run statistics (geo.service)
- * 4. Query streets in the area (overpass.service)
+ * 4. Query streets in the area (PostGIS / local sync)
  * 5. Match GPS points to streets (engine v1: street-matching)
  * 6. Return complete analysis with all streets covered
  *
@@ -22,27 +22,17 @@ import {
   handleMulterError,
 } from "../middleware/upload.middleware.js";
 import { parseGpxBuffer, GpxParseError } from "../services/gpx.service.js";
+import { OverpassError } from "../services/overpass.service.js";
+import { MapboxError } from "../engines/v1/mapbox.js";
+import { ERROR_CODES } from "../config/constants.js";
+import type { GpxErrorResponse } from "../types/run.types.js";
+import prisma from "../lib/prisma.js";
+import { detectCity } from "../services/city-sync.service.js";
 import {
-  calculateTotalDistance,
-  calculateDuration,
-  calculateBoundingBox,
-} from "../services/geo.service.js";
-import {
-  queryStreetsInBoundingBox,
-  OverpassError,
-} from "../services/overpass.service.js";
-import {
-  matchPointsToStreets,
-  matchPointsToStreetsHybrid,
-} from "../engines/v1/street-matching.js";
-import { buildComprehensiveAnalysis } from "../engines/v1/gpx-analysis.js";
-import { isMapboxConfigured, MapboxError } from "../engines/v1/mapbox.js";
-import { aggregateSegmentsIntoLogicalStreets } from "../engines/v1/street-aggregation.js";
-import { ERROR_CODES, STREET_MATCHING } from "../config/constants.js";
-import type {
-  EnhancedAnalyzeGpxResponse,
-  GpxErrorResponse,
-} from "../types/run.types.js";
+  enqueueCitySyncJob,
+  enqueueGpxAnalyzeJob,
+} from "../queues/activity.queue.js";
+import { runEnhancedGpxAnalysis } from "../services/gpx-analyze-runner.service.js";
 
 const router = Router();
 
@@ -145,159 +135,51 @@ router.post(
     }
 
     try {
-      // ========================================
-      // Step 1: Parse GPX file
-      // ========================================
-      // Extracts GPS points, timestamps, and metadata from the GPX XML
-
       const gpxData = parseGpxBuffer(req.file.buffer);
 
-      // ========================================
-      // Step 2: Calculate run statistics
-      // ========================================
-      // Total distance (sum of point-to-point distances)
-      // Duration (time from first to last point)
+      const lats = gpxData.points.map((p) => p.lat);
+      const lngs = gpxData.points.map((p) => p.lng);
+      const centerLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+      const centerLng = (Math.min(...lngs) + Math.max(...lngs)) / 2;
 
-      const totalDistance = calculateTotalDistance(gpxData.points);
-      const duration = calculateDuration(gpxData.points);
-
-      // ========================================
-      // Step 3: Calculate bounding box
-      // ========================================
-      // Rectangle around all GPS points + 100m buffer
-      // Used to query only relevant streets from OpenStreetMap
-
-      const bbox = calculateBoundingBox(gpxData.points);
-
-      // ========================================
-      // Step 4: Query streets from OpenStreetMap
-      // ========================================
-      // Fetches all roads/paths in the bounding box area
-
-      const streets = await queryStreetsInBoundingBox(bbox);
-
-      console.log(`[GPX] Found ${streets.length} streets in area`);
-
-      // ========================================
-      // Step 5: Match GPS points to streets (HYBRID)
-      // ========================================
-      // Uses hybrid Mapbox + Overpass approach for maximum accuracy:
-      // - Mapbox: High-accuracy GPS-to-street matching (~98% accuracy)
-      // - Overpass: Total street lengths for coverage percentage
-      // Falls back to Overpass-only if Mapbox is not configured
-
-      let matchedStreets;
-      const useHybrid = isMapboxConfigured();
-
-      if (useHybrid) {
-        matchedStreets = await matchPointsToStreetsHybrid(gpxData.points, streets);
-      } else {
-        matchedStreets = matchPointsToStreets(gpxData.points, streets);
+      const city = await detectCity(centerLat, centerLng);
+      if (!city) {
+        const err: GpxErrorResponse = {
+          success: false,
+          error:
+            "Could not determine city for this GPX area. Try a longer track or different location.",
+          code: ERROR_CODES.VALIDATION_ERROR,
+        };
+        return res.status(400).json(err);
       }
 
-      // ========================================
-      // Step 5b: Safety net - Filter streets with too few points
-      // ========================================
-      // This is a safety net that ensures consistency between hybrid and Overpass-only paths.
-      // Streets with only 1-2 points are likely GPS noise or brief touches, not actual runs.
-      // The Overpass-only path already filters these, but hybrid path may include them.
-      // Even with this filter, determineCompletionStatus also marks low-point streets as PARTIAL.
-      const filteredMatchedStreets = matchedStreets.filter(
-        (s) => s.matchedPointsCount >= STREET_MATCHING.MIN_POINTS_PER_STREET
-      );
+      const existing = await prisma.citySync.findUnique({
+        where: { relationId: city.relationId },
+      });
+      const synced =
+        existing != null && existing.expiresAt > new Date();
 
-      // ========================================
-      // Step 6: Aggregate segments into logical streets (Phase 4)
-      // ========================================
-      // Groups OSM way segments by normalized name + highway type
-      // Buckets unnamed roads by highway type
-      // Reduces duplicate street entries for better UX
+      if (!synced) {
+        await enqueueCitySyncJob({
+          relationId: city.relationId.toString(),
+          name: city.name,
+          adminLevel: city.adminLevel,
+        });
+        await enqueueGpxAnalyzeJob({
+          gpxBase64: req.file.buffer.toString("base64"),
+          centerLat,
+          centerLng,
+          deferCount: 0,
+        });
+        return res.status(202).json({
+          success: true,
+          status: "processing",
+          message:
+            "Street data is being loaded for this area. Your run will be processed shortly.",
+        });
+      }
 
-      const aggregationResult = aggregateSegmentsIntoLogicalStreets(
-        filteredMatchedStreets
-      );
-
-      // ========================================
-      // Step 7: Build enhanced GPX analysis (Phase 3)
-      // ========================================
-      // Calculates moving vs stopped time, track quality metrics
-      // Includes street coverage summary
-
-      const comprehensiveAnalysis = buildComprehensiveAnalysis(gpxData);
-
-      // Calculate street coverage summary for enhanced analysis
-      const streetsTotal = aggregationResult.streets.length;
-      const streetsFullCount = aggregationResult.streets.filter(
-        (s) => s.completionStatus === "FULL"
-      ).length;
-      const streetsPartialCount =
-        streetsTotal - streetsFullCount;
-      const percentageFullStreets =
-        streetsTotal > 0 ? (streetsFullCount / streetsTotal) * 100 : 0;
-
-      // ========================================
-      // Step 8: Build enhanced response
-      // ========================================
-      // Includes both segment-level and aggregated street-level data
-      // Provides comprehensive analysis with Phase 3 & 4 enhancements
-
-      const response: EnhancedAnalyzeGpxResponse = {
-        success: true,
-        analysis: {
-          gpxName: comprehensiveAnalysis.gpxName,
-          totalDistanceMeters: comprehensiveAnalysis.totalDistanceMeters,
-          durationSeconds: comprehensiveAnalysis.durationSeconds,
-          pointsCount: comprehensiveAnalysis.pointsCount,
-          startTime: comprehensiveAnalysis.startTime?.toISOString(),
-          endTime: comprehensiveAnalysis.endTime?.toISOString(),
-
-          // Phase 3: Time breakdown
-          movingTimeSeconds: comprehensiveAnalysis.movingTimeSeconds,
-          stoppedTimeSeconds: comprehensiveAnalysis.stoppedTimeSeconds,
-
-          // Phase 3: Track quality metrics
-          avgPointSpacingMeters: comprehensiveAnalysis.avgPointSpacingMeters,
-          maxSegmentDistanceMeters:
-            comprehensiveAnalysis.maxSegmentDistanceMeters,
-          gpsJumpCount: comprehensiveAnalysis.gpsJumpCount,
-
-          // Phase 4: Street coverage summary
-          streetsTotal,
-          streetsFullCount,
-          streetsPartialCount,
-          percentageFullStreets: Math.round(percentageFullStreets * 100) / 100,
-        },
-
-        // Raw segment-level data (for debugging, advanced use)
-        segments: {
-          total: matchedStreets.length,
-          fullCount: matchedStreets.filter(
-            (s) => s.completionStatus === "FULL"
-          ).length,
-          partialCount: matchedStreets.filter(
-            (s) => s.completionStatus === "PARTIAL"
-          ).length,
-          list: matchedStreets,
-        },
-
-        // Aggregated street-level data (for UX)
-        streets: {
-          total: aggregationResult.streets.length,
-          fullCount: streetsFullCount,
-          partialCount: streetsPartialCount,
-          list: aggregationResult.streets,
-        },
-
-        // Unnamed roads bucketed by type
-        unnamedRoads: {
-          totalSegments: aggregationResult.unnamedBuckets.reduce(
-            (sum, bucket) => sum + bucket.segmentCount,
-            0
-          ),
-          buckets: aggregationResult.unnamedBuckets,
-        },
-      };
-
+      const response = await runEnhancedGpxAnalysis(req.file.buffer);
       res.status(200).json(response);
     } catch (error) {
       // ========================================
@@ -306,7 +188,6 @@ router.post(
 
       console.error("[GPX] Analysis error:", error);
 
-      // GPX parsing errors (malformed XML, no tracks, etc.)
       if (error instanceof GpxParseError) {
         const response: GpxErrorResponse = {
           success: false,

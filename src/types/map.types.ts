@@ -82,6 +82,8 @@ export interface MapStreet {
  */
 export interface MapStreetsResponse {
   success: true;
+  /** True when city street data is still loading (poll map again) */
+  syncing?: boolean;
   /** Aggregated logical streets (for list and stats) */
   streets: MapStreet[];
   /** Segment-level streets (for map polylines) */

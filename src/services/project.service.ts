@@ -26,23 +26,16 @@
 import prisma from "../lib/prisma.js";
 import {
   PROJECTS,
-  GEOMETRY_CACHE,
   isValidRadius,
   getCompletionThreshold,
 } from "../config/constants.js";
-import {
-  queryStreetsInRadius,
-  queryStreetsInPolygon,
-  OverpassError,
-} from "./overpass.service.js";
 import { ensureCitySynced } from "./city-sync.service.js";
-// Note: reverseGeocode will be enabled after migration
-// import { reverseGeocode } from "./geocoding.service.js";
+import {
+  getLocalStreetsInRadius,
+  getLocalStreetsInPolygonFiltered,
+} from "./local-streets.service.js";
 import {
   generateRadiusCacheKey,
-  getCachedGeometries,
-  setCachedGeometries,
-  findLargerCachedRadius,
   resolveRadiusFilter,
   resolvePolygonFilter,
   polygonCentroid,
@@ -167,7 +160,13 @@ export async function previewProject(
         "Polygon preview requires polygonCoordinates with at least 3 points."
       );
     }
-    const streets = await queryStreetsInPolygon(coords, boundaryMode);
+    const c = polygonCentroid(coords);
+    await ensureCitySynced(c.lat, c.lng);
+    const streets = await getLocalStreetsInPolygonFiltered(
+      coords,
+      boundaryMode,
+      { namedOnly: true },
+    );
     const filterFn = resolvePolygonFilter(boundaryMode);
     filteredStreets = filterFn(streets, coords);
     cacheKey = `geo:polygon:${coords.length}:${coords
@@ -254,43 +253,15 @@ export async function previewProject(
 async function getStreetsWithCache(
   centerLat: number,
   centerLng: number,
-  radiusMeters: number
+  radiusMeters: number,
 ): Promise<{ streets: OsmStreet[]; cacheKey: string; cachedRadius: number }> {
   const exactKey = generateRadiusCacheKey(centerLat, centerLng, radiusMeters);
-  const exactCache = await getCachedGeometries(exactKey);
-
-  if (exactCache) {
-    console.log(`[Project] Exact cache hit for ${radiusMeters}m radius`);
-    return {
-      streets: exactCache,
-      cacheKey: exactKey,
-      cachedRadius: radiusMeters,
-    };
-  }
-
-  const largerCache = await findLargerCachedRadius(
+  const streets = await getLocalStreetsInRadius(
     centerLat,
     centerLng,
-    radiusMeters
+    radiusMeters,
+    { namedOnly: true },
   );
-
-  if (largerCache) {
-    console.log(
-      `[Project] Using larger cache (${largerCache.cachedRadius}m) for ${radiusMeters}m request`
-    );
-    return largerCache;
-  }
-
-  console.log(
-    `[Project] Cache miss, querying Overpass for ${radiusMeters}m radius`
-  );
-  const streets = await queryStreetsInRadius(
-    centerLat,
-    centerLng,
-    radiusMeters
-  );
-  await setCachedGeometries(exactKey, streets);
-
   return {
     streets,
     cacheKey: exactKey,
@@ -356,7 +327,12 @@ async function expandStreetsToFullByName(
     console.log(
       `[Project] Expanding streets: querying ${expandedRadius}m radius (${(expandedRadius / 1000).toFixed(1)}km) to find all segments`
     );
-    expandedStreets = await queryStreetsInRadius(centerLat, centerLng, expandedRadius);
+    expandedStreets = await getLocalStreetsInRadius(
+      centerLat,
+      centerLng,
+      expandedRadius,
+      { namedOnly: true },
+    );
   } else {
     if (!polygonCoordinates || polygonCoordinates.length < 3) {
       return filteredStreets;
@@ -385,7 +361,11 @@ async function expandStreetsToFullByName(
     console.log(
       `[Project] Expanding streets: querying expanded polygon (${latSpan.toFixed(4)}° × ${lngSpan.toFixed(4)}° → ${(latSpan + latPadding * 2).toFixed(4)}° × ${(lngSpan + lngPadding * 2).toFixed(4)}°) to find all segments`
     );
-    expandedStreets = await queryStreetsInPolygon(expandedPolygon, "intersects");
+    expandedStreets = await getLocalStreetsInPolygonFiltered(
+      expandedPolygon,
+      "intersects",
+      { namedOnly: true },
+    );
   }
 
   // Filter to only streets with matching names that aren't already in the list
@@ -468,14 +448,14 @@ export async function createProject(
     const filterFn = resolveRadiusFilter(boundaryMode);
 
     if (cacheKey) {
-      const cached = await getCachedGeometries(cacheKey);
-      if (cached) {
-        streets = filterFn(cached, centerLat, centerLng, radiusMeters);
-        console.log(`[Project] Using cached data from: ${cacheKey}`);
-      } else {
-        streets = await queryStreetsInRadius(centerLat, centerLng, radiusMeters);
-        streets = filterFn(streets, centerLat, centerLng, radiusMeters);
-      }
+      const raw = await getLocalStreetsInRadius(
+        centerLat,
+        centerLng,
+        radiusMeters,
+        { namedOnly: true },
+      );
+      streets = filterFn(raw, centerLat, centerLng, radiusMeters);
+      console.log(`[Project] Using local streets for cacheKey path: ${cacheKey}`);
     } else {
       const result = await getStreetsWithCache(
         centerLat,
@@ -522,7 +502,13 @@ export async function createProject(
         "Polygon project requires polygonCoordinates with at least 3 points."
       );
     }
-    streets = await queryStreetsInPolygon(polygonCoordinates, boundaryMode);
+    const polyCenter = polygonCentroid(polygonCoordinates);
+    await ensureCitySynced(polyCenter.lat, polyCenter.lng);
+    streets = await getLocalStreetsInPolygonFiltered(
+      polygonCoordinates,
+      boundaryMode,
+      { namedOnly: true },
+    );
     const filterFn = resolvePolygonFilter(boundaryMode);
     streets = filterFn(streets, polygonCoordinates);
 
@@ -839,7 +825,7 @@ const MAP_COMPLETION_THRESHOLD = 90;
 /**
  * Get project-scoped map data: streets with geometry and status for map rendering.
  *
- * Fetches street geometries from cache (or Overpass if cache miss), merges with
+ * Fetches street geometries from PostGIS (WayTotalEdges), merges with
  * project snapshot progress, and returns streets with status (completed / partial / not_started)
  * and GeoJSON LineString geometry.
  *
@@ -890,9 +876,11 @@ export async function getProjectMapData(
     if (!polygonCoordinates || polygonCoordinates.length < 3) {
       throw new Error("Project has invalid polygon boundary.");
     }
-    streetsWithGeometry = await queryStreetsInPolygon(
+    const polyCenter = polygonCentroid(polygonCoordinates);
+    await ensureCitySynced(polyCenter.lat, polyCenter.lng);
+    streetsWithGeometry = await getLocalStreetsInPolygonFiltered(
       polygonCoordinates,
-      boundaryMode
+      boundaryMode,
     );
     const filterFn = resolvePolygonFilter(boundaryMode);
     streetsWithGeometry = filterFn(streetsWithGeometry, polygonCoordinates);
@@ -920,7 +908,10 @@ export async function getProjectMapData(
           [bbox.maxLng + lngPadding, bbox.maxLat + latPadding],
           [bbox.minLng - lngPadding, bbox.maxLat + latPadding],
         ];
-        const expandedStreets = await queryStreetsInPolygon(expandedPolygon, "intersects");
+        const expandedStreets = await getLocalStreetsInPolygonFiltered(
+          expandedPolygon,
+          "intersects",
+        );
         const additionalStreets = expandedStreets.filter(
           (s) =>
             snapshotOsmIds.has(s.osmId) && !foundOsmIds.has(s.osmId)
@@ -945,53 +936,21 @@ export async function getProjectMapData(
     ) {
       throw new Error("Project has invalid circle boundary.");
     }
+    await ensureCitySynced(centerLat, centerLng);
     const filterFn = resolveRadiusFilter(boundaryMode);
 
-    const exactKey = generateRadiusCacheKey(
+    streetsWithGeometry = await getLocalStreetsInRadius(
       centerLat,
       centerLng,
-      radiusMeters
+      radiusMeters,
     );
-    const exactCache = await getCachedGeometries(exactKey);
-
-    if (exactCache) {
-      streetsWithGeometry = filterFn(
-        exactCache,
-        centerLat,
-        centerLng,
-        radiusMeters
-      );
-      geometryCacheHit = true;
-    } else {
-      const larger = await findLargerCachedRadius(
-        centerLat,
-        centerLng,
-        radiusMeters
-      );
-      if (larger) {
-        streetsWithGeometry = filterFn(
-          larger.streets,
-          centerLat,
-          centerLng,
-          radiusMeters
-        );
-        geometryCacheHit = true;
-      } else {
-        streetsWithGeometry = await queryStreetsInRadius(
-          centerLat,
-          centerLng,
-          radiusMeters
-        );
-        streetsWithGeometry = filterFn(
-          streetsWithGeometry,
-          centerLat,
-          centerLng,
-          radiusMeters
-        );
-        await setCachedGeometries(exactKey, streetsWithGeometry);
-        geometryCacheHit = false;
-      }
-    }
+    streetsWithGeometry = filterFn(
+      streetsWithGeometry,
+      centerLat,
+      centerLng,
+      radiusMeters,
+    );
+    geometryCacheHit = false;
 
     // If the project used "intersects" mode, some snapshot streets may extend beyond
     // the boundary. Expand the search radius to find their geometry too.
@@ -1000,7 +959,11 @@ export async function getProjectMapData(
       const missingOsmIds = [...snapshotOsmIds].filter((id) => !foundOsmIds.has(id));
       if (missingOsmIds.length > 0) {
         const expandedRadius = Math.min(radiusMeters * 10, PROJECTS.RADIUS_MAX);
-        const expandedStreets = await queryStreetsInRadius(centerLat, centerLng, expandedRadius);
+        const expandedStreets = await getLocalStreetsInRadius(
+          centerLat,
+          centerLng,
+          expandedRadius,
+        );
         const additionalStreets = expandedStreets.filter(
           (s) =>
             snapshotOsmIds.has(s.osmId) && !foundOsmIds.has(s.osmId)
@@ -1432,9 +1395,11 @@ export async function refreshProjectSnapshot(
     }
     const boundaryMode =
       (project as { boundaryMode?: string }).boundaryMode ?? "intersects";
-    freshStreets = await queryStreetsInPolygon(
+    const pc = polygonCentroid(polygonCoordinates);
+    await ensureCitySynced(pc.lat, pc.lng);
+    freshStreets = await getLocalStreetsInPolygonFiltered(
       polygonCoordinates,
-      boundaryMode
+      boundaryMode,
     );
     const filterFn = resolvePolygonFilter(boundaryMode);
     freshStreets = filterFn(freshStreets, polygonCoordinates);
@@ -1445,7 +1410,8 @@ export async function refreshProjectSnapshot(
     if (centerLat == null || centerLng == null || radiusMeters == null) {
       throw new Error("Project has invalid circle boundary.");
     }
-    freshStreets = await queryStreetsInRadius(centerLat, centerLng, radiusMeters);
+    await ensureCitySynced(centerLat, centerLng);
+    freshStreets = await getLocalStreetsInRadius(centerLat, centerLng, radiusMeters);
     const boundaryMode =
       (project as { boundaryMode?: string }).boundaryMode ?? "intersects";
     const filterFn = resolveRadiusFilter(boundaryMode);
@@ -2138,7 +2104,12 @@ export async function expandProjectToFullStreets(
       [bbox.maxLng + lngPadding, bbox.maxLat + latPadding],
       [bbox.minLng - lngPadding, bbox.maxLat + latPadding],
     ];
-    expandedStreets = await queryStreetsInPolygon(expandedPolygon, "intersects");
+    const ec = polygonCentroid(polygonCoordinates);
+    await ensureCitySynced(ec.lat, ec.lng);
+    expandedStreets = await getLocalStreetsInPolygonFiltered(
+      expandedPolygon,
+      "intersects",
+    );
   } else {
     const centerLat = project.centerLat;
     const centerLng = project.centerLng;
@@ -2146,9 +2117,14 @@ export async function expandProjectToFullStreets(
     if (centerLat == null || centerLng == null || radiusMeters == null) {
       throw new Error("Project has invalid circle boundary.");
     }
+    await ensureCitySynced(centerLat, centerLng);
     // Query 2x the radius to find more segments
     const expandedRadius = Math.min(radiusMeters * 2, PROJECTS.RADIUS_MAX);
-    expandedStreets = await queryStreetsInRadius(centerLat, centerLng, expandedRadius);
+    expandedStreets = await getLocalStreetsInRadius(
+      centerLat,
+      centerLng,
+      expandedRadius,
+    );
   }
 
   // Filter to only streets with matching names that aren't already in the snapshot

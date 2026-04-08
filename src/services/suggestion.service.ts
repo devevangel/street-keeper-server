@@ -871,10 +871,11 @@ export async function getHomepageSuggestions(
     context.radius != null &&
     (context.lat !== 0 || context.lng !== 0)
   ) {
-    const [mapResult, rawGeometries] = await Promise.all([
+    const [mapResult, geoInArea] = await Promise.all([
       getMapStreets(userId, context.lat, context.lng, context.radius),
       getGeometriesInArea(context.lat, context.lng, context.radius),
     ]);
+    const rawGeometries = geoInArea.streets;
     mapStreetsResponse = mapResult;
 
     const progressSegmentIds = new Set(mapResult.segments.map((s) => s.osmId));
@@ -1282,9 +1283,12 @@ export async function getNearestShortStreet(
   userLng: number,
   radiusMeters: number = 500
 ): Promise<NearestShortStreetItem | null> {
-  // Get all streets in the area
-  const streets = await getGeometriesInArea(userLat, userLng, radiusMeters);
-  
+  const { streets } = await getGeometriesInArea(
+    userLat,
+    userLng,
+    radiusMeters,
+  );
+
   if (streets.length === 0) return null;
 
   // Filter out unnamed streets and calculate distance from user to each street
@@ -1362,7 +1366,11 @@ export async function getNearestShortStreets(
   max: number = 5,
   maxLengthMeters: number = 500,
 ): Promise<NearestShortStreetItem[]> {
-  const streets = await getGeometriesInArea(userLat, userLng, radiusMeters);
+  const { streets } = await getGeometriesInArea(
+    userLat,
+    userLng,
+    radiusMeters,
+  );
   if (streets.length === 0) return [];
 
   const candidates: Array<{

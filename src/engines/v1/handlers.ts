@@ -1,7 +1,7 @@
 /**
  * V1 engine handlers
  *
- * Legacy GPX analysis: Overpass + Mapbox hybrid, street aggregation.
+ * Legacy GPX analysis: PostGIS streets + Mapbox hybrid, street aggregation.
  * Same pipeline as POST /api/v1/runs/analyze-gpx (mounted here as /engine-v1/analyze).
  */
 
@@ -12,10 +12,13 @@ import {
   calculateDuration,
   calculateBoundingBox,
 } from "../../services/geo.service.js";
+import { getLocalStreetsInBBox } from "../../services/local-streets.service.js";
+import prisma from "../../lib/prisma.js";
+import { detectCity } from "../../services/city-sync.service.js";
 import {
-  queryStreetsInBoundingBox,
-  OverpassError,
-} from "../../services/overpass.service.js";
+  enqueueCitySyncJob,
+  enqueueGpxAnalyzeJob,
+} from "../../queues/activity.queue.js";
 import {
   matchPointsToStreets,
   matchPointsToStreetsHybrid,
@@ -34,13 +37,13 @@ import type {
  */
 export function getInfo(_req: Request, res: Response): void {
   res.json({
-    message: "V1 Engine - Overpass + Mapbox hybrid",
+    message: "V1 Engine - PostGIS streets + Mapbox hybrid",
     version: "1.0.0",
     endpoints: {
       analyze: "POST /api/v1/engine-v1/analyze",
     },
     description:
-      "Legacy GPX analysis: bounding box + Overpass streets, Mapbox (or Overpass-only) point-to-street matching, logical street aggregation.",
+      "Legacy GPX analysis: bounding box + local street geometries, Mapbox (or geometry-only) point-to-street matching, logical street aggregation.",
   });
 }
 
@@ -70,7 +73,51 @@ export async function analyzeGpx(req: Request, res: Response): Promise<void> {
     console.log(`[GPX][v1] Run stats: ${totalDistance.toFixed(0)}m, ${duration}s`);
 
     const bbox = calculateBoundingBox(gpxData.points);
-    const streets = await queryStreetsInBoundingBox(bbox);
+    const lats = gpxData.points.map((p) => p.lat);
+    const lngs = gpxData.points.map((p) => p.lng);
+    const centerLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+    const centerLng = (Math.min(...lngs) + Math.max(...lngs)) / 2;
+
+    const city = await detectCity(centerLat, centerLng);
+    if (!city) {
+      const err: GpxErrorResponse = {
+        success: false,
+        error:
+          "Could not determine city for this GPX area. Try a longer track or different location.",
+        code: ERROR_CODES.VALIDATION_ERROR,
+      };
+      res.status(400).json(err);
+      return;
+    }
+
+    const existing = await prisma.citySync.findUnique({
+      where: { relationId: city.relationId },
+    });
+    const synced =
+      existing != null && existing.expiresAt > new Date();
+
+    if (!synced) {
+      await enqueueCitySyncJob({
+        relationId: city.relationId.toString(),
+        name: city.name,
+        adminLevel: city.adminLevel,
+      });
+      await enqueueGpxAnalyzeJob({
+        gpxBase64: req.file!.buffer.toString("base64"),
+        centerLat,
+        centerLng,
+        deferCount: 0,
+      });
+      res.status(202).json({
+        success: true,
+        status: "processing",
+        message:
+          "Street data is being loaded for this area. Your run will be processed shortly.",
+      });
+      return;
+    }
+
+    const streets = await getLocalStreetsInBBox(bbox);
     console.log(`[GPX][v1] Found ${streets.length} streets in area`);
 
     const useHybrid = isMapboxConfigured();
@@ -153,14 +200,6 @@ export async function analyzeGpx(req: Request, res: Response): Promise<void> {
         success: false,
         error: error.message,
         code: ERROR_CODES.GPX_PARSE_ERROR,
-      } as GpxErrorResponse);
-      return;
-    }
-    if (error instanceof OverpassError) {
-      res.status(502).json({
-        success: false,
-        error: error.message,
-        code: ERROR_CODES.OVERPASS_API_ERROR,
       } as GpxErrorResponse);
       return;
     }

@@ -182,26 +182,6 @@ model ProjectActivity {
 }
 
 // ============================================
-// Geometry Cache Model
-// ============================================
-
-model GeometryCache {
-  id String @id @default(uuid())
-
-  // Cache key format: "radius:{lat}:{lng}:{meters}" or "bbox:{s}:{w}:{n}:{e}"
-  cacheKey String @unique
-
-  // Cached street geometries (OsmStreet[] with full geometry)
-  geometries Json
-
-  createdAt DateTime @default(now())
-  expiresAt DateTime
-
-  @@index([cacheKey])
-  @@index([expiresAt])
-}
-
-// ============================================
 // User Street Progress Model
 // ============================================
 // Tracks user-level street progress across all routes.
@@ -307,14 +287,15 @@ model WayCache {
 // subsequent projects in the same city reuse cached NodeCache/WayNode/WayTotalEdges.
 
 model CitySync {
-  id         String   @id @default(uuid())
-  relationId BigInt   @unique // OSM relation ID (area id in Overpass = 3600000000 + relationId)
+  id         String                                  @id @default(uuid())
+  relationId BigInt                                  @unique // OSM relation ID (area id in Overpass = 3600000000 + relationId)
   name       String // City name from OSM
   adminLevel Int // OSM admin_level (typically 8 for city)
-  nodeCount  Int      @default(0)
-  wayCount   Int      @default(0)
-  syncedAt   DateTime @default(now())
+  nodeCount  Int                                     @default(0)
+  wayCount   Int                                     @default(0)
+  syncedAt   DateTime                                @default(now())
   expiresAt  DateTime // Re-sync after this (e.g. syncedAt + 6 weeks)
+  boundary   Unsupported("geometry(Geometry,4326)")?
 
   @@index([relationId])
   @@index([expiresAt])
@@ -333,6 +314,14 @@ model WayTotalEdges {
   name        String? // Denormalized for display
   highwayType String // e.g. residential, footway
   createdAt   DateTime @default(now())
+
+  // PostGIS — also written via raw SQL during city sync
+  geometry     Unsupported("geometry(LineString,4326)")?
+  lengthMeters Float?
+  surface      String?
+  access       String?
+  ref          String?
+  altNames     String[] @default([])
 }
 
 // ============================================
@@ -358,8 +347,9 @@ model UserNodeHit {
 // Maps each way to its constituent nodes. Populated by seed script for completion queries.
 
 model WayNode {
-  wayId  BigInt
-  nodeId BigInt
+  wayId    BigInt
+  nodeId   BigInt
+  sequence Int? // OSM node order within the way (0-based)
 
   @@id([wayId, nodeId])
   @@index([nodeId])
@@ -377,6 +367,8 @@ model NodeCache {
   lat       Float // Latitude
   lon       Float // Longitude
   createdAt DateTime @default(now())
+  // PostGIS point; maintained via raw SQL + city sync
+  geom      Unsupported("geometry(Point,4326)")?
 
   @@index([lat, lon]) // For bounding box queries (city-level is sufficient)
 }

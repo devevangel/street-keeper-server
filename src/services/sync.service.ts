@@ -348,9 +348,14 @@ export interface StartBackgroundSyncResult {
   status: string;
 }
 
-/** Cooldown: no new sync if last completed sync was within this many hours. */
+/** Cooldown: no new sync if last completed sync was within this many hours.
+ *  Override with env SYNC_COOLDOWN_HOURS=0 for local dev. */
+const envCooldown = process.env.SYNC_COOLDOWN_HOURS;
 const SYNC_COOLDOWN_MS =
-  (ACTIVITIES.SYNC_COOLDOWN_HOURS ?? 24) * 60 * 60 * 1000;
+  (envCooldown != null ? Number(envCooldown) : ACTIVITIES.SYNC_COOLDOWN_HOURS) *
+  60 *
+  60 *
+  1000;
 
 /**
  * Start a background sync: fetch activity list with pagination, create SyncJob, enqueue.
@@ -421,8 +426,12 @@ export async function startBackgroundSync(
   const after = options?.after ?? defaultAfter;
   const before = options?.before ?? undefined;
 
+  console.log(
+    `[Sync] Fetching all activities: after=${new Date(after * 1000).toISOString()} (MAX_AGE_DAYS=${ACTIVITIES.MAX_AGE_DAYS})`,
+  );
   const summaries = await fetchAllActivitySummaries(accessToken, after, before);
   const total = summaries.length;
+  console.log(`[Sync] Found ${total} activities from Strava`);
 
   const job = await prisma.syncJob.create({
     data: {

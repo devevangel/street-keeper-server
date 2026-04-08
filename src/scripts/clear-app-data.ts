@@ -12,7 +12,6 @@
  *   8. UserEdge
  *   9. UserNodeHit
  *  10. Activity
- *  11. GeometryCache
  *
  * Keeps: User (so you stay logged in), MilestoneType (seed), WayCache, WayTotalEdges,
  * WayNode, NodeCache (PBF/seed data - no re-seed needed).
@@ -58,9 +57,6 @@ async function main(): Promise<void> {
 
   const act = await prisma.activity.deleteMany({});
   console.log(`[Clear] Deleted ${act.count} Activity rows.`);
-
-  const gc = await prisma.geometryCache.deleteMany({});
-  console.log(`[Clear] Deleted ${gc.count} GeometryCache rows.`);
 
   console.log("[Clear] Done. Users and PBF/seed data kept. You can re-sync and test again.");
 }

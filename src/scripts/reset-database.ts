@@ -8,7 +8,7 @@
  * Truncates (in FK-safe order, with CASCADE):
  *   App data: SuggestionCooldown, AnalyticsEvent, UserMilestone, UserPreferences,
  *     ProjectActivity, Project, UserStreetProgress, UserEdge, UserNodeHit, Activity,
- *     GeometryCache, User
+ *     User
  *   Map/seed data: WayCache, CitySync, WayTotalEdges, WayNode, NodeCache
  *   Seed config: MilestoneType
  *
@@ -36,7 +36,6 @@ const TABLES_IN_ORDER = [
   "UserEdge",
   "UserNodeHit",
   "Activity",
-  "GeometryCache",
   "User",
   "WayCache",
   "CitySync",

@@ -236,6 +236,11 @@ async function streamNodesToNodeCache(
     inserted += batch.length;
   }
   fs.unlinkSync(tmpFile);
+  await prisma.$executeRaw`
+    UPDATE "NodeCache"
+    SET "geom" = ST_SetSRID(ST_MakePoint("lon", "lat"), 4326)
+    WHERE "geom" IS NULL
+  `;
   return inserted;
 }
 

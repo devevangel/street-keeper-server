@@ -14,7 +14,7 @@
  * Note: Project progress is still calculated by the V1 engine (Overpass + Mapbox matching), not V2.
  * V2 only populates UserEdge for the global map.
  *
- * Keeps: User, Project (definitions and street lists; only progress is zeroed), GeometryCache, WayCache, WayTotalEdges.
+ * Keeps: User, Project (definitions and street lists; only progress is zeroed), WayCache, WayTotalEdges.
  * After running, click Sync with Strava to re-fetch and fully re-process.
  *
  * Usage (from backend directory):

@@ -8,13 +8,14 @@
  * Subsequent projects in the same city reuse the cached data.
  */
 
-import axios from "axios";
+import * as turf from "@turf/turf";
+import { Prisma } from "../generated/prisma/client.js";
 import prisma from "../lib/prisma.js";
-import { OVERPASS } from "../config/constants.js";
-import { CITY_SYNC } from "../config/constants.js";
+import { CITY_SYNC, OVERPASS } from "../config/constants.js";
 import type { OverpassElement, OverpassResponse } from "../types/run.types.js";
-import { OverpassError } from "./overpass.service.js";
+import { executeRawOverpassQuery } from "./overpass.service.js";
 import { throttledOverpassQuery } from "./overpass-throttle.service.js";
+import { enqueueCitySyncJob } from "../queues/activity.queue.js";
 
 const OSM_AREA_OFFSET = 3_600_000_000; // area ID = relation_id + this for relations
 
@@ -38,61 +39,23 @@ export interface CitySyncRecord {
 const BATCH_SIZE = 2000;
 const CITY_QUERY_TIMEOUT_SECONDS = 900;
 
-/**
- * Run a raw Overpass query and return the raw JSON response.
- */
-async function executeRawOverpassQuery(
-  query: string,
-): Promise<OverpassResponse> {
-  const servers = [OVERPASS.API_URL, ...OVERPASS.FALLBACK_URLS];
-  const errors: string[] = [];
+/** Overpass highway regex aligned with OVERPASS.HIGHWAY_TYPES + user-facing queries */
+const CITY_SYNC_HIGHWAY_REGEX = OVERPASS.HIGHWAY_TYPES.join("|");
 
-  for (let si = 0; si < servers.length; si++) {
-    const serverUrl = servers[si];
-    const isLastServer = si === servers.length - 1;
-
-    for (let attempt = 0; attempt < OVERPASS.MAX_RETRIES; attempt++) {
-      try {
-        if (attempt > 0) {
-          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-          await new Promise((r) => setTimeout(r, delayMs));
-        }
-
-        const response = await axios.post<OverpassResponse>(serverUrl, query, {
-          headers: { "Content-Type": "text/plain" },
-          timeout: OVERPASS.TIMEOUT_MS,
-        });
-
-        if (!response.data || !Array.isArray(response.data.elements)) {
-          throw new Error("Invalid Overpass response: missing elements");
-        }
-        return response.data;
-      } catch (error: unknown) {
-        const msg =
-          axios.isAxiosError(error)
-            ? `${error.response?.status ?? "network"} ${error.message}`
-            : String(error);
-        errors.push(msg);
-
-        const status = axios.isAxiosError(error)
-          ? error.response?.status
-          : undefined;
-        if (status === 429) {
-          await new Promise((r) => setTimeout(r, 60000));
-          continue;
-        }
-
-        if (attempt === OVERPASS.MAX_RETRIES - 1 && isLastServer) {
-          throw new OverpassError(
-            `Overpass failed: ${errors.join("; ")}`,
-          );
-        }
-      }
-    }
-  }
-
-  throw new OverpassError(`Overpass failed: ${errors.join("; ")}`);
+function collectAltNames(
+  tags: Record<string, string | undefined> | undefined,
+): string[] {
+  if (!tags) return [];
+  const altNames: string[] = [];
+  if (tags.alt_name) altNames.push(tags.alt_name);
+  if (tags["name:en"]) altNames.push(tags["name:en"]);
+  if (tags.old_name) altNames.push(tags.old_name);
+  if (tags.loc_name) altNames.push(tags.loc_name);
+  return altNames;
 }
+
+// executeRawOverpassQuery is imported from overpass.service.ts (shared
+// status-aware implementation with slot checking and server ranking).
 
 /**
  * Detect which OSM city (administrative boundary) contains the given point.
@@ -109,7 +72,7 @@ area.a["boundary"="administrative"];
 out tags;
 `;
   const data = await throttledOverpassQuery(() =>
-    executeRawOverpassQuery(query),
+    executeRawOverpassQuery(query, { caller: "detect-city" }),
   );
 
   if (!data.elements || data.elements.length === 0) {
@@ -171,18 +134,13 @@ export async function syncCity(
 ): Promise<CitySyncRecord> {
   const areaId = Number(relationId) + OSM_AREA_OFFSET;
 
-  // CityStrides-style query: named ways, pedestrian-accessible, exclude motorways etc.
+  // Align with OVERPASS.HIGHWAY_TYPES; include unnamed segments (map parity).
   const query = `
 [out:json][timeout:${CITY_QUERY_TIMEOUT_SECONDS}];
 area(${areaId})->.a;
 (
-  way(area.a)["name"]["highway"]
-  ["highway"!~"path"]["highway"!~"steps"]
-  ["highway"!~"motorway"]["highway"!~"motorway_link"]
-  ["highway"!~"raceway"]["highway"!~"bridleway"]
-  ["highway"!~"proposed"]["highway"!~"construction"]
-  ["highway"!~"elevator"]["highway"!~"bus_guideway"]
-  ["highway"!~"footway"]["highway"!~"cycleway"]
+  way(area.a)["highway"~"^(${CITY_SYNC_HIGHWAY_REGEX})$"]
+  ["highway"!~"motorway|motorway_link|trunk|trunk_link|raceway|bridleway|proposed|construction|elevator|bus_guideway"]
   ["foot"!~"no"]
   ["access"!~"private"]["access"!~"no"];
 );
@@ -191,12 +149,19 @@ out;
 `;
 
   const data = await throttledOverpassQuery(() =>
-    executeRawOverpassQuery(query),
+    executeRawOverpassQuery(query, {
+      maxWaitSeconds: OVERPASS.BACKGROUND_MAX_SLOT_WAIT_SECONDS,
+      caller: "city-sync",
+    }),
   );
 
   const elements = data.elements as OverpassElement[];
-  const ways = elements.filter((el) => el.type === "way" && el.nodes && el.nodes.length >= 2);
-  const nodes = elements.filter((el) => el.type === "node" && el.lat != null && el.lon != null);
+  const ways = elements.filter(
+    (el) => el.type === "way" && el.nodes && el.nodes.length >= 2,
+  );
+  const nodes = elements.filter(
+    (el) => el.type === "node" && el.lat != null && el.lon != null,
+  );
 
   const nodeMap = new Map<number, { lat: number; lon: number }>();
   for (const n of nodes) {
@@ -219,14 +184,27 @@ out;
             lon: coords.lon,
           },
           update: { lat: coords.lat, lon: coords.lon },
-        })
-    )
-  );
+        }),
+      ),
+    );
+    await prisma.$executeRaw`
+      UPDATE "NodeCache"
+      SET "geom" = ST_SetSRID(ST_MakePoint("lon", "lat"), 4326)
+      WHERE "nodeId" IN (${Prisma.join(
+        batch.map(([nodeId]) => Prisma.sql`${BigInt(nodeId)}`),
+      )})
+    `;
   }
 
   // Build WayNode and WayTotalEdges from ways
-  const wayTotalRows: { wayId: number; totalNodes: number; name: string | null; highwayType: string }[] = [];
-  const wayNodeRows: { wayId: bigint; nodeId: bigint }[] = [];
+  const wayTotalRows: {
+    wayId: number;
+    totalNodes: number;
+    name: string | null;
+    highwayType: string;
+  }[] = [];
+  const wayNodeRows: { wayId: bigint; nodeId: bigint; sequence: number }[] =
+    [];
 
   for (const w of ways) {
     if (!w.nodes || w.nodes.length < 2 || w.id == null) continue;
@@ -235,8 +213,13 @@ out;
     const name = w.tags?.name ?? null;
     const highwayType = w.tags?.highway ?? "unknown";
     wayTotalRows.push({ wayId, totalNodes, name, highwayType });
-    for (const nid of w.nodes) {
-      wayNodeRows.push({ wayId: BigInt(wayId), nodeId: BigInt(nid) });
+    for (let idx = 0; idx < w.nodes.length; idx++) {
+      const nid = w.nodes[idx];
+      wayNodeRows.push({
+        wayId: BigInt(wayId),
+        nodeId: BigInt(nid),
+        sequence: idx,
+      });
     }
   }
 
@@ -260,9 +243,9 @@ out;
             name: row.name,
             highwayType: row.highwayType,
           },
-        })
-    )
-  );
+        }),
+      ),
+    );
   }
 
   // Upsert WayNode (ignore conflicts for duplicate way-node pairs)
@@ -274,11 +257,73 @@ out;
           where: {
             wayId_nodeId: { wayId: row.wayId, nodeId: row.nodeId },
           },
-          create: row,
-          update: {},
-        })
-    )
-  );
+          create: {
+            wayId: row.wayId,
+            nodeId: row.nodeId,
+            sequence: row.sequence,
+          },
+          update: { sequence: row.sequence },
+        }),
+      ),
+    );
+  }
+
+  // PostGIS geometry + metadata (after Prisma upserts created core rows)
+  type GeometryRow = {
+    wayId: bigint;
+    geojson: string;
+    lengthMeters: number;
+    surface: string | null;
+    access: string | null;
+    ref: string | null;
+    altNames: string[];
+  };
+
+  const geometryRows: GeometryRow[] = [];
+  for (const w of ways) {
+    if (!w.nodes || w.nodes.length < 2 || w.id == null) continue;
+    const wayId = BigInt(w.id);
+    const coordinates: [number, number][] = [];
+    for (const nid of w.nodes) {
+      const c = nodeMap.get(nid);
+      if (c) coordinates.push([c.lon, c.lat]);
+    }
+    if (coordinates.length < 2) continue;
+
+    const geojson = JSON.stringify({
+      type: "LineString",
+      coordinates,
+    });
+    const line = turf.lineString(coordinates);
+    const lengthMeters = turf.length(line, { units: "kilometers" }) * 1000;
+    const tags = w.tags;
+    const altNames = collectAltNames(tags);
+    geometryRows.push({
+      wayId,
+      geojson,
+      lengthMeters,
+      surface: tags?.surface ?? null,
+      access: tags?.access ?? null,
+      ref: tags?.ref ?? null,
+      altNames,
+    });
+  }
+
+  for (let i = 0; i < geometryRows.length; i += BATCH_SIZE) {
+    const batch = geometryRows.slice(i, i + BATCH_SIZE);
+    for (const r of batch) {
+      await prisma.$executeRaw`
+        UPDATE "WayTotalEdges"
+        SET
+          "geometry" = ST_SetSRID(ST_GeomFromGeoJSON(${r.geojson}::json), 4326),
+          "lengthMeters" = ${r.lengthMeters},
+          "surface" = ${r.surface},
+          "access" = ${r.access},
+          "ref" = ${r.ref},
+          "altNames" = ${r.altNames}::text[]
+        WHERE "wayId" = ${r.wayId}
+      `;
+    }
   }
 
   const now = new Date();
@@ -286,7 +331,9 @@ out;
   expiresAt.setDate(expiresAt.getDate() + CITY_SYNC.EXPIRY_DAYS);
 
   const name =
-    options?.name ?? (ways[0]?.tags?.name as string | undefined) ?? `City ${relationId}`;
+    options?.name ??
+    (ways[0]?.tags?.name as string | undefined) ??
+    `City ${relationId}`;
   const adminLevel = options?.adminLevel ?? 8;
   const record = await prisma.citySync.upsert({
     where: { relationId },
@@ -307,6 +354,22 @@ out;
     },
   });
 
+  // Compute and store the convex hull boundary from all synced street geometries.
+  // ST_Buffer adds ~100m so edge streets fall inside the polygon.
+  const syncedWayIds = wayTotalRows.map((r) => BigInt(r.wayId));
+  if (syncedWayIds.length > 0) {
+    await prisma.$executeRaw`
+      UPDATE "CitySync"
+      SET "boundary" = (
+        SELECT ST_Buffer(ST_ConvexHull(ST_Collect("geometry")), 0.001)
+        FROM "WayTotalEdges"
+        WHERE "wayId" IN (${Prisma.join(syncedWayIds)})
+          AND "geometry" IS NOT NULL
+      )
+      WHERE "relationId" = ${relationId}
+    `;
+  }
+
   console.log(
     `[CitySync] Synced city relationId=${relationId} nodes=${nodeMap.size} ways=${ways.length}`,
   );
@@ -324,6 +387,53 @@ out;
 }
 
 /**
+ * PostGIS-first city lookup: check if (lat, lng) falls inside any synced
+ * city boundary. Returns the CitySync record or null. This avoids calling
+ * Overpass detectCity for every request in already-synced areas.
+ */
+export async function findSyncedCityByPoint(
+  lat: number,
+  lng: number,
+): Promise<CitySyncRecord | null> {
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string;
+      relationId: bigint;
+      name: string;
+      adminLevel: number;
+      nodeCount: number;
+      wayCount: number;
+      syncedAt: Date;
+      expiresAt: Date;
+    }>
+  >`
+    SELECT "id", "relationId", "name", "adminLevel",
+           "nodeCount", "wayCount", "syncedAt", "expiresAt"
+    FROM "CitySync"
+    WHERE "boundary" IS NOT NULL
+      AND ST_Contains("boundary", ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326))
+      AND "expiresAt" > NOW()
+    LIMIT 1
+  `;
+
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  console.log(
+    `[CitySync] PostGIS boundary hit: "${r.name}" (relation ${r.relationId}) — skipping Overpass`,
+  );
+  return {
+    id: r.id,
+    relationId: r.relationId,
+    name: r.name,
+    adminLevel: r.adminLevel,
+    nodeCount: r.nodeCount,
+    wayCount: r.wayCount,
+    syncedAt: r.syncedAt,
+    expiresAt: r.expiresAt,
+  };
+}
+
+/**
  * In-memory lock to prevent concurrent syncs for the same city.
  * Maps relationId -> Promise that resolves when sync completes.
  * For multi-server deployments, replace with Redis or DB advisory locks.
@@ -334,11 +444,19 @@ const syncInProgress = new Map<string, Promise<CitySyncRecord | null>>();
  * Ensure the city containing (lat, lng) is synced. If not (or expired),
  * detect city and run sync. No-op if already synced and not expired.
  * Uses in-memory lock to prevent duplicate Overpass calls for the same city.
+ *
+ * Fast path: PostGIS boundary check (no Overpass).
+ * Slow path: detectCity via Overpass (only for genuinely new cities).
  */
 export async function ensureCitySynced(
   lat: number,
   lng: number,
 ): Promise<CitySyncRecord | null> {
+  // Fast path: PostGIS boundary lookup
+  const local = await findSyncedCityByPoint(lat, lng);
+  if (local) return local;
+
+  // Slow path: new/unseen area — call Overpass once
   const city = await detectCity(lat, lng);
   if (!city) {
     return null;
@@ -352,7 +470,7 @@ export async function ensureCitySynced(
     return inProgress;
   }
 
-  // Check if already synced (not expired)
+  // Check if already synced (not expired) — boundary may be NULL from old sync
   const existing = await prisma.citySync.findUnique({
     where: { relationId: city.relationId },
   });
@@ -380,4 +498,56 @@ export async function ensureCitySynced(
 
   syncInProgress.set(lockKey, syncPromise);
   return syncPromise;
+}
+
+/**
+ * True if the administrative area containing (lat,lng) has a non-expired CitySync row.
+ * Fast path: PostGIS boundary check. Slow path: Overpass detectCity.
+ */
+export async function isCitySynced(
+  lat: number,
+  lng: number,
+): Promise<boolean> {
+  const local = await findSyncedCityByPoint(lat, lng);
+  if (local) return true;
+
+  const city = await detectCity(lat, lng);
+  if (!city) return false;
+  const existing = await prisma.citySync.findUnique({
+    where: { relationId: city.relationId },
+  });
+  return existing != null && existing.expiresAt > new Date();
+}
+
+/**
+ * Ensure city data is loading without blocking: enqueue background sync if missing/expired.
+ * Fast path: PostGIS boundary check (no Overpass).
+ */
+export async function ensureCitySyncedAsync(
+  lat: number,
+  lng: number,
+): Promise<{ synced: boolean }> {
+  // Fast path: PostGIS boundary lookup — completely avoids Overpass
+  const local = await findSyncedCityByPoint(lat, lng);
+  if (local) return { synced: true };
+
+  // Slow path: new area — detect city via Overpass and enqueue sync
+  const city = await detectCity(lat, lng);
+  if (!city) return { synced: false };
+
+  const existing = await prisma.citySync.findUnique({
+    where: { relationId: city.relationId },
+  });
+
+  if (existing && existing.expiresAt > new Date()) {
+    return { synced: true };
+  }
+
+  await enqueueCitySyncJob({
+    relationId: city.relationId.toString(),
+    name: city.name,
+    adminLevel: city.adminLevel,
+  });
+
+  return { synced: false };
 }

@@ -8,8 +8,14 @@ import routes from "./routes/index.js";
 import docsRoutes from "./routes/docs.routes.js";
 import { API } from "./config/constants.js";
 import { startQueue, closeQueue } from "./queues/activity.queue.js";
-import { startActivityWorker, stopActivityWorker } from "./workers/activity.worker.js";
+import {
+  startActivityWorker,
+  stopActivityWorker,
+} from "./workers/activity.worker.js";
 import { startSyncWorker, stopSyncWorker } from "./workers/sync.worker.js";
+import { startCitySyncWorker } from "./workers/city-sync.worker.js";
+import { startGpxAnalyzeWorker } from "./workers/gpx-analyze.worker.js";
+import prisma from "./lib/prisma.js";
 
 // Initialize Express app
 const app: Application = express();
@@ -20,7 +26,7 @@ app.use(
   cors({
     origin: process.env.FRONTEND_URL || "http://localhost:5173",
     credentials: true,
-  })
+  }),
 );
 app.use(compression());
 app.use(express.json());
@@ -74,9 +80,33 @@ async function main(): Promise<void> {
     await startQueue();
     await startActivityWorker();
     await startSyncWorker();
+    await startCitySyncWorker();
+    await startGpxAnalyzeWorker();
   } catch (err) {
     console.error("[Server] Failed to start queue/worker:", err);
     // Continue so API can run in degraded mode (e.g. DISABLE_QUEUE=true)
+  }
+
+  try {
+    const [row] = await prisma.$queryRaw<
+      Array<{
+        synced_cities: bigint;
+        streets_with_geometry: bigint;
+        streets_without_geometry: bigint;
+      }>
+    >`
+      SELECT
+        (SELECT COUNT(*)::bigint FROM "CitySync") AS "synced_cities",
+        (SELECT COUNT(*)::bigint FROM "WayTotalEdges" WHERE "geometry" IS NOT NULL) AS "streets_with_geometry",
+        (SELECT COUNT(*)::bigint FROM "WayTotalEdges" WHERE "geometry" IS NULL) AS "streets_without_geometry"
+    `;
+    console.log(
+      `[PostGIS] Coverage: ${row.synced_cities} synced cities; ` +
+        `${row.streets_with_geometry} ways with geometry, ${row.streets_without_geometry} without`,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[PostGIS] Startup coverage query skipped:", msg);
   }
 
   const server = app.listen(PORT, () => {

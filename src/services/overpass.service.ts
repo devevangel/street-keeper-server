@@ -1,575 +1,291 @@
 /**
  * Overpass Service
- * Queries OpenStreetMap via Overpass API for street data
+ * Queries OpenStreetMap via Overpass API for street data.
  *
- * Overpass API is a read-only API for querying OpenStreetMap data.
- * It's free to use, no API key required, but be respectful of rate limits.
+ * Rate-limiting strategy (from the official docs):
  *
- * What this service does:
- * 1. Takes a bounding box (rectangle area from GPS track)
- * 2. Queries Overpass API for all streets/roads in that area
- * 3. Returns street data with names, lengths, and geometries
+ * The Overpass public servers expose /api/status which reports how many
+ * query slots a client currently has free and, if none, when the next
+ * slot opens.  HTTP 504 means "server rejected the query because the
+ * declared [timeout:][maxsize:] exceeds currently available capacity."
+ * HTTP 429 means "rate-limited — try later."
  *
- * Overpass Query Language (Overpass QL):
- * We use Overpass QL to query for "ways" (lines) with "highway" tags.
- * Highway tags indicate roads, paths, footways, etc.
+ * overpass-api.de resolves (DNS round-robin) to two independent servers,
+ * gall.openstreetmap.de and lambert.openstreetmap.de, each with its own
+ * rate-limit pool.  We probe both in parallel, pick whichever has a free
+ * slot, and wait only when truly necessary.
  *
- * API Endpoint: https://overpass-api.de/api/interpreter
- * Rate Limits: Be respectful (~1 request/second for heavy queries)
- *
+ * @see https://dev.overpass-api.de/overpass-doc/en/preface/commons.html
  * @see https://wiki.openstreetmap.org/wiki/Overpass_API
  */
 
 import axios from "axios";
-import type {
-  BoundingBox,
-  OsmStreet,
-  OverpassResponse,
-  GeoJsonLineString,
-} from "../types/run.types.js";
+import type { OverpassResponse } from "../types/run.types.js";
 import { OVERPASS } from "../config/constants.js";
-import { calculateLineLength } from "./geo.service.js";
-import {
-  polygonBoundingBox,
-  resolvePolygonFilter,
-} from "./geometry-cache.service.js";
-import { throttledOverpassQuery } from "./overpass-throttle.service.js";
-
-/** Max polygon vertices for direct Overpass poly query; above this use bbox + post-filter */
-const POLYGON_VERTEX_LIMIT = 50;
 
 // ============================================
-// Main Query Function
+// Server Status & Slot Management
 // ============================================
+
+interface SlotInfo {
+  slotsAvailable: number;
+  /** Seconds until the soonest slot opens (null if unknown) */
+  waitSeconds: number | null;
+}
+
+function serverName(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
 
 /**
- * Query streets within a bounding box from OpenStreetMap
+ * Query /api/status on a single Overpass server.
+ * Returns slot availability, or null if the server is unreachable.
  *
- * Sends an Overpass QL query to fetch all streets/roads/paths
- * within the specified geographic area.
- *
- * Features:
- * - Automatic retry with exponential backoff
- * - Fallback to alternative servers if primary fails
- * - Increased timeout for better reliability
- *
- * @param bbox - Bounding box defining the query area
- * @returns Array of OsmStreet objects with name, length, and geometry
- * @throws OverpassError if all API requests fail after retries
- *
- * @example
- * const bbox = { south: 50.79, north: 50.81, west: -1.10, east: -1.08 };
- * const streets = await queryStreetsInBoundingBox(bbox);
- * // Returns: [
- * //   { osmId: "way/123", name: "High Street", lengthMeters: 450, ... },
- * //   { osmId: "way/456", name: "Park Lane", lengthMeters: 320, ... },
- * // ]
+ * Response format (plain text):
+ *   Connected as: 1234567890
+ *   Current time: 2026-04-07T12:00:00Z
+ *   Rate limit: 2
+ *   2 slots available now.
+ *   — or —
+ *   Slot available after: 2026-04-07T12:00:05Z, in 5 seconds.
  */
-export async function queryStreetsInBoundingBox(
-  bbox: BoundingBox,
-): Promise<OsmStreet[]> {
-  // Build the highway type filter (residential|primary|secondary|...)
-  const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
+async function checkServerStatus(serverUrl: string): Promise<SlotInfo | null> {
+  const statusUrl = serverUrl.replace(/\/interpreter$/, "/status");
+  try {
+    const res = await axios.get<string>(statusUrl, {
+      timeout: 2_000,
+      responseType: "text",
+    });
+    const text = res.data;
 
-  // Construct Overpass QL query
-  // This query:
-  // - Sets output format to JSON
-  // - Sets timeout to 60 seconds (increased for reliability)
-  // - Finds all "ways" with highway tag matching our types
-  // - Filters by bounding box (south, west, north, east)
-  // - Returns body (tags) and geometry (coordinates)
-  const query = `
-    [out:json][timeout:${OVERPASS.QUERY_TIMEOUT_SECONDS}];
-    way["highway"~"^(${highwayFilter})$"]
-      (${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-    out body geom;
-  `;
+    const slotsMatch = text.match(/(\d+) slots? available now/);
+    if (slotsMatch) {
+      return {
+        slotsAvailable: parseInt(slotsMatch[1], 10),
+        waitSeconds: null,
+      };
+    }
 
-  // List of servers to try (primary + fallbacks)
-  const servers = [OVERPASS.API_URL, ...OVERPASS.FALLBACK_URLS];
+    // Multiple "Slot available after:" lines may appear — grab the first (soonest).
+    const waitMatch = text.match(/Slot available after:.*?in (\d+) seconds/);
+    if (waitMatch) {
+      return {
+        slotsAvailable: 0,
+        waitSeconds: parseInt(waitMatch[1], 10),
+      };
+    }
+
+    return { slotsAvailable: 0, waitSeconds: null };
+  } catch {
+    return null;
+  }
+}
+
+interface ServerCandidate {
+  url: string;
+  status: SlotInfo | null;
+}
+
+/**
+ * Probe all configured servers in parallel and return them ordered by
+ * readiness: servers with free slots first, then shortest wait, then
+ * unreachable ones last (still attempted as a hail-mary).
+ */
+async function rankServers(): Promise<ServerCandidate[]> {
+  const results = await Promise.allSettled(
+    OVERPASS.SERVERS.map(async (url) => ({
+      url,
+      status: await checkServerStatus(url),
+    })),
+  );
+
+  const candidates: ServerCandidate[] = results
+    .filter(
+      (r): r is PromiseFulfilledResult<ServerCandidate> =>
+        r.status === "fulfilled",
+    )
+    .map((r) => r.value);
+
+  candidates.sort((a, b) => {
+    const aReady = a.status?.slotsAvailable ?? 0;
+    const bReady = b.status?.slotsAvailable ?? 0;
+    if (aReady > 0 && bReady <= 0) return -1;
+    if (aReady <= 0 && bReady > 0) return 1;
+    const aWait = a.status?.waitSeconds ?? Infinity;
+    const bWait = b.status?.waitSeconds ?? Infinity;
+    return aWait - bWait;
+  });
+
+  // Append any servers whose status check threw (e.g. network error) at the end.
+  const seen = new Set(candidates.map((c) => c.url));
+  for (const url of OVERPASS.SERVERS) {
+    if (!seen.has(url)) {
+      candidates.push({ url, status: null });
+    }
+  }
+
+  return candidates;
+}
+
+// ============================================
+// Core Execution
+// ============================================
+
+const NETWORK_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ECONNABORTED",
+]);
+
+export interface OverpassQueryOptions {
+  /**
+   * Max seconds to spend waiting for a free slot across all servers.
+   * Use a short budget (default) for user-facing request paths and a
+   * longer one for pg-boss background jobs.
+   */
+  maxWaitSeconds?: number;
+  /**
+   * Set for known call sites (e.g. "city-sync", "detect-city") so unexpected
+   * callers can be logged in production.
+   */
+  caller?: string;
+}
+
+/**
+ * Execute an Overpass query with status-aware server selection.
+ *
+ * Flow:
+ * 1. Probe all servers' /api/status in parallel (~2 s max).
+ * 2. Try each server in readiness order.  If a server reports
+ *    "slot available in N seconds" and we have budget, wait for it.
+ * 3. On 504 (capacity rejection), re-check status and wait once more
+ *    before moving to the next server.
+ * 4. On DNS / network failure, immediately skip to the next server.
+ * 5. On 400 (bad query), throw immediately — retrying won't help.
+ */
+export async function executeRawOverpassQuery(
+  query: string,
+  opts?: OverpassQueryOptions,
+): Promise<OverpassResponse> {
+  const caller = opts?.caller;
+  if (
+    caller !== "city-sync" &&
+    caller !== "detect-city"
+  ) {
+    console.warn(
+      "[OVERPASS_USER_PATH] Unexpected Overpass call — pass opts.caller for known sites",
+      { caller: caller ?? "unknown" },
+    );
+  }
+
+  const waitBudget = opts?.maxWaitSeconds ?? OVERPASS.MAX_SLOT_WAIT_SECONDS;
+  const deadline = Date.now() + waitBudget * 1_000;
   const errors: string[] = [];
 
-  // Try each server with retries
-  for (let serverIndex = 0; serverIndex < servers.length; serverIndex++) {
-    const serverUrl = servers[serverIndex];
-    const isLastServer = serverIndex === servers.length - 1;
+  const candidates = await rankServers();
 
-    // Retry up to MAX_RETRIES times per server
+  for (const { url, status } of candidates) {
+    const host = serverName(url);
+
+    // Wait for slot if the server told us when one opens.
+    if (status && status.slotsAvailable <= 0 && status.waitSeconds != null) {
+      const waitMs = (status.waitSeconds + 1) * 1_000;
+      if (Date.now() + waitMs > deadline) {
+        errors.push(`${host}: slot in ${status.waitSeconds}s exceeds deadline`);
+        continue;
+      }
+      console.log(
+        `[Overpass] ${host}: waiting ${status.waitSeconds}s for slot`,
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+
+    // Attempt the query (with one status-aware retry on 504).
     for (let attempt = 0; attempt < OVERPASS.MAX_RETRIES; attempt++) {
       try {
-        // Exponential backoff: wait before retry (except first attempt)
-        if (attempt > 0) {
-          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Max 5s
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-
-        // Send POST request to Overpass API
-        const response = await axios.post<OverpassResponse>(serverUrl, query, {
+        const response = await axios.post<OverpassResponse>(url, query, {
           headers: { "Content-Type": "text/plain" },
           timeout: OVERPASS.TIMEOUT_MS,
         });
 
-        // Success! Parse and return results
-        console.log(
-          `[Overpass] Successfully queried ${serverUrl} (attempt ${attempt + 1})`,
-        );
-        return parseOverpassResponse(response.data);
+        console.log(`[Overpass] ${host}: success (attempt ${attempt + 1})`);
+        return response.data;
       } catch (error) {
-        const errorMessage = getErrorMessage(error, serverUrl, attempt);
-        errors.push(errorMessage);
-
-        // Check if this is a retryable error
-        const isRetryable = isRetryableError(error);
-
-        // If not retryable (e.g., 400 Bad Request), don't retry
-        if (!isRetryable) {
-          throw new OverpassError(errorMessage);
-        }
-
-        // If last attempt on last server, throw error
-        if (attempt === OVERPASS.MAX_RETRIES - 1 && isLastServer) {
-          throw new OverpassError(
-            `All Overpass API servers failed after ${OVERPASS.MAX_RETRIES} attempts each. Last error: ${errorMessage}`,
-          );
-        }
-
-        // Log retry attempt
+        const msg = describeError(error);
+        errors.push(`${host}: ${msg}`);
         console.warn(
-          `[Overpass] ${serverUrl} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${errorMessage}`,
+          `[Overpass] ${host} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${msg}`,
         );
+
+        if (!axios.isAxiosError(error)) break;
+
+        // Bad request → query is wrong, retrying won't help.
+        if (error.response?.status === 400) {
+          throw new OverpassError(`Bad Overpass query: ${msg}`);
+        }
+
+        // Network-level failure → this server is unreachable, skip.
+        if (error.code && NETWORK_ERROR_CODES.has(error.code)) break;
+
+        const httpStatus = error.response?.status;
+
+        // 504 (capacity) or 429 (rate-limit): re-check status, wait if slot imminent.
+        if (
+          (httpStatus === 504 || httpStatus === 429) &&
+          attempt < OVERPASS.MAX_RETRIES - 1
+        ) {
+          const fresh = await checkServerStatus(url);
+          if (fresh?.waitSeconds != null && fresh.waitSeconds > 0) {
+            const waitMs = (fresh.waitSeconds + 1) * 1_000;
+            if (Date.now() + waitMs <= deadline) {
+              console.log(
+                `[Overpass] ${host}: slot in ${fresh.waitSeconds}s, waiting before retry`,
+              );
+              await new Promise((r) => setTimeout(r, waitMs));
+              continue;
+            }
+          }
+          // No slot info — short backoff then retry or move on.
+          const backoff = Math.min(2_000 * Math.pow(2, attempt), 10_000);
+          if (Date.now() + backoff <= deadline) {
+            await new Promise((r) => setTimeout(r, backoff));
+            continue;
+          }
+          break; // out of time, try next server
+        }
       }
-    }
-
-    // If we get here, this server failed all retries
-    // Try next server (if available)
-    if (!isLastServer) {
-      console.log(
-        `[Overpass] Switching to fallback server after ${OVERPASS.MAX_RETRIES} failed attempts`,
-      );
-    }
-  }
-
-  // Should never reach here, but TypeScript needs it
-  throw new OverpassError(
-    `All Overpass API servers failed. Errors: ${errors.join("; ")}`,
-  );
-}
-
-/**
- * Check if an error is retryable (should we try again?)
- *
- * Retryable errors:
- * - 504 Gateway Timeout (server busy)
- * - 503 Service Unavailable (temporary)
- * - ECONNABORTED (client timeout)
- * - Network errors
- *
- * Non-retryable errors:
- * - 400 Bad Request (query syntax error)
- * - 429 Too Many Requests (rate limit - wait longer)
- */
-function isRetryableError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) return false;
-
-  // Client timeout - retryable
-  if (error.code === "ECONNABORTED") return true;
-
-  const status = error.response?.status;
-
-  // Server errors - retryable
-  if (status === 504 || status === 503 || status === 502) return true;
-
-  // Rate limit - don't retry immediately (would hit limit again)
-  if (status === 429) return false;
-
-  // Bad request - don't retry (query is wrong)
-  if (status === 400) return false;
-
-  // Network errors - retryable
-  if (!status && error.message.includes("Network")) return true;
-
-  return false;
-}
-
-/**
- * Extract user-friendly error message from error
- */
-function getErrorMessage(
-  error: unknown,
-  serverUrl: string,
-  attempt: number,
-): string {
-  if (!axios.isAxiosError(error)) {
-    return `Unknown error: ${String(error)}`;
-  }
-
-  // Client timeout
-  if (error.code === "ECONNABORTED") {
-    return `Request timeout after ${OVERPASS.TIMEOUT_MS}ms`;
-  }
-
-  const status = error.response?.status;
-
-  // Rate limit
-  if (status === 429) {
-    return "Rate limit exceeded - too many requests";
-  }
-
-  // Gateway timeout
-  if (status === 504) {
-    return "Gateway timeout - server is busy";
-  }
-
-  // Service unavailable
-  if (status === 503) {
-    return "Service unavailable - server is temporarily down";
-  }
-
-  // Bad gateway
-  if (status === 502) {
-    return "Bad gateway - upstream server error";
-  }
-
-  // Generic error
-  return `HTTP ${status || "unknown"}: ${error.message}`;
-}
-
-// ============================================
-// Response Parsing
-// ============================================
-
-/**
- * Parse Overpass API response into OsmStreet objects
- *
- * Overpass returns data in a specific format. This function
- * transforms it into our OsmStreet interface.
- *
- * Overpass response structure:
- * {
- *   elements: [
- *     {
- *       type: "way",
- *       id: 123456789,
- *       geometry: [{ lat: 50.79, lon: -1.09 }, ...],
- *       tags: { name: "High Street", highway: "residential" }
- *     },
- *     ...
- *   ]
- * }
- *
- * @param data - Raw Overpass API response
- * @returns Array of OsmStreet objects
- */
-function parseOverpassResponse(data: OverpassResponse): OsmStreet[] {
-  const streets: OsmStreet[] = [];
-
-  if (!data || !Array.isArray(data.elements)) {
-    console.warn("[Overpass] Invalid response: elements is not an array", data);
-    return streets;
-  }
-
-  for (const element of data.elements) {
-    // Skip non-way elements (shouldn't happen with our query, but safety first)
-    if (element.type !== "way") continue;
-
-    // Skip elements without geometry
-    if (!element.geometry || element.geometry.length === 0) continue;
-
-    // Convert Overpass geometry to GeoJSON format
-    // Overpass: { lat, lon }  →  GeoJSON: [lng, lat]
-    const coordinates: [number, number][] = element.geometry.map((node) => [
-      node.lon, // longitude first (GeoJSON standard)
-      node.lat, // latitude second
-    ]);
-
-    // Need at least 2 points to form a line
-    if (coordinates.length < 2) continue;
-
-    // Build GeoJSON LineString geometry
-    const geometry: GeoJsonLineString = {
-      type: "LineString",
-      coordinates,
-    };
-
-    // Collect alternative names for better cross-source matching
-    const altNames: string[] = [];
-    if (element.tags.alt_name) altNames.push(element.tags.alt_name);
-    if (element.tags["name:en"]) altNames.push(element.tags["name:en"]);
-    if (element.tags.old_name) altNames.push(element.tags.old_name);
-    if (element.tags.loc_name) altNames.push(element.tags.loc_name);
-
-    // Use primary name or fallback to alternatives, then "Unnamed Road"
-    const primaryName =
-      element.tags.name ||
-      element.tags.alt_name ||
-      element.tags["name:en"] ||
-      "Unnamed Road";
-
-    // Create OsmStreet object with extended metadata
-    const street: OsmStreet = {
-      // Unique identifier: "way/123456789"
-      osmId: `way/${element.id}`,
-
-      // Street name from tags, with fallback chain
-      name: primaryName,
-
-      // Calculate total length of the street in meters
-      lengthMeters: calculateLineLength(geometry),
-
-      // Store geometry for point-to-line distance calculations
-      geometry,
-
-      // Type of road (residential, primary, footway, etc.)
-      highwayType: element.tags.highway || "unknown",
-
-      // Alternative names for cross-source matching
-      altNames: altNames.length > 0 ? altNames : undefined,
-
-      // Surface type (asphalt, concrete, gravel, etc.)
-      surface: element.tags.surface,
-
-      // Access restrictions (private, no, permissive, etc.)
-      access: element.tags.access,
-
-      // Road reference number (e.g., "A1", "B2154")
-      ref: element.tags.ref,
-    };
-
-    streets.push(street);
-  }
-
-  return streets;
-}
-
-// ============================================
-// Radius Query Function (for Routes)
-// ============================================
-
-/**
- * Query streets within a radius from a center point
- *
- * Used for creating Routes - queries all streets within a circular area
- * around a center point. This is more appropriate for Routes than bounding
- * box queries because Routes are defined by center + radius.
- *
- * Features:
- * - Queries by radius (circular area) instead of bounding box
- * - Only returns named streets (filters out unnamed roads)
- * - Same retry/fallback logic as bounding box query
- *
- * @param centerLat - Center latitude of the search area
- * @param centerLng - Center longitude of the search area
- * @param radiusMeters - Radius in meters (e.g., 2000 for 2km)
- * @returns Array of OsmStreet objects with name, length, and geometry
- * @throws OverpassError if all API requests fail after retries
- *
- * @example
- * // Query streets within 2km of a point
- * const streets = await queryStreetsInRadius(50.788, -1.089, 2000);
- * // Returns: [
- * //   { osmId: "way/123", name: "High Street", lengthMeters: 450, ... },
- * //   { osmId: "way/456", name: "Park Lane", lengthMeters: 320, ... },
- * // ]
- */
-export async function queryStreetsInRadius(
-  centerLat: number,
-  centerLng: number,
-  radiusMeters: number,
-): Promise<OsmStreet[]> {
-  // Build the highway type filter (residential|primary|secondary|...)
-  const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
-
-  // Construct Overpass QL query using "around" filter
-  // The "around" filter selects ways within a radius of a point
-  // Note: We include ["name"] to only get named streets
-  const query = `
-    [out:json][timeout:${OVERPASS.QUERY_TIMEOUT_SECONDS}];
-    way["highway"~"^(${highwayFilter})$"]["name"]
-      (around:${radiusMeters}, ${centerLat}, ${centerLng});
-    out body geom;
-  `;
-
-  // Use the same server list and retry logic (throttled to avoid rate limits)
-  return throttledOverpassQuery(() => executeOverpassQuery(query));
-}
-
-/**
- * Query ALL streets (including unnamed) within a radius
- *
- * Similar to queryStreetsInRadius but includes unnamed roads.
- * Used when we need complete street coverage (e.g., for accurate map display).
- *
- * @param centerLat - Center latitude of the search area
- * @param centerLng - Center longitude of the search area
- * @param radiusMeters - Radius in meters
- * @returns Array of OsmStreet objects (includes unnamed roads)
- */
-export async function queryAllStreetsInRadius(
-  centerLat: number,
-  centerLng: number,
-  radiusMeters: number,
-): Promise<OsmStreet[]> {
-  const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
-
-  // Same query but without ["name"] filter
-  const query = `
-    [out:json][timeout:${OVERPASS.QUERY_TIMEOUT_SECONDS}];
-    way["highway"~"^(${highwayFilter})$"]
-      (around:${radiusMeters}, ${centerLat}, ${centerLng});
-    out body geom;
-  `;
-
-  return throttledOverpassQuery(() => executeOverpassQuery(query));
-}
-
-/**
- * Query named streets inside a polygon.
- * Polygon coordinates are [lng, lat][] (GeoJSON closed ring).
- * For polygons with more than 50 vertices, uses bounding box query + post-filter
- * to avoid Overpass URL length limits.
- *
- * @param polygonCoordinates - Closed ring of [lng, lat] pairs
- * @returns Array of OsmStreet objects inside the polygon
- */
-export async function queryStreetsInPolygon(
-  polygonCoordinates: [number, number][],
-  boundaryMode?: string
-): Promise<OsmStreet[]> {
-  if (polygonCoordinates.length < 3) {
-    return [];
-  }
-
-  if (polygonCoordinates.length > POLYGON_VERTEX_LIMIT) {
-    const bbox = polygonBoundingBox(polygonCoordinates);
-    const bboxForOverpass: BoundingBox = {
-      south: bbox.south,
-      west: bbox.west,
-      north: bbox.north,
-      east: bbox.east,
-    };
-    const streets = await queryStreetsInBoundingBox(bboxForOverpass);
-    const filterFn = resolvePolygonFilter(boundaryMode ?? "intersects");
-    return filterFn(streets, polygonCoordinates);
-  }
-
-  const highwayFilter = OVERPASS.HIGHWAY_TYPES.join("|");
-  // Overpass poly filter uses "lat lng" space-separated (first point repeated at end to close)
-  const polyString = polygonCoordinates
-    .map(([lng, lat]) => `${lat} ${lng}`)
-    .join(" ");
-  const query = `
-    [out:json][timeout:${OVERPASS.QUERY_TIMEOUT_SECONDS}];
-    way["highway"~"^(${highwayFilter})$"]["name"]
-      (poly:"${polyString}");
-    out body geom;
-  `;
-
-  return throttledOverpassQuery(() => executeOverpassQuery(query));
-}
-
-/**
- * Execute an Overpass query with retry and fallback logic
- *
- * Internal helper that handles the actual API request with:
- * - Multiple server fallbacks
- * - Exponential backoff retries
- * - Error classification and handling
- *
- * @param query - Overpass QL query string
- * @returns Parsed OsmStreet array
- * @throws OverpassError if all attempts fail
- */
-async function executeOverpassQuery(query: string): Promise<OsmStreet[]> {
-  const servers = [OVERPASS.API_URL, ...OVERPASS.FALLBACK_URLS];
-  const errors: string[] = [];
-
-  for (let serverIndex = 0; serverIndex < servers.length; serverIndex++) {
-    const serverUrl = servers[serverIndex];
-    const isLastServer = serverIndex === servers.length - 1;
-
-    for (let attempt = 0; attempt < OVERPASS.MAX_RETRIES; attempt++) {
-      try {
-        // Exponential backoff (except first attempt)
-        if (attempt > 0) {
-          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-
-        const response = await axios.post<OverpassResponse>(serverUrl, query, {
-          headers: { "Content-Type": "text/plain" },
-          timeout: OVERPASS.TIMEOUT_MS,
-        });
-
-        console.log(
-          `[Overpass] Successfully queried ${serverUrl} (attempt ${attempt + 1})`,
-        );
-        return parseOverpassResponse(response.data);
-      } catch (error) {
-        const errorMessage = getErrorMessage(error, serverUrl, attempt);
-        errors.push(errorMessage);
-
-        const status = axios.isAxiosError(error)
-          ? error.response?.status
-          : undefined;
-        if (status === 429) {
-          console.warn("[Overpass] Rate limited, waiting 60s before retry");
-          await new Promise((r) => setTimeout(r, 60000));
-          continue;
-        }
-
-        if (!isRetryableError(error)) {
-          throw new OverpassError(errorMessage);
-        }
-
-        if (attempt === OVERPASS.MAX_RETRIES - 1 && isLastServer) {
-          throw new OverpassError(
-            `All Overpass API servers failed after ${OVERPASS.MAX_RETRIES} attempts each. Last error: ${errorMessage}`,
-          );
-        }
-
-        console.warn(
-          `[Overpass] ${serverUrl} failed (attempt ${attempt + 1}/${OVERPASS.MAX_RETRIES}): ${errorMessage}`,
-        );
-      }
-    }
-
-    if (!isLastServer) {
-      console.log(
-        `[Overpass] Switching to fallback server after ${OVERPASS.MAX_RETRIES} failed attempts`,
-      );
     }
   }
 
   throw new OverpassError(
-    `All Overpass API servers failed. Errors: ${errors.join("; ")}`,
+    `All Overpass servers failed. Errors:\n  ${errors.join("\n  ")}`,
   );
+}
+
+function describeError(error: unknown): string {
+  if (!axios.isAxiosError(error)) return String(error);
+  if (error.code === "ECONNABORTED")
+    return `timeout after ${OVERPASS.TIMEOUT_MS}ms`;
+  const status = error.response?.status;
+  if (status === 504) return "504 — server has no capacity (reduce timeout/maxsize)";
+  if (status === 429) return "429 — rate-limited";
+  if (status === 503) return "503 — service unavailable";
+  if (status === 502) return "502 — bad gateway";
+  if (status === 400) return `400 — bad request: ${error.message}`;
+  return `${status ?? error.code ?? "unknown"}: ${error.message}`;
 }
 
 // ============================================
 // Custom Error Class
 // ============================================
 
-/**
- * Custom error class for Overpass API errors
- *
- * Thrown when:
- * - API request times out
- * - Rate limit exceeded (429)
- * - Server errors (5xx)
- * - Network failures
- *
- * Caught in route handler to return appropriate error response.
- *
- * @example
- * try {
- *   const streets = await queryStreetsInBoundingBox(bbox);
- * } catch (error) {
- *   if (error instanceof OverpassError) {
- *     // Return 502 Bad Gateway with error message
- *     res.status(502).json({ error: error.message });
- *   }
- * }
- */
 export class OverpassError extends Error {
   constructor(message: string) {
     super(message);

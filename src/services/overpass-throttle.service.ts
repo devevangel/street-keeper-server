@@ -1,7 +1,7 @@
 /**
  * Overpass request throttle
  * Serializes Overpass API requests with a minimum delay between calls
- * to avoid rate limits (429). Used by overpass.service.
+ * to avoid rate limits (429). Used by city sync (Overpass ingestion).
  */
 
 const MIN_DELAY_MS = 1500;

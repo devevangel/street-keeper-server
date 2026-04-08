@@ -10,14 +10,8 @@
  */
 
 import * as turf from "@turf/turf";
-import { queryAllStreetsInRadius } from "./overpass.service.js";
-import {
-  getCachedGeometries,
-  setCachedGeometries,
-  generateRadiusCacheKey,
-  findLargerCachedRadius,
-  resolveRadiusFilter,
-} from "./geometry-cache.service.js";
+import { getLocalStreetsInRadius } from "./local-streets.service.js";
+import { ensureCitySyncedAsync } from "./city-sync.service.js";
 import { getUserStreetProgress } from "./user-street-progress.service.js";
 import {
   isUnnamedStreet,
@@ -79,14 +73,14 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
 
   return Array.from(byName.values()).map((segments) => {
     const byPercentage = [...segments].sort(
-      (a, b) => b.percentage - a.percentage
+      (a, b) => b.percentage - a.percentage,
     );
     const base = byPercentage[0];
     const maxPercentage = base.percentage;
     const totalRuns = segments.reduce((sum, s) => sum + s.stats.runCount, 0);
     const totalCompletions = segments.reduce(
       (sum, s) => sum + s.stats.completionCount,
-      0
+      0,
     );
     const everCompleted = segments.some((s) => s.stats.everCompleted);
     const firstRunDate = segments.reduce(
@@ -94,27 +88,27 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
         !s.stats.firstRunDate
           ? earliest
           : !earliest || s.stats.firstRunDate < earliest
-          ? s.stats.firstRunDate
-          : earliest,
-      null as string | null
+            ? s.stats.firstRunDate
+            : earliest,
+      null as string | null,
     );
     const lastRunDate = segments.reduce(
       (latest, s) =>
         !s.stats.lastRunDate
           ? latest
           : !latest || s.stats.lastRunDate > latest
-          ? s.stats.lastRunDate
-          : latest,
-      null as string | null
+            ? s.stats.lastRunDate
+            : latest,
+      null as string | null,
     );
     const totalLengthMeters = segments.reduce(
       (sum, s) => sum + s.lengthMeters,
-      0
+      0,
     );
 
     // Classify segments: connector = length <= CONNECTOR_MAX_LENGTH_METERS
     const connectorCount = segments.filter(
-      (s) => s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS
+      (s) => s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS,
     ).length;
 
     // Length-weighted completion: each segment contributes (percentage/100) * weight,
@@ -219,21 +213,25 @@ export async function getMapStreets(
   lat: number,
   lng: number,
   radiusMeters: number,
-  minPercentage: number = 0
+  minPercentage: number = 0,
 ): Promise<MapStreetsResponse> {
   // Clamp radius to allowed range
   const radius = Math.min(
     Math.max(radiusMeters, MAP.MIN_RADIUS_METERS),
-    MAP.MAX_RADIUS_METERS
+    MAP.MAX_RADIUS_METERS,
   );
 
-  // 1. Get street geometries in area (include unnamed for full coverage)
-  const geometries = await getGeometriesInArea(lat, lng, radius);
+  const { streets: geometries, syncing } = await getGeometriesInArea(
+    lat,
+    lng,
+    radius,
+  );
   const osmIdsInArea = geometries.map((g) => g.osmId);
 
-  if (osmIdsInArea.length === 0) {
+  if (syncing || osmIdsInArea.length === 0) {
     return {
       success: true,
+      syncing: syncing || undefined,
       streets: [],
       segments: [],
       center: { lat, lng },
@@ -297,7 +295,7 @@ export async function getMapStreets(
         geometry.geometry,
         startPercent,
         endPercent,
-        progress.lengthMeters
+        progress.lengthMeters,
       );
       coverageInterval = [startPercent, endPercent];
     }
@@ -368,19 +366,36 @@ export async function getMapStreetsV2(
   lat: number,
   lng: number,
   radiusMeters: number,
-  minPercentage: number = 0
+  minPercentage: number = 0,
 ): Promise<MapStreetsResponse> {
   const radius = Math.min(
     Math.max(radiusMeters, MAP.MIN_RADIUS_METERS),
-    MAP.MAX_RADIUS_METERS
+    MAP.MAX_RADIUS_METERS,
   );
 
-  const geometries = await getGeometriesInArea(lat, lng, radius);
+  const { streets: geometries, syncing } = await getGeometriesInArea(
+    lat,
+    lng,
+    radius,
+  );
+  if (syncing || geometries.length === 0) {
+    return {
+      success: true,
+      syncing: syncing || undefined,
+      streets: [],
+      segments: [],
+      center: { lat, lng },
+      radiusMeters: radius,
+      totalStreets: 0,
+      completedCount: 0,
+      partialCount: 0,
+    };
+  }
   const wayIds = geometries.map((g) => osmIdToWayId(g.osmId));
   const completion = await deriveStreetCompletionForArea(userId, wayIds);
 
   const completionByOsmId = new Map(
-    completion.map((s) => [`way/${String(s.wayId)}`, s])
+    completion.map((s) => [`way/${String(s.wayId)}`, s]),
   );
 
   const segments: MapStreet[] = [];
@@ -391,7 +406,7 @@ export async function getMapStreetsV2(
     if (!comp || comp.edgesTotal === 0) continue;
 
     const percentage = Math.round(
-      (comp.edgesCompleted / comp.edgesTotal) * 100
+      (comp.edgesCompleted / comp.edgesTotal) * 100,
     );
     if (percentage < minPercentage) continue;
 
@@ -482,7 +497,7 @@ function sliceGeometryByInterval(
   geometry: { type: "LineString"; coordinates: [number, number][] },
   startPercent: number,
   endPercent: number,
-  lengthMeters: number
+  lengthMeters: number,
 ): MapStreet["coveredGeometry"] | undefined {
   if (
     lengthMeters <= 0 ||
@@ -510,46 +525,38 @@ function sliceGeometryByInterval(
 // ============================================
 
 /**
- * Get street geometries in the given area
- * Uses geometry cache when possible; otherwise Overpass (all streets including unnamed)
- * Exported for use by getMapStreetsV2 (engine-v2 map endpoint).
+ * Street geometries in the area from PostGIS (all named + unnamed).
+ * When the city is not synced yet, returns empty streets and syncing: true.
  */
 export async function getGeometriesInArea(
   centerLat: number,
   centerLng: number,
-  radiusMeters: number
-): Promise<OsmStreet[]> {
-  const cacheKey = generateRadiusCacheKey(centerLat, centerLng, radiusMeters);
-
-  // Try exact cache hit
-  const cached = await getCachedGeometries(cacheKey);
-  if (cached) return cached;
-
-  // Try larger cached radius and filter
-  const larger = await findLargerCachedRadius(
-    centerLat,
-    centerLng,
-    radiusMeters
-  );
-  if (larger) {
-    const filterFn = resolveRadiusFilter("intersects");
-    const filtered = filterFn(
-      larger.streets,
-      centerLat,
-      centerLng,
-      radiusMeters
+  radiusMeters: number,
+): Promise<{ streets: OsmStreet[]; syncing: boolean }> {
+  let synced = false;
+  try {
+    const result = await ensureCitySyncedAsync(centerLat, centerLng);
+    synced = result.synced;
+  } catch (e) {
+    // detectCity uses Overpass; if Overpass is down, fall through and
+    // return whatever PostGIS already has instead of crashing with 500.
+    console.warn(
+      "[Map] ensureCitySyncedAsync failed (Overpass may be down), querying PostGIS anyway:",
+      e instanceof Error ? e.message : e,
     );
-    return filtered;
   }
 
-  // Query Overpass (all streets including unnamed for map)
-  const streets = await queryAllStreetsInRadius(
+  const streets = await getLocalStreetsInRadius(
     centerLat,
     centerLng,
-    radiusMeters
+    radiusMeters,
+    { namedOnly: false },
   );
-  await setCachedGeometries(cacheKey, streets);
-  return streets;
+
+  if (streets.length === 0 && !synced) {
+    return { streets: [], syncing: true };
+  }
+  return { streets, syncing: false };
 }
 
 // ============================================
@@ -570,7 +577,7 @@ function bboxIntersectsCircle(
   maxLng: number,
   centerLat: number,
   centerLng: number,
-  radiusMeters: number
+  radiusMeters: number,
 ): boolean {
   const radiusDeg = radiusMeters / 111000;
   const expandedMinLat = minLat - radiusDeg;
@@ -593,7 +600,7 @@ export async function getMapTraces(
   userId: string,
   lat?: number,
   lng?: number,
-  radiusMeters: number = TRACES_DEFAULT_RADIUS_METERS
+  radiusMeters: number = TRACES_DEFAULT_RADIUS_METERS,
 ): Promise<GpsTracesResponse> {
   const activities = await prisma.activity.findMany({
     where: { userId, isProcessed: true },
@@ -604,10 +611,7 @@ export async function getMapTraces(
 
   const traces: GpsTraceItem[] = [];
   const hasAreaFilter =
-    lat != null &&
-    lng != null &&
-    !Number.isNaN(lat) &&
-    !Number.isNaN(lng);
+    lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng);
 
   for (const a of activities) {
     const coords = a.coordinates as GpxPoint[] | null;
@@ -628,7 +632,7 @@ export async function getMapTraces(
           maxLng,
           lat,
           lng,
-          radiusMeters
+          radiusMeters,
         )
       ) {
         continue;
@@ -656,7 +660,7 @@ export async function getMapTraces(
  */
 export async function getProjectTraces(
   projectId: string,
-  userId: string
+  userId: string,
 ): Promise<GpsTracesResponse> {
   const { getProjectById } = await import("./project.service.js");
   await getProjectById(projectId, userId);
@@ -667,7 +671,13 @@ export async function getProjectTraces(
     },
     include: {
       activity: {
-        select: { id: true, name: true, startDate: true, coordinates: true, isProcessed: true },
+        select: {
+          id: true,
+          name: true,
+          startDate: true,
+          coordinates: true,
+          isProcessed: true,
+        },
       },
     },
   });
