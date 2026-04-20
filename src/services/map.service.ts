@@ -550,7 +550,7 @@ export async function getGeometriesInArea(
     centerLat,
     centerLng,
     radiusMeters,
-    { namedOnly: false },
+    { namedOnly: true },
   );
 
   if (streets.length === 0 && !synced) {

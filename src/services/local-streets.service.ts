@@ -48,7 +48,7 @@ function rowToOsmStreet(row: RawStreetRow): OsmStreet | null {
   const primaryName =
     row.name && row.name.trim() !== ""
       ? row.name
-      : "Unnamed Road";
+      : "";
 
   const lengthMeters =
     row.lengthMeters != null && row.lengthMeters > 0
@@ -113,7 +113,7 @@ export async function getLocalStreetsInRadius(
         ST_SetSRID(ST_MakePoint(${centerLng}, ${centerLat}), 4326)::geography,
         ${radiusMeters}
       )
-      ${namedOnly ? Prisma.sql`AND "name" IS NOT NULL` : Prisma.empty}
+      ${namedOnly ? Prisma.sql`AND "name" IS NOT NULL AND TRIM("name") <> ''` : Prisma.empty}
       ${highwayTypeFilterSql(highwayTypes)}
   `;
 
@@ -136,9 +136,10 @@ export async function getLocalStreetsInRadius(
  */
 export async function getLocalStreetsInBBox(
   bbox: BoundingBox,
-  options?: { highwayTypes?: string[] },
+  options?: { namedOnly?: boolean; highwayTypes?: string[] },
 ): Promise<OsmStreet[]> {
   const { south, west, north, east } = bbox;
+  const namedOnly = options?.namedOnly ?? false;
   const highwayTypes =
     options?.highwayTypes ?? [...OVERPASS.HIGHWAY_TYPES];
   const start = performance.now();
@@ -157,6 +158,7 @@ export async function getLocalStreetsInBBox(
     FROM "WayTotalEdges"
     WHERE "geometry" IS NOT NULL
       AND "geometry" && ST_MakeEnvelope(${west}, ${south}, ${east}, ${north}, 4326)
+      ${namedOnly ? Prisma.sql`AND "name" IS NOT NULL AND TRIM("name") <> ''` : Prisma.empty}
       ${highwayTypeFilterSql(highwayTypes)}
   `;
 
@@ -217,7 +219,7 @@ export async function getLocalStreetsInPolygon(
         "geometry",
         ST_SetSRID(ST_GeomFromGeoJSON(${geojsonPolygon}::json), 4326)
       )
-      ${namedOnly ? Prisma.sql`AND "name" IS NOT NULL` : Prisma.empty}
+      ${namedOnly ? Prisma.sql`AND "name" IS NOT NULL AND TRIM("name") <> ''` : Prisma.empty}
       ${highwayTypeFilterSql(highwayTypes)}
   `;
 
@@ -250,6 +252,7 @@ export async function getLocalStreetsInPolygonFiltered(
     east: Math.max(...polygonCoordinates.map((c) => c[0])),
   };
   const streets = await getLocalStreetsInBBox(bbox, {
+    namedOnly: options?.namedOnly ?? false,
     highwayTypes: [...OVERPASS.HIGHWAY_TYPES],
   });
   const filterFn = resolvePolygonFilter(boundaryMode ?? "intersects");

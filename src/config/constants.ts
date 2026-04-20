@@ -16,7 +16,8 @@ export const STRAVA = {
   // OAuth Scopes
   // read: Read public segments, public routes, public profile data, public posts, public events
   // activity:read_all: Read the user's activities (includes private activities)
-  DEFAULT_SCOPE: "read,activity:read_all",
+  // activity:write: Update activity descriptions with Street Keeper stats
+  DEFAULT_SCOPE: "read,activity:read_all,activity:write",
 
   // Token expiry buffer (refresh token 5 minutes before expiry)
   TOKEN_REFRESH_BUFFER_SECONDS: 300,

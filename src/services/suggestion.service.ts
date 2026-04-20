@@ -6,16 +6,26 @@
 
 import prisma from "../lib/prisma.js";
 import { getProjectById, getProjectMapData } from "./project.service.js";
-import { getMapStreets, getGeometriesInArea } from "./map.service.js";
+import { getMapStreets, getMapStreetsV2, getGeometriesInArea } from "./map.service.js";
+import { ENGINE } from "../config/constants.js";
 import { pointToLineDistance } from "./geo.service.js";
 import { getStreak } from "./streak.service.js";
-import { getNextMilestone } from "./milestone.service.js";
 import type { ProjectMapStreet } from "../types/project.types.js";
 import type { MapStreet, MapStreetsResponse } from "../types/map.types.js";
 import type { StreakData } from "./streak.service.js";
-import type { MilestoneWithProgress } from "../types/milestone.types.js";
 import type { OsmStreet } from "../types/run.types.js";
 import { normalizeStreetName } from "../utils/normalize-street-name.js";
+import { isUnnamedStreet } from "../engines/v1/street-aggregation.js";
+
+/** Minimal shape that buildClusterCandidates and its helpers need from a street.
+ *  Both MapStreet and ProjectMapStreet satisfy this without adapters. */
+interface ClusterableStreet {
+  osmId: string;
+  name: string;
+  percentage: number;
+  lengthMeters: number;
+  geometry: { type: "LineString"; coordinates: [number, number][] };
+}
 
 /** Lightweight street data embedded in suggestions for frontend map rendering. */
 export interface SuggestionStreet {
@@ -31,7 +41,6 @@ export interface HomepageSuggestion {
     | "quick_win"
     | "nearby_cluster"
     | "explore"
-    | "milestone_push"
     | "streak_saver"
     | "repeat_street"
     | "cluster";
@@ -63,8 +72,7 @@ export interface HomepageSuggestionsResult {
 /** Result of getHomepageSuggestions when area context is used; includes map data to avoid a second GET /map/streets. */
 export type HomepageSuggestionsWithMap = HomepageSuggestionsResult & {
   mapStreetsResponse?: MapStreetsResponse;
-  /** Same milestone as used for milestone_push suggestions (single fetch for homepage payload). */
-  nextMilestone: MilestoneWithProgress | null;
+  nextMilestone: null;
 };
 
 export interface StreetSuggestion {
@@ -87,21 +95,17 @@ export interface SuggestionsResponse {
     streetsNeeded: number;
     streets: StreetSuggestion[];
   } | null;
-  clusters: Array<{
-    centroid: { lat: number; lng: number };
-    streets: StreetSuggestion[];
-    totalLength: number;
-    streetCount: number;
-  }>;
   /** Street with runCount 3–4 (close to 5-run goal) for repeat_street suggestion */
   repeatStreet: StreetSuggestion | null;
+  /** Raw project segments (with propagated percentages) for buildClusterCandidates.
+   *  Passthrough from getProjectMapData -- no extra DB query. */
+  _rawStreets: ProjectMapStreet[];
 }
 
 const DEFAULT_MAX_PER_TYPE = 5;
 const MILESTONES = [25, 50, 75, 100];
 const ALMOST_COMPLETE_MIN = 50;
 const ALMOST_COMPLETE_MAX = 94;
-const CLUSTER_RADIUS_METERS = 500;
 const MILESTONE_PREVIEW_MAX = 8;
 
 function haversineMeters(
@@ -182,7 +186,9 @@ export async function getSuggestions(
   ]);
   const project = detailResult.project;
 
-  const streets = mapData.streets;
+  const streets = mapData.streets.filter(
+    (s) => s.name && !isUnnamedStreet(s.name)
+  );
   const centerLat = mapData.centerLat;
   const centerLng = mapData.centerLng;
   const useRef = refLat != null && refLng != null;
@@ -258,71 +264,6 @@ export async function getSuggestions(
         }
       : null;
 
-  // Aggregate segments by name so each "street" is one entry (same logic as
-  // the area-based path). This prevents clusters that count multiple OSM
-  // segments of the same road as separate streets.
-  const aggregatedByName = new Map<string, ProjectMapStreet>();
-  for (const s of streets) {
-    const key = normalizeStreetName(s.name || "Unnamed");
-    const existing = aggregatedByName.get(key);
-    if (!existing || s.lengthMeters > existing.lengthMeters) {
-      aggregatedByName.set(key, s);
-    }
-  }
-  const aggregatedStreets = [...aggregatedByName.values()];
-
-  const clusterEligible = aggregatedStreets.filter(
-    (s) => s.percentage === 0 || (s.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD && s.percentage < 100),
-  );
-
-  const clusters: SuggestionsResponse["clusters"] = [];
-  if (clusterEligible.length > 0) {
-    const withCentroid = clusterEligible.map((s) => ({
-      street: s,
-      centroid: streetCentroid(s),
-    }));
-    const used = new Set<string>();
-    for (const { street, centroid } of withCentroid) {
-      if (used.has(street.osmId)) continue;
-      const group = [street];
-      used.add(street.osmId);
-      for (const other of withCentroid) {
-        if (used.has(other.street.osmId)) continue;
-        const d = haversineMeters(
-          centroid.lat,
-          centroid.lng,
-          other.centroid.lat,
-          other.centroid.lng,
-        );
-        if (d <= CLUSTER_RADIUS_METERS) {
-          group.push(other.street);
-          used.add(other.street.osmId);
-        }
-      }
-      if (group.length >= 2) {
-        const totalLength = group.reduce((s, st) => s + st.lengthMeters, 0);
-        const avgLat =
-          group.reduce((s, st) => s + streetCentroid(st).lat, 0) / group.length;
-        const avgLng =
-          group.reduce((s, st) => s + streetCentroid(st).lng, 0) / group.length;
-        clusters.push({
-          centroid: { lat: avgLat, lng: avgLng },
-          streets: group
-            .slice(0, maxResults)
-            .map((st) =>
-              toSuggestion(
-                st,
-                `${group.length} streets in this area (${(totalLength / 1000).toFixed(1)} km)`,
-              ),
-            ),
-          totalLength,
-          streetCount: group.length,
-        });
-      }
-    }
-    clusters.sort((a, b) => b.streetCount - a.streetCount);
-  }
-
   let repeatStreet: StreetSuggestion | null = null;
   const osmIds = streets.map((s) => s.osmId);
   const progressRows = await prisma.userStreetProgress.findMany({
@@ -350,8 +291,8 @@ export async function getSuggestions(
     almostComplete,
     nearest,
     milestone,
-    clusters: clusters.slice(0, 3),
     repeatStreet,
+    _rawStreets: streets,
   };
 }
 
@@ -400,7 +341,7 @@ function osmIdToNum(osmId: string): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
-function toSuggestionStreet(s: MapStreet): SuggestionStreet | null {
+function toSuggestionStreet(s: ClusterableStreet): SuggestionStreet | null {
   if (!s.geometry?.coordinates || s.geometry.coordinates.length < 2) return null;
   return {
     osmId: s.osmId,
@@ -410,7 +351,7 @@ function toSuggestionStreet(s: MapStreet): SuggestionStreet | null {
   };
 }
 
-function toSuggestionStreets(streets: MapStreet[]): SuggestionStreet[] {
+function toSuggestionStreets(streets: ClusterableStreet[]): SuggestionStreet[] {
   return streets.map(toSuggestionStreet).filter((s): s is SuggestionStreet => s !== null);
 }
 
@@ -458,7 +399,7 @@ async function setCooldown(
   });
 }
 
-function mapStreetToBbox(street: MapStreet): [number, number, number, number] {
+function mapStreetToBbox(street: ClusterableStreet): [number, number, number, number] {
   const coords = street.geometry?.coordinates ?? [];
   return coords.length > 0
     ? bboxFromGeometry(coords)
@@ -467,7 +408,7 @@ function mapStreetToBbox(street: MapStreet): [number, number, number, number] {
 
 /** Distance from map center to street midpoint (same heuristic as explore sorting). */
 function distanceMapStreetToPoint(
-  street: MapStreet,
+  street: ClusterableStreet,
   centerLat: number,
   centerLng: number,
 ): number {
@@ -478,7 +419,7 @@ function distanceMapStreetToPoint(
   return haversineMeters(centerLat, centerLng, lat, lng);
 }
 
-function centroidMapStreet(street: MapStreet): { lat: number; lng: number } {
+function centroidMapStreet(street: ClusterableStreet): { lat: number; lng: number } {
   const coords = street.geometry?.coordinates ?? [];
   if (coords.length === 0) return { lat: 0, lng: 0 };
   const sumLat = coords.reduce((sum, point) => sum + point[1], 0);
@@ -503,7 +444,7 @@ function bboxDiameterMeters(
 }
 
 function streetValue(
-  street: MapStreet,
+  street: ClusterableStreet,
   distFromCenter: number,
 ): number {
   if (street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD) {
@@ -513,13 +454,13 @@ function streetValue(
 }
 
 function buildClusterCandidates(
-  streets: MapStreet[],
+  streets: ClusterableStreet[],
   centerLat: number,
   centerLng: number,
   max: number = CLUSTER_MAX_COUNT,
 ): HomepageSuggestion[] {
   const candidates = streets.filter((street) => {
-    if (!street.name || street.name.trim() === "") return false;
+    if (!street.name || isUnnamedStreet(street.name)) return false;
     if (street.percentage >= 100) return false;
     const coords = street.geometry?.coordinates ?? [];
     if (coords.length < 2) return false;
@@ -538,7 +479,7 @@ function buildClusterCandidates(
   if (candidates.length === 0) return [];
 
   type ClusterPoolItem = {
-    street: MapStreet;
+    street: ClusterableStreet;
     centroid: { lat: number; lng: number };
     distFromCenter: number;
   };
@@ -572,13 +513,41 @@ function buildClusterCandidates(
           [...pool].sort((a, b) => a.distFromCenter - b.distFromCenter)[0]);
     if (!seed) break;
 
-    const group: MapStreet[] = [seed.street];
+    const group: ClusterableStreet[] = [seed.street];
     const picked = new Set<string>([seed.street.osmId]);
     let remainingBudget = CLUSTER_MAX_DISTANCE_M - seed.street.lengthMeters;
     let minLat = seed.centroid.lat;
     let maxLat = seed.centroid.lat;
     let minLng = seed.centroid.lng;
     let maxLng = seed.centroid.lng;
+
+    // Try to ensure at least one street of each type (new + to-finish).
+    // If the seed is partial, grab the nearest new street; if new, grab nearest partial.
+    const seedIsNew = seed.street.percentage === 0;
+    const complementFilter = seedIsNew
+      ? (item: typeof pool[0]) => item.street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD
+      : (item: typeof pool[0]) => item.street.percentage === 0;
+    const complement = [...pool]
+      .filter((item) => !picked.has(item.street.osmId))
+      .filter(complementFilter)
+      .filter((item) => item.street.lengthMeters <= remainingBudget)
+      .filter((item) => {
+        const nMinLat = Math.min(minLat, item.centroid.lat);
+        const nMaxLat = Math.max(maxLat, item.centroid.lat);
+        const nMinLng = Math.min(minLng, item.centroid.lng);
+        const nMaxLng = Math.max(maxLng, item.centroid.lng);
+        return bboxDiameterMeters(nMinLat, nMaxLat, nMinLng, nMaxLng) <= CLUSTER_MAX_BBOX_DIAMETER_M;
+      })
+      .sort((a, b) => a.distFromCenter - b.distFromCenter)[0];
+    if (complement) {
+      group.push(complement.street);
+      picked.add(complement.street.osmId);
+      remainingBudget -= complement.street.lengthMeters;
+      minLat = Math.min(minLat, complement.centroid.lat);
+      maxLat = Math.max(maxLat, complement.centroid.lat);
+      minLng = Math.min(minLng, complement.centroid.lng);
+      maxLng = Math.max(maxLng, complement.centroid.lng);
+    }
 
     while (group.length < CLUSTER_MAX_STREETS && remainingBudget > 0) {
       const next = [...pool]
@@ -620,8 +589,14 @@ function buildClusterCandidates(
         ? [...partiallyRun].sort((a, b) => b.percentage - a.percentage)[0]
         : [...group].sort((a, b) => b.lengthMeters - a.lengthMeters)[0];
 
-    const newStreets = group.filter((street) => street.percentage === 0).length;
-    const toFinish = group.filter(
+    const uniqueByName = new Map<string, ClusterableStreet>();
+    for (const s of group) {
+      const key = normalizeStreetName(s.name);
+      if (!uniqueByName.has(key)) uniqueByName.set(key, s);
+    }
+    const uniqueStreets = [...uniqueByName.values()];
+    const newStreets = uniqueStreets.filter((street) => street.percentage === 0).length;
+    const toFinish = uniqueStreets.filter(
       (street) =>
         street.percentage >= CLUSTER_IN_PROGRESS_THRESHOLD &&
         street.percentage < 100,
@@ -691,7 +666,8 @@ function findBestCandidate(
   centerLng: number,
   maxDistM: number,
 ): HomepageSuggestion | null {
-  const withDist = streets.map((street) => ({
+  const named = streets.filter((s) => s.name && !isUnnamedStreet(s.name));
+  const withDist = named.map((street) => ({
     street,
     dist: distanceMapStreetToPoint(street, centerLat, centerLng),
   }));
@@ -825,7 +801,7 @@ function findBestCandidate(
 
 /**
  * Get homepage suggestions: one primary + up to 2 alternates.
- * Fallback ladder: streak_saver > quick_win > milestone_push > repeat_street > explore > null.
+ * Fallback ladder: streak_saver > quick_win > repeat_street > explore > null.
  * With projectId: project-scoped suggestions; with lat/lng/radius only: area-only suggestions.
  * When using lat/lng/radius, also returns mapStreetsResponse so the homepage payload can inline map segments.
  */
@@ -843,10 +819,7 @@ export async function getHomepageSuggestions(
     select: { timezone: true },
   });
   const timezone = prefs?.timezone ?? "UTC";
-  const [streakData, nextMilestone] = await Promise.all([
-    getStreak(userId, timezone),
-    getNextMilestone(userId, context.projectId),
-  ]);
+  const streakData = await getStreak(userId, timezone);
 
   const candidates: HomepageSuggestion[] = [];
   let mapStreetsResponse: MapStreetsResponse | undefined;
@@ -861,18 +834,27 @@ export async function getHomepageSuggestions(
       userId,
       context,
       streakData,
-      nextMilestone,
       response,
       candidates,
     );
+
+    const clusterSuggestions = buildClusterCandidates(
+      response._rawStreets,
+      context.lat ?? 0,
+      context.lng ?? 0,
+    );
+    candidates.push(...clusterSuggestions);
   } else if (
     context.lat != null &&
     context.lng != null &&
     context.radius != null &&
     (context.lat !== 0 || context.lng !== 0)
   ) {
+    const fetchMapStreets = ENGINE.VERSION === "v1"
+      ? getMapStreets
+      : getMapStreetsV2;
     const [mapResult, geoInArea] = await Promise.all([
-      getMapStreets(userId, context.lat, context.lng, context.radius),
+      fetchMapStreets(userId, context.lat, context.lng, context.radius, 1),
       getGeometriesInArea(context.lat, context.lng, context.radius),
     ]);
     const rawGeometries = geoInArea.streets;
@@ -887,8 +869,8 @@ export async function getHomepageSuggestions(
       (g) =>
         !progressSegmentIds.has(g.osmId) &&
         !progressNames.has(normalizeStreetName(g.name ?? "")) &&
-        g.name &&
-        g.name.trim() !== "" &&
+        !!g.name &&
+        !isUnnamedStreet(g.name) &&
         g.lengthMeters > 50 &&
         g.geometry?.coordinates?.length >= 2,
     );
@@ -949,8 +931,8 @@ export async function getHomepageSuggestions(
 
   if (candidates.length === 0) {
     return mapStreetsResponse != null
-      ? { primary: null, alternates: [], mapStreetsResponse, nextMilestone }
-      : { primary: null, alternates: [], nextMilestone };
+      ? { primary: null, alternates: [], mapStreetsResponse, nextMilestone: null }
+      : { primary: null, alternates: [], nextMilestone: null };
   }
 
   const MIN_SUGGESTIONS = 2;
@@ -973,8 +955,6 @@ export async function getHomepageSuggestions(
             return pool.find((c) => c.type === "streak_saver")!;
           if (pool.some((c) => c.type === "quick_win"))
             return pool.find((c) => c.type === "quick_win")!;
-          if (pool.some((c) => c.type === "milestone_push"))
-            return pool.find((c) => c.type === "milestone_push")!;
           if (pool.some((c) => c.type === "repeat_street"))
             return pool.find((c) => c.type === "repeat_street")!;
           return pool[0];
@@ -992,22 +972,21 @@ export async function getHomepageSuggestions(
     .slice(0, 3);
 
   return mapStreetsResponse != null
-    ? { primary, alternates, mapStreetsResponse, nextMilestone }
-    : { primary, alternates, nextMilestone };
+    ? { primary, alternates, mapStreetsResponse, nextMilestone: null }
+    : { primary, alternates, nextMilestone: null };
 }
 
 async function buildCandidatesFromProjectResponse(
   userId: string,
   context: { projectId?: string; lat?: number; lng?: number; radius?: number },
   streakData: StreakData,
-  nextMilestone: MilestoneWithProgress | null,
   response: SuggestionsResponse,
   candidates: HomepageSuggestion[],
 ): Promise<void> {
 
   if (streakData.isAtRisk && streakData.currentWeeks > 0) {
     const nearest = response.nearest[0];
-    if (nearest) {
+    if (nearest && nearest.name && !isUnnamedStreet(nearest.name)) {
       const coords = (nearest as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry;
       const bbox = coords?.length
         ? bboxFromGeometry(coords.map((c) => [c.lng, c.lat]))
@@ -1029,7 +1008,7 @@ async function buildCandidatesFromProjectResponse(
   }
 
   const almostOne = response.almostComplete[0];
-  if (almostOne && almostOne.currentProgress >= 85) {
+  if (almostOne && almostOne.name && !isUnnamedStreet(almostOne.name) && almostOne.currentProgress >= 85) {
     const geom = (almostOne as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry;
     const bbox = geom?.length
       ? bboxFromGeometry(geom.map((c) => [c.lng, c.lat]))
@@ -1049,30 +1028,7 @@ async function buildCandidatesFromProjectResponse(
     });
   }
 
-  if (nextMilestone && response.milestone && response.milestone.streets.length > 0) {
-    const streets = response.milestone.streets;
-    const allCoords = streets.flatMap((s) =>
-      (s as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry ?? []
-    );
-    const bbox =
-      allCoords.length > 0
-        ? bboxFromGeometry(allCoords.map((c) => [c.lng, c.lat]))
-        : ([0, 0, 0, 0] as [number, number, number, number]);
-    candidates.push({
-      type: "milestone_push",
-      title: `${response.milestone.streetsNeeded} streets to ${nextMilestone.name}`,
-      shortCopy: `${response.milestone.streetsNeeded} street(s) to reach ${response.milestone.target}%`,
-      cooldownKey: `milestone_push:milestone:${nextMilestone.id}`,
-      reason: `${response.milestone.streetsNeeded} streets to your ${nextMilestone.name} milestone`,
-      focus: {
-        bbox,
-        streetIds: streets.map((s) => osmIdToNum(s.osmId)),
-      },
-      streets: streetSuggestionsToSuggestionStreets(streets),
-    });
-  }
-
-  if (response.repeatStreet) {
+  if (response.repeatStreet && response.repeatStreet.name && !isUnnamedStreet(response.repeatStreet.name)) {
     const r = response.repeatStreet;
     const geom = r.geometry;
     const bbox =
@@ -1094,8 +1050,9 @@ async function buildCandidatesFromProjectResponse(
     });
   }
 
-  if (response.nearest.length >= 1 && !candidates.some((c) => c.type === "streak_saver")) {
-    const n = response.nearest[0];
+  const exploreNearest = response.nearest.find((n) => n.name && !isUnnamedStreet(n.name));
+  if (exploreNearest && !candidates.some((c) => c.type === "streak_saver")) {
+    const n = exploreNearest;
     const geom = (n as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry;
     const bbox = geom?.length
       ? bboxFromGeometry(geom.map((c) => [c.lng, c.lat]))
@@ -1115,80 +1072,16 @@ async function buildCandidatesFromProjectResponse(
     });
   }
 
-  if (response.clusters.length > 0) {
-    const clusterCards = response.clusters.slice(0, 3).map((cluster, index) => {
-      const sorted = [...cluster.streets].sort(
-        (a, b) => b.currentProgress - a.currentProgress || b.lengthMeters - a.lengthMeters,
-      );
-      const anchor = sorted[0];
-      const uniqueByName = new Map<string, (typeof cluster.streets)[number]>();
-      for (const s of cluster.streets) {
-        const key = normalizeStreetName(s.name);
-        if (!uniqueByName.has(key)) uniqueByName.set(key, s);
-      }
-      const uniqueStreets = [...uniqueByName.values()];
-      const newStreets = uniqueStreets.filter((street) => street.currentProgress === 0).length;
-      const toFinish = uniqueStreets.filter(
-        (street) =>
-          street.currentProgress >= CLUSTER_IN_PROGRESS_THRESHOLD &&
-          street.currentProgress < 100,
-      ).length;
-      const totalDistanceM = Math.round(cluster.totalLength);
-      const estimatedDistanceM = Math.round(
-        totalDistanceM * CLUSTER_CONNECTING_OVERHEAD,
-      );
-      const km = (estimatedDistanceM / 1000).toFixed(1);
-      const allCoords = cluster.streets.flatMap((street) =>
-        (street as unknown as { geometry: Array<{ lat: number; lng: number }> }).geometry ?? [],
-      );
-      const bbox =
-        allCoords.length > 0
-          ? bboxFromGeometry(allCoords.map((point) => [point.lng, point.lat]))
-          : ([0, 0, 0, 0] as [number, number, number, number]);
-      const streetIds = cluster.streets
-        .map((street) => osmIdToNum(street.osmId))
-        .filter((id) => id > 0);
-
-      const title =
-        anchor?.name && anchor.name.trim().length > 0
-          ? `Go for a run around ${anchor.name}`
-          : "Run suggestions nearby";
-
-      return {
-        type: "nearby_cluster" as const,
-        title,
-        shortCopy: `${newStreets} new streets · ${toFinish} to finish · ~${km} km`,
-        cooldownKey: `nearby_cluster:project:${context.projectId ?? "none"}:${index}:${anchor?.osmId ?? "na"}`,
-        reason: `${cluster.streetCount} streets in this nearby run area`,
-        clusterStats: {
-          newStreets,
-          toFinish,
-          totalDistanceM,
-          estimatedDistanceM,
-          streetCount: newStreets + toFinish,
-        },
-        focus: {
-          bbox,
-          ...(streetIds.length > 0 && { streetIds }),
-          startPoint:
-            anchor?.geometry?.[0] != null
-              ? { lat: anchor.geometry[0].lat, lng: anchor.geometry[0].lng }
-              : undefined,
-        },
-        streets: streetSuggestionsToSuggestionStreets(cluster.streets),
-      };
-    });
-    candidates.push(...clusterCards);
-  }
 }
 
 function buildCandidatesFromMapStreets(
   centerLat: number,
   centerLng: number,
   streakData: StreakData,
-  streets: MapStreet[],
+  allStreets: MapStreet[],
   candidates: HomepageSuggestion[],
 ): void {
+  const streets = allStreets.filter((s) => s.name && !isUnnamedStreet(s.name));
   if (streets.length === 0) return;
 
   // streak_saver and repeat_street run before the tiered ladder
@@ -1298,8 +1191,7 @@ export async function getNearestShortStreet(
   }> = [];
 
   for (const street of streets) {
-    // Skip unnamed streets
-    if (!street.name || street.name.trim() === "") continue;
+    if (!street.name || isUnnamedStreet(street.name)) continue;
 
     if (street.lengthMeters < 50 || street.lengthMeters > 500) continue;
 
@@ -1379,7 +1271,7 @@ export async function getNearestShortStreets(
   }> = [];
 
   for (const street of streets) {
-    if (!street.name || street.name.trim() === "") continue;
+    if (!street.name || isUnnamedStreet(street.name)) continue;
     if (street.lengthMeters < 50 || street.lengthMeters > maxLengthMeters) continue;
     const coords = street.geometry.coordinates;
     if (coords.length < 2) continue;

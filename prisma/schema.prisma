@@ -25,6 +25,7 @@ model User {
   stravaAccessToken    String?
   stravaRefreshToken   String?
   stravaTokenExpiresAt DateTime?
+  stravaGrantedScopes  String?   // Comma-separated scopes actually granted by user (e.g. "read,activity:read_all,activity:write")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -455,13 +456,16 @@ model UserPreferences {
   lastViewedRadius Int?
 
   // Display preferences
-  distanceUnit         String @default("km") // "km" | "miles" | "meters"
-  theme                String @default("system") // "dark" | "light" | "system"
-  dateFormat           String @default("short") // "short" | "long" | "numeric"
-  mapStyle             String @default("satellite") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
-  defaultMapZoom       Int    @default(15) // 13-19
-  defaultProjectRadius Int    @default(300) // meters
-  defaultStreetFilter  String @default("all") // "all" | "completed" | "inProgress" | "notStarted"
+  distanceUnit         String  @default("km") // "km" | "miles" | "meters"
+  theme                String  @default("system") // "dark" | "light" | "system"
+  dateFormat           String  @default("short") // "short" | "long" | "numeric"
+  mapStyle             String  @default("satellite") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
+  defaultMapZoom       Int     @default(15) // 13-19
+  defaultProjectRadius Int     @default(300) // meters
+  defaultStreetFilter  String  @default("all") // "all" | "completed" | "inProgress" | "notStarted"
+
+  // Strava integration
+  autoUpdateRunDescription Boolean @default(true) // Append Street Keeper stats to Strava run descriptions
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

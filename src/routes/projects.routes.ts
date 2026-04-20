@@ -52,17 +52,13 @@ import {
   restoreProject,
   deleteProjectPermanently,
   refreshProjectSnapshot,
-  expandProjectToFullStreets,
   resizeProject,
+  updateProjectMetadata,
   recomputeProjectProgressFromV2,
   ProjectNotFoundError,
   ProjectAccessDeniedError,
+  ProjectValidationError,
 } from "../services/project.service.js";
-import {
-  createAutoMilestones,
-  createMVPMilestonesForProject,
-  getMilestonesForUser,
-} from "../services/milestone.service.js";
 import { getSuggestions } from "../services/suggestion.service.js";
 import { listActivitiesForProject } from "../services/activity.service.js";
 import { getProjectTraces } from "../services/map.service.js";
@@ -257,6 +253,7 @@ router.get("/preview", async (req: Request, res: Response) => {
   }
 
   try {
+    input.userId = req.user?.id;
     const preview = await previewProject(input);
 
     res.status(200).json({
@@ -517,8 +514,6 @@ router.post("/", async (req: Request, res: Response) => {
       input,
       "cacheKey" in input ? input.cacheKey : undefined
     );
-    // Create MVP milestones for the project
-    await createMVPMilestonesForProject(userId, project.id, project.totalStreets);
 
     res.status(201).json({
       success: true,
@@ -695,6 +690,58 @@ router.patch("/:id", async (req: Request, res: Response) => {
       return;
     }
     console.error("[Projects] Resize error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// PATCH Project Metadata (name, deadline)
+// ============================================
+
+router.patch("/:id/metadata", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+  const body = req.body as { name?: unknown; deadline?: unknown };
+
+  try {
+    const project = await updateProjectMetadata(projectId, userId, {
+      name: body?.name,
+      deadline: body?.deadline,
+    });
+    res.status(200).json({
+      success: true,
+      project,
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+    if (error instanceof ProjectValidationError) {
+      res.status(400).json({
+        success: false,
+        error: error.message,
+        code: ERROR_CODES.VALIDATION_ERROR,
+      });
+      return;
+    }
+    console.error("[Projects] Metadata update error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -1287,71 +1334,6 @@ router.post("/:id/refresh", async (req: Request, res: Response) => {
 });
 
 /**
- * POST /routes/:id/expand-streets
- * Expand project to include ALL segments of streets that are already in the project.
- * 
- * This solves the issue where a street might have only 1 segment captured because
- * only that segment intersected the boundary, but the road actually has more segments.
- * 
- * The endpoint queries a larger area (2x radius) and adds any segments that have
- * the same street name as existing streets in the project.
- */
-router.post("/:id/expand-streets", async (req: Request, res: Response) => {
-  const userId = req.user!.id;
-  const projectId = req.params.id;
-
-  try {
-    const { project, addedSegments } = await expandProjectToFullStreets(
-      projectId,
-      userId
-    );
-
-    res.status(200).json({
-      success: true,
-      project,
-      addedSegments,
-      message: addedSegments > 0
-        ? `Expanded: ${addedSegments} additional segment${addedSegments === 1 ? "" : "s"} added`
-        : "No additional segments found",
-    });
-  } catch (error) {
-    if (error instanceof ProjectNotFoundError) {
-      res.status(404).json({
-        success: false,
-        error: "Project not found",
-        code: ERROR_CODES.PROJECT_NOT_FOUND,
-      });
-      return;
-    }
-
-    if (error instanceof ProjectAccessDeniedError) {
-      res.status(403).json({
-        success: false,
-        error: "Access denied to this project",
-        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
-      });
-      return;
-    }
-
-    if (error instanceof OverpassError) {
-      res.status(502).json({
-        success: false,
-        error: "Failed to expand street data. Please try again.",
-        code: ERROR_CODES.OVERPASS_API_ERROR,
-      });
-      return;
-    }
-
-    console.error("[Projects] Expand streets error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-      code: ERROR_CODES.INTERNAL_ERROR,
-    });
-  }
-});
-
-/**
  * POST /routes/:id/recompute-progress
  * Recompute project progress from V2 engine (only runs on or after project creation).
  * Use to fix false completions from runs that happened before the project existed.
@@ -1482,86 +1464,6 @@ router.get("/:id/activities", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Get activities error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-      code: ERROR_CODES.INTERNAL_ERROR,
-    });
-  }
-});
-
-// ============================================
-// Get Project Milestones (MVP)
-// ============================================
-
-/**
- * GET /projects/:id/milestones
- * Get all milestones for a project (active, completed, and pending celebrations)
- */
-router.get("/:id/milestones", async (req: Request, res: Response) => {
-  const userId = req.user!.id;
-  const projectId = req.params.id;
-
-  try {
-    // Verify project access
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
-    });
-    if (!project) {
-      res.status(404).json({
-        success: false,
-        error: "Project not found",
-        code: ERROR_CODES.PROJECT_NOT_FOUND,
-      });
-      return;
-    }
-
-    // Get all milestones for this project
-    const allMilestones = await prisma.userMilestone.findMany({
-      where: { userId, projectId },
-      include: { type: true },
-      orderBy: [{ completedAt: "asc" }, { createdAt: "asc" }],
-    });
-
-    // Separate into active, completed, and pending celebrations
-    const active = allMilestones
-      .filter((m) => !m.completedAt)
-      .map((m) => ({
-        id: m.id,
-        name: m.name,
-        targetValue: m.targetValue ?? 0,
-        currentValue: m.currentValue ?? 0,
-        type: m.type ? { slug: m.type.slug } : null,
-      }));
-
-    const completed = allMilestones
-      .filter((m) => m.completedAt && m.celebrationShownAt)
-      .map((m) => ({
-        id: m.id,
-        name: m.name,
-        targetValue: m.targetValue ?? 0,
-        currentValue: m.currentValue ?? 0,
-        completedAt: m.completedAt?.toISOString(),
-      }));
-
-    const pendingCelebrations = allMilestones
-      .filter((m) => m.completedAt && !m.celebrationShownAt)
-      .map((m) => ({
-        id: m.id,
-        name: m.name,
-        projectName: project.name,
-        completedAt: m.completedAt?.toISOString(),
-        shareMessage: m.shareMessage,
-      }));
-
-    res.status(200).json({
-      success: true,
-      active,
-      completed,
-      pendingCelebrations,
-    });
-  } catch (error) {
-    console.error("[Projects] Get milestones error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

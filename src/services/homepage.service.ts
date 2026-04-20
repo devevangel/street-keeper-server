@@ -3,10 +3,11 @@
  * Resolves context: projectId > lat/lng > last viewed > null.
  */
 import prisma from "../lib/prisma.js";
-import { getNextMilestone } from "./milestone.service.js";
 import { getHomepageSuggestions, getNearestShortStreets } from "./suggestion.service.js";
+import { groupSnapshotByStreetName } from "./project.service.js";
 import type { HomepagePayload, UserState } from "../types/homepage.types.js";
 import type { ActivityImpact } from "../types/activity.types.js";
+import type { StreetSnapshot } from "../types/project.types.js";
 import type { MapStreet } from "../types/map.types.js";
 
 function bboxFromCoords(
@@ -89,30 +90,44 @@ export async function getHomepageData(
   const lngNum = query.lng != null ? parseFloat(query.lng) : undefined;
   const radiusNum =
     query.radius != null ? parseInt(query.radius, 10) : DEFAULT_RADIUS;
-  const projectId = query.projectId ?? undefined;
+  const projectIdParam = query.projectId ?? undefined;
   const userLatNum = query.userLat != null ? parseFloat(query.userLat) : undefined;
   const userLngNum = query.userLng != null ? parseFloat(query.userLng) : undefined;
+
+  const ownedProject = projectIdParam
+    ? await prisma.project.findFirst({
+        where: { id: projectIdParam, userId },
+        select: {
+          id: true,
+          centerLat: true,
+          centerLng: true,
+          radiusMeters: true,
+        },
+      })
+    : null;
+
+  /** When set, "Your runs" + totals only include activities linked to this project via ProjectActivity. */
+  const explicitProjectScope = ownedProject?.id;
 
   let mapLat: number;
   let mapLng: number;
   let mapRadius: number;
   let contextProjectId: string | undefined;
 
-  if (projectId) {
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
-      select: { centerLat: true, centerLng: true, radiusMeters: true },
-    });
-    if (project && project.centerLat != null && project.centerLng != null && project.radiusMeters != null) {
-      mapLat = project.centerLat;
-      mapLng = project.centerLng;
-      mapRadius = project.radiusMeters;
-      contextProjectId = projectId;
-    } else {
-      mapLat = latNum ?? prefs?.lastViewedLat ?? 0;
-      mapLng = lngNum ?? prefs?.lastViewedLng ?? 0;
-      mapRadius = radiusNum;
-    }
+  if (
+    ownedProject &&
+    ownedProject.centerLat != null &&
+    ownedProject.centerLng != null &&
+    ownedProject.radiusMeters != null
+  ) {
+    mapLat = ownedProject.centerLat;
+    mapLng = ownedProject.centerLng;
+    mapRadius = ownedProject.radiusMeters;
+    contextProjectId = ownedProject.id;
+  } else if (projectIdParam) {
+    mapLat = latNum ?? prefs?.lastViewedLat ?? 0;
+    mapLng = lngNum ?? prefs?.lastViewedLng ?? 0;
+    mapRadius = radiusNum;
   } else if (latNum != null && lngNum != null && !Number.isNaN(latNum) && !Number.isNaN(lngNum)) {
     mapLat = latNum;
     mapLng = lngNum;
@@ -153,6 +168,21 @@ export async function getHomepageData(
     }
   }
 
+  const activityForRunsWhere = explicitProjectScope
+    ? {
+        userId,
+        isProcessed: true,
+        projects: { some: { projectId: explicitProjectScope } },
+      }
+    : { userId, isProcessed: true };
+
+  const distanceAggregateWhere = explicitProjectScope
+    ? {
+        userId,
+        projects: { some: { projectId: explicitProjectScope } },
+      }
+    : { userId };
+
   const [
     lastActivity,
     activityCount,
@@ -163,18 +193,28 @@ export async function getHomepageData(
     totalDistanceResult,
     recentActivitiesRaw,
     projectForContext,
+    projectScopedActivityCount,
   ] = await Promise.all([
     prisma.activity.findFirst({
-      where: { userId, isProcessed: true },
+      where: activityForRunsWhere,
       orderBy: { startDate: "desc" },
       include: {
-        projects: {
-          select: {
-            streetsCompleted: true,
-            streetsImproved: true,
-            impactDetails: true,
-          },
-        },
+        projects: explicitProjectScope
+          ? {
+              where: { projectId: explicitProjectScope },
+              select: {
+                streetsCompleted: true,
+                streetsImproved: true,
+                impactDetails: true,
+              },
+            }
+          : {
+              select: {
+                streetsCompleted: true,
+                streetsImproved: true,
+                impactDetails: true,
+              },
+            },
       },
     }),
     prisma.activity.count({ where: { userId } }),
@@ -193,11 +233,11 @@ export async function getHomepageData(
       where: { userId, isArchived: false, completedStreets: { gt: 0 } },
     }),
     prisma.activity.aggregate({
-      where: { userId },
+      where: distanceAggregateWhere,
       _sum: { distanceMeters: true },
     }),
     prisma.activity.findMany({
-      where: { userId, isProcessed: true },
+      where: activityForRunsWhere,
       orderBy: { startDate: "desc" },
       take: 5,
       select: {
@@ -214,12 +254,18 @@ export async function getHomepageData(
           select: {
             id: true,
             name: true,
-            totalStreets: true,
-            completedStreets: true,
-            progress: true,
+            streetsSnapshot: true,
           },
         })
       : Promise.resolve(null),
+    explicitProjectScope
+      ? prisma.activity.count({
+          where: {
+            userId,
+            projects: { some: { projectId: explicitProjectScope } },
+          },
+        })
+      : Promise.resolve(0),
   ]);
 
   const userState = computeUserState(
@@ -255,9 +301,7 @@ export async function getHomepageData(
       })
     : null;
 
-  const nextMilestone = suggestions
-    ? suggestions.nextMilestone
-    : await getNextMilestone(userId, contextProjectId);
+  const nextMilestone = null;
 
   const mapSegments =
     suggestions?.mapStreetsResponse?.segments?.length
@@ -318,8 +362,12 @@ export async function getHomepageData(
     }
   }
 
+  const metricsActivityCount = explicitProjectScope
+    ? projectScopedActivityCount
+    : activityCount;
+
   const totalDistanceKm =
-    activityCount > 0
+    metricsActivityCount > 0
       ? Math.round(((totalDistanceResult._sum.distanceMeters ?? 0) / 1000) * 100) / 100
       : undefined;
 
@@ -348,13 +396,27 @@ export async function getHomepageData(
     : undefined;
 
   const projectContext = projectForContext
-    ? {
-        id: projectForContext.id,
-        name: projectForContext.name,
-        totalStreets: projectForContext.totalStreets,
-        completedStreets: projectForContext.completedStreets,
-        progress: Math.round(projectForContext.progress * 100) / 100,
-      }
+    ? (() => {
+        const snapshot = projectForContext.streetsSnapshot as StreetSnapshot | null;
+        if (!snapshot?.streets?.length) {
+          return {
+            id: projectForContext.id,
+            name: projectForContext.name,
+            totalStreets: 0,
+            completedStreets: 0,
+            progress: 0,
+          };
+        }
+        const { totalStreetNames, completedStreetNames } = groupSnapshotByStreetName(snapshot);
+        const pct = totalStreetNames > 0 ? (completedStreetNames / totalStreetNames) * 100 : 0;
+        return {
+          id: projectForContext.id,
+          name: projectForContext.name,
+          totalStreets: totalStreetNames,
+          completedStreets: completedStreetNames,
+          progress: Math.round(pct * 100) / 100,
+        };
+      })()
     : undefined;
 
   const payload: HomepagePayload = {
@@ -370,8 +432,8 @@ export async function getHomepageData(
     ...(mapSegments && mapSegments.length > 0 && { mapSegments }),
     ...(lastRun && { lastRun }),
     userState,
-    ...(activityCount > 0 && {
-      totalActivities: activityCount,
+    ...(metricsActivityCount > 0 && {
+      totalActivities: metricsActivityCount,
       totalDistanceKm,
     }),
     userName: user?.name,

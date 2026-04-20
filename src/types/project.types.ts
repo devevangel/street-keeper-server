@@ -215,6 +215,10 @@ export interface ProjectMapStats {
   totalStreetNames: number;
   /** Street names where every segment is completed. */
   completedStreetNames: number;
+  /** Street names with partial progress (> 0% but not completed). */
+  partialStreetNames: number;
+  /** Street names with zero progress. */
+  notStartedStreetNames: number;
 }
 
 export interface ProjectMapData {
@@ -326,6 +330,7 @@ export interface PreviewProjectInput {
   polygonCoordinates?: [number, number][];
   boundaryMode?: BoundaryMode;
   includeStreets?: boolean;
+  userId?: string;
 }
 
 /**
@@ -412,6 +417,10 @@ export interface ProjectPreview {
     segmentCount: number;
     totalLengthMeters: number;
     highwayType: string;
+    osmId?: string;
+    geometry?: { type: "LineString"; coordinates: [number, number][] };
+    percentage?: number;
+    status?: "completed" | "partial" | "not_started";
   }>;
 }
 

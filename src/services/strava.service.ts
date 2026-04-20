@@ -439,6 +439,53 @@ export function streamsToGpxPoints(
 }
 
 // ============================================
+// Activity Update (Write)
+// ============================================
+
+/**
+ * Update a Strava activity's mutable fields (description, name, etc.).
+ * Requires `activity:write` scope.
+ *
+ * @see https://developers.strava.com/docs/reference/#api-Activities-updateActivityById
+ */
+export async function updateStravaActivity(
+  accessToken: string,
+  activityId: string,
+  update: { description?: string },
+): Promise<void> {
+  try {
+    await axios.put(
+      `${STRAVA.API_BASE_URL}/activities/${activityId}`,
+      update,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 15000,
+      },
+    );
+  } catch (error) {
+    if (error instanceof AxiosError) {
+      if (error.response?.status === 401) {
+        throw new StravaApiError(
+          "Strava access token is invalid or expired",
+          "TOKEN_INVALID",
+        );
+      }
+      if (error.response?.status === 403) {
+        throw new StravaApiError(
+          "Missing activity:write scope — user needs to re-authorize",
+          "SCOPE_MISSING",
+        );
+      }
+      throw new StravaApiError(
+        `Failed to update activity: ${error.response?.data?.message ?? error.message}`,
+        "API_ERROR",
+      );
+    }
+    throw error;
+  }
+}
+
+// ============================================
 // Custom Error Class for Strava API
 // ============================================
 

@@ -86,6 +86,7 @@ import {
   streamsToGpxPoints,
   refreshAccessToken,
   isTokenExpired,
+  updateStravaActivity,
   StravaApiError,
 } from "../services/strava.service.js";
 import {
@@ -95,6 +96,7 @@ import {
   getActivityByStravaId,
 } from "../services/activity.service.js";
 import { processActivity } from "../services/activity-processor.service.js";
+import { buildActivityDescription } from "../services/activity-description.service.js";
 import { registerActivityWorker, type ActivityJob } from "../queues/activity.queue.js";
 import type { ProcessActivityJob } from "../types/activity.types.js";
 
@@ -296,7 +298,7 @@ async function processActivityJob(
       return {
         success: true,
         activityId: existing.id,
-        routesProcessed: result.routesProcessed,
+        routesProcessed: result.projectsProcessed,
       };
     }
 
@@ -444,15 +446,43 @@ async function processActivityJob(
   // Step 8: Process activity against routes
   const result = await processActivity(saved.id, userId);
 
+  const totalCompleted = result.projects.reduce((sum, r) => sum + r.streetsCompleted, 0);
   console.log(
     `[Worker] Completed processing activity ${stravaActivityId}: ` +
-    `${result.routesProcessed} routes, ${result.routes.reduce((sum, r) => sum + r.streetsCompleted, 0)} streets completed`
+    `${result.projectsProcessed} projects, ${totalCompleted} streets completed`
   );
+
+  // Step 9: Optionally update Strava description with Street Keeper stats
+  try {
+    const prefs = await prisma.userPreferences.findUnique({
+      where: { userId },
+      select: { autoUpdateRunDescription: true },
+    });
+
+    if (prefs?.autoUpdateRunDescription !== false) {
+      const newDescription = buildActivityDescription({
+        processingResult: result,
+        activityType: stravaActivity.type,
+        existingDescription: stravaActivity.description,
+      });
+
+      if (newDescription) {
+        await updateStravaActivity(accessToken, stravaActivityId, {
+          description: newDescription,
+        });
+        console.log(`[Worker] Updated Strava description for activity ${stravaActivityId}`);
+      }
+    }
+  } catch (error) {
+    // Non-fatal: don't fail the job if description update fails (missing scope, etc.)
+    const msg = error instanceof Error ? error.message : "Unknown";
+    console.warn(`[Worker] Failed to update Strava description (non-fatal): ${msg}`);
+  }
 
   return {
     success: true,
     activityId: saved.id,
-    routesProcessed: result.routesProcessed,
+    routesProcessed: result.projectsProcessed,
   };
 }
 

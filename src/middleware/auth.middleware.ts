@@ -159,6 +159,7 @@ export async function requireAuth(
         email: true,
         stravaId: true,
         profilePic: true,
+        stravaGrantedScopes: true,
       },
     });
 
@@ -226,6 +227,7 @@ export async function optionalAuth(
           email: true,
           stravaId: true,
           profilePic: true,
+          stravaGrantedScopes: true,
         },
       });
 
