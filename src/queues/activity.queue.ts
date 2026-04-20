@@ -167,14 +167,16 @@ async function getBoss(): Promise<PgBoss | null> {
 async function initializeBoss(): Promise<PgBoss> {
   console.log("[Queue] Initializing pg-boss queue...");
 
+  const dbUrl = getDatabaseUrl();
+  const isSupabase = dbUrl.includes("supabase");
+
   const newBoss = new PgBoss({
-    connectionString: getDatabaseUrl(),
-    // Schema name for pg-boss tables (keeps them separate from app tables)
+    connectionString: dbUrl,
     schema: "pgboss",
-    // How often to check for new jobs (in seconds)
     monitorIntervalSeconds: 1,
-    // Maintenance - clean up old jobs
-    maintenanceIntervalSeconds: 60 * 5, // Every 5 minutes
+    maintenanceIntervalSeconds: 60 * 5,
+    max: isSupabase ? 3 : 10,
+    ...(isSupabase && { ssl: { rejectUnauthorized: false } }),
   });
 
   // Handle errors

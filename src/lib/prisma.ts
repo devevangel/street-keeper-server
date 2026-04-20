@@ -29,11 +29,12 @@ function getPrismaClient(): PrismaClient {
     throw new Error("DATABASE_URL environment variable is not set");
   }
 
-  // Create PostgreSQL connection pool
+  const isSupabase = databaseUrl.includes("supabase");
+
   pool = new Pool({
     connectionString: databaseUrl,
-    // Add SSL for Supabase/production
-    ssl: databaseUrl.includes("supabase") ? { rejectUnauthorized: false } : undefined,
+    max: isSupabase ? 5 : 10,
+    ssl: isSupabase ? { rejectUnauthorized: false } : undefined,
   });
 
   // Create Prisma adapter and client
