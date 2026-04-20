@@ -1,24 +1,24 @@
 /**
  * Activity Processing Queue
  * pg-boss queue for asynchronous activity processing
- * 
+ *
  * WHY pg-boss?
  * ------------
  * pg-boss uses PostgreSQL (which we already have via Prisma) for job storage.
  * This eliminates the need for Redis and simplifies local development.
- * 
+ *
  * WHY ASYNC PROCESSING?
  * ---------------------
  * When Strava sends a webhook notification about a new activity:
  * 1. We must respond within 2 seconds (Strava requirement)
  * 2. Processing an activity takes 5-30 seconds (Overpass, Mapbox, DB updates)
- * 
+ *
  * Solution: Queue the processing job and respond immediately.
  * The worker processes jobs in the background at its own pace.
- * 
+ *
  * JOB LIFECYCLE:
  * --------------
- * 
+ *
  * ```
  * Webhook Received
  *        │
@@ -29,9 +29,9 @@
  *        │
  *        ▼
  * [Respond to Strava: 200 OK]  ← Must happen within 2s
- *        
+ *
  *        ... later (async) ...
- *        
+ *
  * ┌─────────────────┐
  * │ Worker picks up │  ← When ready
  * │ job from queue  │
@@ -52,14 +52,14 @@
  *        ▼
  * [Job Complete]
  * ```
- * 
+ *
  * RELIABILITY FEATURES:
  * ---------------------
  * - Jobs persist in PostgreSQL (survive server restarts)
  * - Failed jobs retry with exponential backoff (3 attempts)
  * - Completed jobs auto-expire after 24 hours
  * - Job timeout prevents stuck jobs (2 minutes)
- * 
+ *
  * @example
  * // Add a job to process a new activity
  * await addActivityProcessingJob({
@@ -98,7 +98,7 @@ export type ActivityJobHandler = (jobs: ActivityJob[]) => Promise<void>;
 
 /**
  * pg-boss instance - manages job queues using PostgreSQL
- * 
+ *
  * Initialized lazily on first use to avoid connection errors at import time.
  * Uses the same DATABASE_URL as Prisma.
  */
@@ -107,7 +107,7 @@ let bossStartPromise: Promise<PgBoss> | null = null;
 
 /**
  * Check if queue functionality is enabled
- * 
+ *
  * Queue can be disabled by setting DISABLE_QUEUE=true in environment.
  * This allows running the server without queue processing for development.
  */
@@ -117,7 +117,7 @@ function isQueueEnabled(): boolean {
 
 /**
  * Get the database URL for pg-boss
- * 
+ *
  * Uses the same DATABASE_URL as Prisma.
  * pg-boss creates its own schema (pgboss) to store job data.
  */
@@ -131,10 +131,10 @@ function getDatabaseUrl(): string {
 
 /**
  * Initialize and start pg-boss
- * 
+ *
  * Creates the pg-boss instance if not already created.
  * Handles the async startup process.
- * 
+ *
  * @returns Promise resolving to the pg-boss instance
  */
 async function getBoss(): Promise<PgBoss | null> {
@@ -160,7 +160,7 @@ async function getBoss(): Promise<PgBoss | null> {
 
 /**
  * Initialize pg-boss with configuration
- * 
+ *
  * Creates tables in PostgreSQL (pgboss schema) on first run.
  * Subsequent runs reuse existing tables.
  */
@@ -182,12 +182,21 @@ async function initializeBoss(): Promise<PgBoss> {
     console.error("[Queue] pg-boss error:", error.message);
   });
 
-  // Start the boss (creates tables if needed)
+  // Start the boss (creates internal tables if needed)
   await newBoss.start();
-  
+
+  // pg-boss v10+ requires explicit queue creation before workers can subscribe
+  await newBoss.createQueue(QUEUE.ACTIVITY_PROCESSING);
+  await newBoss.createQueue(QUEUE.BACKGROUND_SYNC);
+  await newBoss.createQueue(QUEUE.CITY_SYNC);
+  await newBoss.createQueue(QUEUE.GPX_ANALYZE);
+  console.log(
+    "[Queue] Created queues: activity-processing, background-sync, city-sync, gpx-analyze",
+  );
+
   boss = newBoss;
   console.log("[Queue] pg-boss queue initialized successfully");
-  
+
   return newBoss;
 }
 
@@ -197,7 +206,7 @@ async function initializeBoss(): Promise<PgBoss> {
 
 /**
  * Check if the queue is available
- * 
+ *
  * Returns true if queue is enabled and initialized.
  * Does not trigger initialization - use for quick checks.
  */
@@ -220,22 +229,52 @@ export function getQueueError(): Error | null {
 
 /**
  * Queue name for activity processing jobs
- * 
+ *
  * All activity jobs go into this queue.
  * Workers subscribe to this queue to process jobs.
  */
 const ACTIVITY_QUEUE_NAME = QUEUE.ACTIVITY_PROCESSING;
 
 /**
+ * Queue name for background Strava sync (onboarding / initial import)
+ */
+const SYNC_QUEUE_NAME = QUEUE.BACKGROUND_SYNC;
+const CITY_SYNC_QUEUE_NAME = QUEUE.CITY_SYNC;
+const GPX_ANALYZE_QUEUE_NAME = QUEUE.GPX_ANALYZE;
+
+/** Payload for background city sync (Overpass ingestion). */
+export interface CitySyncJobPayload {
+  relationId: string;
+  name: string;
+  adminLevel: number;
+}
+
+/** Deferred GPX analysis when street data is loading. */
+export interface GpxAnalyzeJobPayload {
+  gpxBase64: string;
+  centerLat: number;
+  centerLng: number;
+  deferCount: number;
+}
+
+/**
+ * Payload for background sync job (worker receives this)
+ */
+export interface SyncJobPayload {
+  syncJobId: string;
+  userId: string;
+}
+
+/**
  * Add an activity processing job to the queue
- * 
+ *
  * Called by webhook handler when Strava notifies us of a new activity.
  * The job will be picked up by the worker and processed asynchronously.
- * 
+ *
  * @param jobData - Activity processing job data
  * @param options - Optional job-specific options
  * @returns Job ID for tracking (or null if queue unavailable/duplicate)
- * 
+ *
  * @example
  * // From webhook handler
  * const jobId = await addActivityProcessingJob({
@@ -255,7 +294,7 @@ export async function addActivityProcessingJob(
     startAfter?: number;
     /** Custom singleton key (useful for deduplication) */
     singletonKey?: string;
-  }
+  },
 ): Promise<string | null> {
   const bossInstance = await getBoss();
 
@@ -265,31 +304,28 @@ export async function addActivityProcessingJob(
   }
 
   // Use singletonKey for deduplication - prevents duplicate jobs for same activity
-  const jobId = await bossInstance.send(
-    ACTIVITY_QUEUE_NAME,
-    jobData,
-    {
-      priority: options?.priority ?? 0,
-      startAfter: options?.startAfter,
-      // Singleton key prevents duplicate jobs while one is active/pending
-      singletonKey: options?.singletonKey ?? `activity-${jobData.stravaActivityId}`,
-      // How long the job can run before being considered stalled
-      expireInSeconds: QUEUE.JOB_TIMEOUT_MS / 1000,
-      // Retry configuration
-      retryLimit: QUEUE.RETRY.MAX_ATTEMPTS,
-      retryDelay: QUEUE.RETRY.BACKOFF_DELAY_MS / 1000,
-      retryBackoff: true, // Exponential backoff
-    }
-  );
+  const jobId = await bossInstance.send(ACTIVITY_QUEUE_NAME, jobData, {
+    priority: options?.priority ?? 0,
+    startAfter: options?.startAfter,
+    // Singleton key prevents duplicate jobs while one is active/pending
+    singletonKey:
+      options?.singletonKey ?? `activity-${jobData.stravaActivityId}`,
+    // How long the job can run before being considered stalled
+    expireInSeconds: QUEUE.JOB_TIMEOUT_MS / 1000,
+    // Retry configuration
+    retryLimit: QUEUE.RETRY.MAX_ATTEMPTS,
+    retryDelay: QUEUE.RETRY.BACKOFF_DELAY_MS / 1000,
+    retryBackoff: true, // Exponential backoff
+  });
 
   if (jobId) {
     console.log(
-      `[Queue] Added activity processing job: ${jobId} (Strava: ${jobData.stravaActivityId})`
+      `[Queue] Added activity processing job: ${jobId} (Strava: ${jobData.stravaActivityId})`,
     );
   } else {
     // Job with same singletonKey already exists
     console.log(
-      `[Queue] Job already queued for activity ${jobData.stravaActivityId}`
+      `[Queue] Job already queued for activity ${jobData.stravaActivityId}`,
     );
   }
 
@@ -297,18 +333,77 @@ export async function addActivityProcessingJob(
 }
 
 /**
+ * Add a background sync job to the queue
+ *
+ * Single-flight per user via singletonKey. Used by onboarding / initial import.
+ */
+export async function addSyncJob(
+  payload: SyncJobPayload,
+): Promise<string | null> {
+  const bossInstance = await getBoss();
+
+  if (!bossInstance) {
+    console.warn("[Queue] Queue is disabled, sync job not queued");
+    throw new QueueUnavailableError("Queue is disabled");
+  }
+
+  const jobId = await bossInstance.send(SYNC_QUEUE_NAME, payload, {
+    singletonKey: `sync-${payload.userId}`,
+    expireInSeconds: QUEUE.SYNC_JOB_TIMEOUT_MS / 1000,
+    retryLimit: QUEUE.SYNC_RETRY.MAX_ATTEMPTS,
+    retryDelay: QUEUE.SYNC_RETRY.DELAY_SECONDS,
+    retryBackoff: true,
+  });
+
+  if (jobId) {
+    console.log(
+      `[Queue] Added sync job: ${jobId} (user: ${payload.userId.slice(0, 8)})`,
+    );
+  }
+
+  return jobId;
+}
+
+/**
+ * Register the sync job worker (processSyncJob handler)
+ */
+export async function registerSyncWorker(
+  handler: (payload: SyncJobPayload) => Promise<void>,
+): Promise<string | undefined> {
+  const bossInstance = await getBoss();
+
+  if (!bossInstance) {
+    console.warn("[Queue] Queue is disabled, sync worker not registered");
+    return undefined;
+  }
+
+  const workerId = await bossInstance.work<SyncJobPayload>(
+    SYNC_QUEUE_NAME,
+    { batchSize: 1, pollingIntervalSeconds: 1 },
+    async (jobs) => {
+      for (const job of jobs) {
+        await handler(job.data);
+      }
+    },
+  );
+
+  console.log(`[Queue] Sync worker registered (worker: ${workerId})`);
+  return workerId;
+}
+
+/**
  * Check if a job for this activity already exists
- * 
+ *
  * Used to prevent duplicate processing when webhooks are retried.
- * 
+ *
  * @param stravaActivityId - Strava activity ID
  * @returns True if job exists and is not completed
  */
 export async function isActivityJobQueued(
-  stravaActivityId: string
+  stravaActivityId: string,
 ): Promise<boolean> {
   const bossInstance = await getBoss();
-  
+
   if (!bossInstance) {
     return false;
   }
@@ -316,7 +411,7 @@ export async function isActivityJobQueued(
   // pg-boss handles this via singletonKey - if we try to add a duplicate,
   // it returns null instead of a job ID. So this function is mainly for
   // explicit checks if needed.
-  // 
+  //
   // For now, we'll rely on the singletonKey mechanism in addActivityProcessingJob
   // which automatically prevents duplicates.
   return false;
@@ -324,7 +419,7 @@ export async function isActivityJobQueued(
 
 /**
  * Get queue statistics
- * 
+ *
  * Returns counts of jobs in various states.
  * Useful for monitoring and health checks.
  */
@@ -340,8 +435,8 @@ export async function getQueueStats(): Promise<{
 
   // pg-boss v10+ uses getQueues() to get queue information
   const queues = await bossInstance.getQueues();
-  const activityQueue = queues.find(q => q.name === ACTIVITY_QUEUE_NAME);
-  
+  const activityQueue = queues.find((q) => q.name === ACTIVITY_QUEUE_NAME);
+
   return {
     queued: activityQueue?.queuedCount ?? 0,
     active: activityQueue?.activeCount ?? 0,
@@ -354,7 +449,7 @@ export async function getQueueStats(): Promise<{
 
 /**
  * Start the queue (initialize pg-boss)
- * 
+ *
  * Called during server startup.
  * Creates pg-boss tables in PostgreSQL if they don't exist.
  */
@@ -364,7 +459,7 @@ export async function startQueue(): Promise<void> {
 
 /**
  * Stop the queue gracefully
- * 
+ *
  * Waits for active jobs to complete, then closes connections.
  * Call this during server shutdown.
  */
@@ -377,21 +472,105 @@ export async function closeQueue(): Promise<void> {
   }
 }
 
+/**
+ * Enqueue a city sync job (deduplicated per OSM relation).
+ */
+export async function enqueueCitySyncJob(
+  payload: CitySyncJobPayload,
+): Promise<string | null> {
+  const bossInstance = await getBoss();
+  if (!bossInstance) {
+    console.warn("[Queue] Queue disabled, city sync not queued");
+    return null;
+  }
+  return bossInstance.send(CITY_SYNC_QUEUE_NAME, payload, {
+    singletonKey: `city-sync-${payload.relationId}`,
+    singletonSeconds: 600,
+    expireInSeconds: QUEUE.SYNC_JOB_TIMEOUT_MS / 1000,
+    retryLimit: QUEUE.SYNC_RETRY.MAX_ATTEMPTS,
+    retryDelay: QUEUE.SYNC_RETRY.DELAY_SECONDS,
+    retryBackoff: true,
+  });
+}
+
+/**
+ * Enqueue deferred GPX analysis (retries with startAfter when city not synced).
+ */
+export async function enqueueGpxAnalyzeJob(
+  payload: GpxAnalyzeJobPayload,
+  options?: { startAfter?: number },
+): Promise<string | null> {
+  const bossInstance = await getBoss();
+  if (!bossInstance) {
+    console.warn("[Queue] Queue disabled, GPX analyze not queued");
+    return null;
+  }
+  return bossInstance.send(GPX_ANALYZE_QUEUE_NAME, payload, {
+    startAfter: options?.startAfter,
+    expireInSeconds: QUEUE.JOB_TIMEOUT_MS / 1000,
+    retryLimit: QUEUE.RETRY.MAX_ATTEMPTS,
+    retryDelay: QUEUE.RETRY.BACKOFF_DELAY_MS / 1000,
+    retryBackoff: true,
+  });
+}
+
+/**
+ * Worker: run syncCity for queued OSM relations.
+ */
+export async function registerCitySyncWorker(
+  handler: (payload: CitySyncJobPayload) => Promise<void>,
+): Promise<string | undefined> {
+  const bossInstance = await getBoss();
+  if (!bossInstance) return undefined;
+  const workerId = await bossInstance.work<CitySyncJobPayload>(
+    CITY_SYNC_QUEUE_NAME,
+    { batchSize: 1, pollingIntervalSeconds: 1 },
+    async (jobs) => {
+      for (const job of jobs) {
+        await handler(job.data);
+      }
+    },
+  );
+  console.log(`[Queue] City sync worker registered (${workerId})`);
+  return workerId;
+}
+
+/**
+ * Worker: deferred GPX analysis.
+ */
+export async function registerGpxAnalyzeWorker(
+  handler: (payload: GpxAnalyzeJobPayload) => Promise<void>,
+): Promise<string | undefined> {
+  const bossInstance = await getBoss();
+  if (!bossInstance) return undefined;
+  const workerId = await bossInstance.work<GpxAnalyzeJobPayload>(
+    GPX_ANALYZE_QUEUE_NAME,
+    { batchSize: 1, pollingIntervalSeconds: 1 },
+    async (jobs) => {
+      for (const job of jobs) {
+        await handler(job.data);
+      }
+    },
+  );
+  console.log(`[Queue] GPX analyze worker registered (${workerId})`);
+  return workerId;
+}
+
 // ============================================
 // Worker Registration
 // ============================================
 
 /**
  * Register a worker function to process activity jobs
- * 
+ *
  * Called by the worker module to register its processing function.
  * pg-boss will call this function for each job in the queue.
- * 
+ *
  * @param handler - Async function to process each job batch
  * @returns Worker ID (for reference)
  */
 export async function registerActivityWorker(
-  handler: ActivityJobHandler
+  handler: ActivityJobHandler,
 ): Promise<string | undefined> {
   const bossInstance = await getBoss();
 
@@ -411,25 +590,25 @@ export async function registerActivityWorker(
     // pg-boss calls our handler with an array of jobs
     async (jobs) => {
       for (const job of jobs) {
-        await handler([{
-          id: job.id,
-          name: job.name,
-          data: job.data,
-        }]);
+        await handler([
+          {
+            id: job.id,
+            name: job.name,
+            data: job.data,
+          },
+        ]);
       }
-    }
+    },
   );
 
-  console.log(
-    `[Queue] Activity worker registered (worker: ${workerId})`
-  );
+  console.log(`[Queue] Activity worker registered (worker: ${workerId})`);
 
   return workerId;
 }
 
 /**
  * Complete a job successfully
- * 
+ *
  * Called by worker after successfully processing a job.
  * Note: pg-boss auto-completes jobs when the handler resolves without error.
  */
@@ -442,14 +621,16 @@ export async function completeJob(jobId: string): Promise<void> {
 
 /**
  * Fail a job (will be retried if attempts remain)
- * 
+ *
  * Called by worker when job processing fails.
  * Note: pg-boss auto-fails jobs when the handler throws an error.
  */
 export async function failJob(jobId: string, error: Error): Promise<void> {
   const bossInstance = await getBoss();
   if (bossInstance) {
-    await bossInstance.fail(ACTIVITY_QUEUE_NAME, jobId, { message: error.message });
+    await bossInstance.fail(ACTIVITY_QUEUE_NAME, jobId, {
+      message: error.message,
+    });
   }
 }
 

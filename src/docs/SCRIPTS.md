@@ -4,11 +4,29 @@ All scripts are run from the **backend** directory with `npx tsx src/scripts/<sc
 
 ---
 
-## 1. seed-way-cache-from-pbf.ts
+## 1. sync-city.ts (on-demand city sync)
 
-**Purpose:** Populates **NodeCache**, **WayCache**, **WayNode**, and **WayTotalEdges** from an OpenStreetMap PBF file. Required for the V2 engine to run without Overpass.
+**Purpose:** Manually sync one city from the Overpass API into **NodeCache**, **WayNode**, and **WayTotalEdges**. Normally cities are synced automatically when a user creates a project in that city; this script lets you pre-sync without creating a project.
 
-**When to use:** Before using V2 (or when adding a new region). Run once per PBF extract.
+**When to use:** To pre-load a city (e.g. before a demo) or to re-sync after OSM updates.
+
+**Command:**
+
+```bash
+npm run sync:city -- --lat 50.7889 --lng -1.0743
+# or by OSM relation ID:
+npm run sync:city -- --relation 55130
+```
+
+**Flags:** `--lat` and `--lng` (city is detected via Overpass `is_in`); or `--relation` (OSM relation ID of the city boundary).
+
+---
+
+## 2. seed-way-cache-from-pbf.ts (legacy)
+
+**Purpose:** Populates **NodeCache**, **WayCache**, **WayNode**, and **WayTotalEdges** from an OpenStreetMap PBF file. **Legacy:** The app now uses on-demand city sync (see section 1 and [How Engines Work](/docs/how-engines-work) section 8). Use this script only if you want to pre-load a full region (e.g. offline) or prefer PBF over Overpass.
+
+**When to use:** Optional; run once per PBF extract if you want a full region pre-loaded.
 
 **Command:**
 
@@ -28,7 +46,7 @@ npm run seed:way-cache -- path/to/region.osm.pbf
 
 ---
 
-## 2. reset-processed-activities.ts
+## 3. reset-processed-activities.ts
 
 **Purpose:** Sets **isProcessed** to `false` for activities so they will be reprocessed on the next sync (or when the worker runs).
 
@@ -44,7 +62,7 @@ npm run reset:processed-activities
 
 ---
 
-## 3. wipe-and-resync.ts
+## 4. wipe-and-resync.ts
 
 **Purpose:** “Nuclear” reset: deletes **activities**, **ProjectActivity**, **UserStreetProgress**, and **UserEdge** for the given (or all) users. Does **not** delete users, projects, or seeded data (WayCache, NodeCache, WayNode, WayTotalEdges). **UserNodeHit** is not deleted by the default wipe (V2 node hits remain unless you add a separate step).
 
@@ -60,7 +78,23 @@ If `userId` is omitted, wipes all users’ activities and progress. Then re-sync
 
 ---
 
-## 4. backfill-user-street-progress.ts
+## 5. reset-database.ts
+
+**Purpose:** Truncate **all** tables so the database is empty. Use to test on-demand city sync from a clean slate: after running, creating a project will trigger Overpass sync and repopulate **CitySync**, **NodeCache**, **WayNode**, and **WayTotalEdges**.
+
+**When to use:** Local/dev testing when you want a full reset (no users, no projects, no map cache). **Do not run in production** unless you intend to wipe everything.
+
+**Command:**
+
+```bash
+npm run db:reset
+```
+
+**Alternative:** `npx prisma migrate reset --force` drops the database, recreates it from migrations, and runs the seed (if configured).
+
+---
+
+## 6. backfill-user-street-progress.ts
 
 **Purpose:** Backfills **UserStreetProgress** (V1) from project snapshots (e.g. after adding the map feature or fixing progress logic). Reads each project’s streetsSnapshot and updates UserStreetProgress so the map shows correct percentages.
 
@@ -74,7 +108,7 @@ npm run backfill:street-progress
 
 ---
 
-## 5. cleanup-unnamed-street-progress.ts
+## 7. cleanup-unnamed-street-progress.ts
 
 **Purpose:** Removes **UserStreetProgress** rows that have empty or placeholder names (e.g. “Unnamed” or “”) to reduce noise in the map/list.
 
@@ -88,7 +122,7 @@ npm run cleanup:unnamed
 
 ---
 
-## 6. cleanup-low-coverage-street-progress.ts
+## 8. cleanup-low-coverage-street-progress.ts
 
 **Purpose:** Deletes **UserStreetProgress** rows below a coverage threshold (e.g. very low percentage) to remove noise from brief touches or bad matches.
 
@@ -102,7 +136,7 @@ npm run cleanup:low-coverage
 
 ---
 
-## 7. create-test-user.ts
+## 9. create-test-user.ts
 
 **Purpose:** Creates a test user in the database with a given name (default “Test User”) and prints the **userId**. Useful for calling engine-v2/analyze or other endpoints that require a user ID.
 
@@ -118,7 +152,7 @@ npx tsx src/scripts/create-test-user.ts [name]
 
 ---
 
-## 8. list-users.ts
+## 10. list-users.ts
 
 **Purpose:** Lists all users in the database (id, name, email, createdAt) for reference and debugging.
 

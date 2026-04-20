@@ -3,7 +3,6 @@
  * Includes lapsed_30_days and firm-but-kind messaging.
  */
 import type { StreakData } from "./streak.service.js";
-import type { MilestoneWithProgress } from "../types/milestone.types.js";
 
 export interface HeroState {
   message: string;
@@ -12,7 +11,7 @@ export interface HeroState {
 
 interface HeroContext {
   streak: StreakData;
-  nextMilestone: MilestoneWithProgress | null;
+  nextMilestone?: unknown;
   lastActivityDate: Date | null;
   hasAnyActivity: boolean;
   isFirstRunRecent: boolean;
@@ -42,18 +41,6 @@ const HERO_PRIORITY: Array<{
     key: "first_run_just_synced",
     check: (ctx) => ctx.hasAnyActivity && ctx.isFirstRunRecent,
     message: () => "First run in the bag!",
-  },
-  {
-    key: "close_to_milestone",
-    check: (ctx) => {
-      if (ctx.nextMilestone == null) return false;
-      const remaining = Math.ceil(
-        ctx.nextMilestone.progress.targetValue - ctx.nextMilestone.progress.currentValue
-      );
-      return ctx.nextMilestone.progress.ratio >= 0.8 && remaining > 0;
-    },
-    message: (ctx) =>
-      `${Math.ceil((ctx.nextMilestone!.progress.targetValue - ctx.nextMilestone!.progress.currentValue))} more to ${ctx.nextMilestone!.name}.`,
   },
   {
     key: "streak_active",

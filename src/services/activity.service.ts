@@ -254,7 +254,12 @@ export async function listActivities(
 }
 
 /**
- * List activities that affected a specific project
+ * List activities that affected a specific project.
+ *
+ * Only returns activities with ProjectActivity records — i.e. runs that
+ * actually touched or completed a street within the project. Geographic
+ * proximity alone is not enough; the activity processor must have matched
+ * the run against this project's streets.
  *
  * @param projectId - Project ID
  * @param userId - User ID (for authorization)
@@ -264,7 +269,6 @@ export async function listActivitiesForProject(
   projectId: string,
   userId: string
 ): Promise<ProjectActivityItem[]> {
-  // Verify project exists and user has access
   const project = await prisma.project.findUnique({
     where: { id: projectId },
   });
@@ -273,7 +277,6 @@ export async function listActivitiesForProject(
     throw new Error("Project not found or access denied");
   }
 
-  // Get project activities
   const projectActivities = await prisma.projectActivity.findMany({
     where: { projectId },
     orderBy: { createdAt: "desc" },

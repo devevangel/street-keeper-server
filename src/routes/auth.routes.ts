@@ -40,6 +40,8 @@ const router = Router();
  */
 router.get("/me", requireAuth, (req: Request, res: Response) => {
   const user = req.user!;
+  const scopes = (user as unknown as { stravaGrantedScopes?: string | null }).stravaGrantedScopes;
+  const hasWriteScope = scopes ? scopes.includes("activity:write") : false;
   res.status(200).json({
     success: true,
     message: "OK",
@@ -49,6 +51,7 @@ router.get("/me", requireAuth, (req: Request, res: Response) => {
       email: user.email,
       stravaId: user.stravaId,
       profilePic: user.profilePic,
+      needsReauth: !hasWriteScope,
     },
   });
 });
@@ -174,8 +177,8 @@ router.get("/strava/callback", async (req: Request, res: Response) => {
   }
 
   try {
-    // Process the OAuth callback
-    const user = await handleStravaCallback(code);
+    // Process the OAuth callback (pass granted scopes so we can track write access)
+    const user = await handleStravaCallback(code, scope);
 
     // Redirect to frontend callback with userId so the app can set user state
     const redirectUrl = `${FRONTEND_URL}/auth/callback?${new URLSearchParams({

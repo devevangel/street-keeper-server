@@ -54,14 +54,12 @@ Street Keeper exposes two GPX analysis engines. Both produce street-level covera
   - When `v1`: GPX analysis uses POST /runs/analyze-gpx; the home map uses GET /map/streets.
 - **Interaction**: Backend `GPX_ENGINE_VERSION` determines what data gets written when activities are synced. Frontend `VITE_GPX_ENGINE` determines which API the client reads from. For a full v2 experience: set `GPX_ENGINE_VERSION=v2` (or `both`) and `VITE_GPX_ENGINE=v2`. During migration, `GPX_ENGINE_VERSION=both` with `VITE_GPX_ENGINE=v2` keeps v1 data updated while you use the v2 map.
 
-## What is a PBF file? (in simple terms)
+## V2 data: on-demand city sync (no PBF required)
 
-A **PBF file** (Protocol Buffer Binary) is OpenStreetMap's compact, efficient format for storing map data for a region (e.g. a country or state). Think of it as a snapshot of roads, paths, and their IDs and geometry in that area.
+V2 gets **NodeCache**, **WayNode**, and **WayTotalEdges** from the **Overpass API per city** when a user creates a project (CityStrides model). We detect the city from the project center (Overpass `is_in`), check **CitySync**, and if the city is not yet synced we query Overpass for all streets in that city and upsert into the same tables. No PBF file or seed script is required. Optional: run `npm run sync:city -- --lat <lat> --lng <lng>` to pre-sync a city. See [Scripts](/docs/scripts) and [How Engines Work](/docs/how-engines-work) (section 8).
 
-- **What it's used for here:** In V2 we need **NodeCache** (node coordinates), **WayNode** (way→node list), and **WayTotalEdges** (total nodes per way). We preload these from a regional PBF via the seed script. That lets us avoid live Overpass calls for matching and run fully offline (e.g. with `SKIP_OVERPASS=true`).
-
-**Similar products and the same accuracy challenge:** Apps like **CityStrides** use a similar approach: they track which nodes you've been near (e.g. 25 m buffer) and consider a street complete when you've hit a high percentage of its nodes (e.g. 90%). We follow that model in V2. GPS points are imprecise, so street coverage is always an approximation—the 25 m buffer and 90% rule help balance accuracy and tolerance.
+**Similar products:** CityStrides uses the same idea—query OSM per city, cache, reuse. We track which nodes you've been near (25 m buffer) and consider a street complete when you've hit 90% of its nodes (100% for streets with ≤10 nodes). GPS points are imprecise, so street coverage is always an approximation; the 25 m buffer and 90% rule help balance accuracy and tolerance.
 
 ## WayCache, NodeCache, WayNode (V2)
 
-To run V2 without Overpass, seed the database from a regional PBF: **NodeCache** (node coordinates), **WayCache** (node→way mapping), **WayNode** (way→node list), and **WayTotalEdges** (total nodes per way). See the V2 engine README in the repo and [Scripts](/docs/scripts) (`seed-way-cache-from-pbf.ts`).
+**Current approach:** NodeCache, WayNode, and WayTotalEdges are filled **per city** from the Overpass API when a user creates a project (see above). **Legacy:** You can still seed from a regional PBF with `npm run seed:way-cache -- path/to/region.pbf` (see [Scripts](/docs/scripts)). WayCache is deprecated for V2 runtime (V2 does not use it at query time).

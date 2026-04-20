@@ -31,13 +31,13 @@
  *        ▼
  * ┌─────────────────────┐
  * │ 3. Query Geometries │  ← Need full street geometries for matching
- * │    (cache/Overpass) │    Uses geometry cache when possible
+ * │    (PostGIS)        │    WayTotalEdges.geometry in local DB
  * └─────────────────────┘
  *        │
  *        ▼
  * ┌─────────────────────┐
  * │ 4. Match to Streets │  ← Which GPS points are on which streets?
- * │    (Mapbox/Overpass)│    Hybrid matching for best accuracy
+ * │    (Mapbox + OSM)   │    Hybrid matching for best accuracy
  * └─────────────────────┘
  *        │
  *        ▼
@@ -72,8 +72,7 @@
  * 3. **Hybrid Matching**: Uses Mapbox when available for ~98% accuracy,
  *    falls back to Overpass-only (~85% accuracy) if Mapbox fails.
  *
- * 4. **Geometry Caching**: Caches Overpass responses to avoid redundant API calls.
- *    Cache is checked before querying Overpass for street geometries.
+ * 4. **PostGIS geometries**: Street lines come from synced city data (WayTotalEdges).
  *
  * @example
  * // Process an activity
@@ -95,12 +94,7 @@ import {
   detectOverlappingProjects,
   type OverlapResult,
 } from "./overlap-detection.service.js";
-import { updateProjectProgress, groupSnapshotByStreetName } from "./project.service.js";
-import {
-  createGlobalAutoMilestonesIfNeeded,
-  updateMilestoneProgress,
-  checkMilestoneCompletion,
-} from "./milestone.service.js";
+import { updateProjectProgress } from "./project.service.js";
 import {
   upsertStreetProgress,
   calculateCoverageInterval,
@@ -109,10 +103,11 @@ import {
 import { getCompletionThreshold, ENGINE } from "../config/constants.js";
 import { processActivityV2 } from "../engines/v2/process-activity.js";
 import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.js";
+import { ensureCitySynced } from "./city-sync.service.js";
 import {
-  queryStreetsInRadius,
-  queryStreetsInBoundingBox,
-} from "./overpass.service.js";
+  getLocalStreetsInBBox,
+  getLocalStreetsInRadius,
+} from "./local-streets.service.js";
 import { matchPointsToStreetsHybrid } from "../engines/v1/street-matching.js";
 import {
   aggregateSegmentsIntoLogicalStreets,
@@ -120,11 +115,6 @@ import {
   normalizeStreetNameForMatching,
   streetNamesMatch,
 } from "../engines/v1/street-aggregation.js";
-import {
-  generateRadiusCacheKey,
-  getCachedGeometries,
-  setCachedGeometries,
-} from "./geometry-cache.service.js";
 import { STREET_MATCHING } from "../config/constants.js";
 import prisma from "../lib/prisma.js";
 import type { GpxPoint, OsmStreet, MatchedStreet } from "../types/run.types.js";
@@ -250,7 +240,10 @@ async function processStandaloneActivity(
 
   if (ENGINE.VERSION === "v1" || ENGINE.VERSION === "both") {
     const bbox = calculateActivityBoundingBox(coordinates);
-    const geometries = await queryStreetsInBoundingBox(bbox);
+    const centerLat = (bbox.south + bbox.north) / 2;
+    const centerLng = (bbox.west + bbox.east) / 2;
+    await ensureCitySynced(centerLat, centerLng);
+    const geometries = await getLocalStreetsInBBox(bbox);
 
     if (geometries.length === 0) {
       console.log(
@@ -391,7 +384,6 @@ export async function processActivity(
     if (coordinates.length === 0) {
       console.log(`[Processor] Activity ${activityId} has no coordinates`);
       await markActivityProcessed(activityId);
-      await createGlobalAutoMilestonesIfNeeded(userId);
       return {
         activityId,
         success: true,
@@ -422,7 +414,6 @@ export async function processActivity(
         activity.startDate
       );
       await markActivityProcessed(activityId);
-      await createGlobalAutoMilestonesIfNeeded(userId);
       return {
         activityId,
         success: true,
@@ -456,7 +447,6 @@ export async function processActivity(
 
     // Step 4: Mark activity as processed
     await markActivityProcessed(activityId);
-    await createGlobalAutoMilestonesIfNeeded(userId);
 
     const processingTimeMs = Date.now() - startTime;
     console.log(
@@ -624,42 +614,6 @@ async function processProjectOverlap(
       console.log(
         `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}" (V2)`
       );
-
-      // Update milestone progress - calculate from snapshot to avoid migration dependency
-      const updatedProject = await prisma.project.findUnique({
-        where: { id: project.id },
-        select: {
-          totalStreets: true,
-          completedStreets: true,
-          streetsSnapshot: true,
-        },
-      });
-      if (updatedProject) {
-        // Calculate street name counts from snapshot
-        const updatedSnapshot = updatedProject.streetsSnapshot as StreetSnapshot;
-        const { totalStreetNames, completedStreetNames } = groupSnapshotByStreetName(updatedSnapshot);
-        
-        await updateMilestoneProgress(
-          userId,
-          project.id,
-          completedStreetNames,
-          totalStreetNames,
-        );
-        // Check for completions
-        const completed = await checkMilestoneCompletion(userId, project.id, {
-          name: project.name,
-          totalStreets: updatedProject.totalStreets,
-          completedStreets: updatedProject.completedStreets,
-          totalStreetNames,
-          completedStreetNames,
-          city: undefined, // City will be available after migration
-        });
-        if (completed.length > 0) {
-          console.log(
-            `[Processor] User ${userId} completed ${completed.length} milestone(s) in project "${project.name}"`
-          );
-        }
-      }
     }
 
     const completed: string[] = [];
@@ -745,44 +699,7 @@ async function processProjectOverlap(
     console.log(
       `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}"`
     );
-
-    // Step 6a: Update milestone progress - calculate from snapshot to avoid migration dependency
-    const updatedProject = await prisma.project.findUnique({
-      where: { id: project.id },
-      select: {
-        totalStreets: true,
-        completedStreets: true,
-        streetsSnapshot: true,
-      },
-    });
-    if (updatedProject) {
-      // Calculate street name counts from snapshot
-      const updatedSnapshot = updatedProject.streetsSnapshot as StreetSnapshot;
-      const { totalStreetNames, completedStreetNames } = groupSnapshotByStreetName(updatedSnapshot);
-      
-      await updateMilestoneProgress(
-        userId,
-        project.id,
-        completedStreetNames,
-        totalStreetNames,
-      );
-      // Check for completions
-      const completed = await checkMilestoneCompletion(userId, project.id, {
-        name: project.name,
-        totalStreets: updatedProject.totalStreets,
-        completedStreets: updatedProject.completedStreets,
-        totalStreetNames,
-        completedStreetNames,
-        city: undefined, // City will be available after migration
-      });
-      if (completed.length > 0) {
-        console.log(
-          `[Processor] User ${userId} completed ${completed.length} milestone(s) in project "${project.name}"`
-        );
-      }
-    }
-
-    // Step 6b: Update user-level street progress (for map feature)
+    // Step 6a: Update user-level street progress (for map feature)
     const streetProgressInput = coverages
       .map((c) => {
         const snap = snapshotByOsmId.get(c.osmId);
@@ -831,44 +748,15 @@ async function processProjectOverlap(
 // ============================================
 
 /**
- * Get street geometries for a route area
- *
- * Checks cache first, then queries Overpass if needed.
- * Caches the result for future use.
- *
- * @param centerLat - Route center latitude
- * @param centerLng - Route center longitude
- * @param radiusMeters - Route radius
- * @returns Array of OsmStreet with full geometries
+ * Get street geometries for a route area from PostGIS (synced city data).
  */
 async function getStreetGeometries(
   centerLat: number,
   centerLng: number,
   radiusMeters: number
 ): Promise<OsmStreet[]> {
-  // Try cache first
-  const cacheKey = generateRadiusCacheKey(centerLat, centerLng, radiusMeters);
-  const cached = await getCachedGeometries(cacheKey);
-
-  if (cached) {
-    console.log(
-      `[Processor] Using cached geometries for ${radiusMeters}m radius`
-    );
-    return cached;
-  }
-
-  // Query Overpass
-  console.log(`[Processor] Querying Overpass for ${radiusMeters}m radius`);
-  const geometries = await queryStreetsInRadius(
-    centerLat,
-    centerLng,
-    radiusMeters
-  );
-
-  // Cache for future use
-  await setCachedGeometries(cacheKey, geometries);
-
-  return geometries;
+  await ensureCitySynced(centerLat, centerLng);
+  return getLocalStreetsInRadius(centerLat, centerLng, radiusMeters);
 }
 
 // ============================================

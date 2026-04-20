@@ -82,6 +82,8 @@ export interface MapStreet {
  */
 export interface MapStreetsResponse {
   success: true;
+  /** True when city street data is still loading (poll map again) */
+  syncing?: boolean;
   /** Aggregated logical streets (for list and stats) */
   streets: MapStreet[];
   /** Segment-level streets (for map polylines) */
@@ -96,4 +98,26 @@ export interface MapStreetsResponse {
   completedCount: number;
   /** Count of partial streets (yellow) */
   partialCount: number;
+}
+
+// ============================================
+// GPS Traces (Activity Paths for Map)
+// ============================================
+
+/**
+ * Single GPS trace for map rendering (simplified coordinates)
+ */
+export interface GpsTraceItem {
+  activityId: string;
+  name: string;
+  startDate: string; // ISO 8601
+  coordinates: [number, number][]; // [lat, lng] simplified
+}
+
+/**
+ * Response for GET /api/v1/map/traces
+ */
+export interface GpsTracesResponse {
+  success: true;
+  traces: GpsTraceItem[];
 }

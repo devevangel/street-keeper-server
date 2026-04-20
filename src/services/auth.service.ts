@@ -19,15 +19,18 @@ import type {
  * Process Strava OAuth callback
  * Exchanges code for tokens and creates/updates user
  */
-export async function handleStravaCallback(code: string): Promise<AuthUser> {
+export async function handleStravaCallback(
+  code: string,
+  grantedScopes?: string,
+): Promise<AuthUser> {
   // Exchange code for tokens
   const tokenData = await exchangeCodeForTokens(code);
 
   // Extract user data from token response
   const userData = extractStravaUserData(tokenData);
 
-  // Find or create user
-  const user = await findOrCreateStravaUser(userData);
+  // Find or create user (persist granted scopes for feature gating)
+  const user = await findOrCreateStravaUser(userData, grantedScopes);
 
   return {
     id: user.id,
@@ -57,16 +60,18 @@ function extractStravaUserData(tokenData: StravaTokenResponse): StravaUserData {
 }
 
 /**
- * Find existing user by Strava ID or create new one
+ * Find existing user by Strava ID or create new one.
+ * Persists granted scopes so the app can detect missing `activity:write`.
  */
-async function findOrCreateStravaUser(userData: StravaUserData) {
-  // Try to find existing user
+async function findOrCreateStravaUser(
+  userData: StravaUserData,
+  grantedScopes?: string,
+) {
   const existingUser = await prisma.user.findUnique({
     where: { stravaId: userData.stravaId },
   });
 
   if (existingUser) {
-    // Update existing user with new tokens
     return prisma.user.update({
       where: { id: existingUser.id },
       data: {
@@ -76,11 +81,11 @@ async function findOrCreateStravaUser(userData: StravaUserData) {
         stravaAccessToken: userData.stravaAccessToken,
         stravaRefreshToken: userData.stravaRefreshToken,
         stravaTokenExpiresAt: userData.stravaTokenExpiresAt,
+        ...(grantedScopes != null && { stravaGrantedScopes: grantedScopes }),
       },
     });
   }
 
-  // Create new user
   return prisma.user.create({
     data: {
       stravaId: userData.stravaId,
@@ -90,6 +95,7 @@ async function findOrCreateStravaUser(userData: StravaUserData) {
       stravaAccessToken: userData.stravaAccessToken,
       stravaRefreshToken: userData.stravaRefreshToken,
       stravaTokenExpiresAt: userData.stravaTokenExpiresAt,
+      stravaGrantedScopes: grantedScopes ?? null,
     },
   });
 }

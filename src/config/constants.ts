@@ -16,7 +16,8 @@ export const STRAVA = {
   // OAuth Scopes
   // read: Read public segments, public routes, public profile data, public posts, public events
   // activity:read_all: Read the user's activities (includes private activities)
-  DEFAULT_SCOPE: "read,activity:read_all",
+  // activity:write: Update activity descriptions with Street Keeper stats
+  DEFAULT_SCOPE: "read,activity:read_all,activity:write",
 
   // Token expiry buffer (refresh token 5 minutes before expiry)
   TOKEN_REFRESH_BUFFER_SECONDS: 300,
@@ -31,9 +32,9 @@ export const API = {
   PREFIX: "/api/v1",
 } as const;
 
-/** Backend: which pipeline(s) run when processing Strava activities. v1 | v2 | both. Default v1. */
+/** Backend: which pipeline(s) run when processing Strava activities. v1 | v2 | both. Default v2. */
 export const ENGINE = {
-  VERSION: (process.env.GPX_ENGINE_VERSION ?? "v1") as "v1" | "v2" | "both",
+  VERSION: (process.env.GPX_ENGINE_VERSION ?? "v2") as "v1" | "v2" | "both",
 } as const;
 
 // ============================================
@@ -80,6 +81,7 @@ export const ERROR_CODES = {
   ACTIVITY_NOT_FOUND: "ACTIVITY_NOT_FOUND",
   ACTIVITY_ALREADY_EXISTS: "ACTIVITY_ALREADY_EXISTS",
   ACTIVITY_PROCESSING_FAILED: "ACTIVITY_PROCESSING_FAILED",
+  SYNC_RATE_LIMITED: "SYNC_RATE_LIMITED",
 
   // Map errors
   MAP_INVALID_COORDINATES: "MAP_INVALID_COORDINATES",
@@ -117,23 +119,46 @@ export function getEnvVarOptional(name: string, defaultValue: string): string {
 }
 
 export const OVERPASS = {
-  // Primary API endpoint
-  API_URL: "https://overpass-api.de/api/interpreter",
+  /**
+   * Server list, tried in order.
+   *
+   * overpass-api.de resolves to two independent servers (gall + lambert) with
+   * separate rate-limit pools.  We list both explicitly so we can check their
+   * /api/status endpoints independently and pick whichever has a free slot.
+   *
+   * @see https://dev.overpass-api.de/overpass-doc/en/preface/commons.html
+   * @see https://wiki.openstreetmap.org/wiki/Overpass_API#Public_Overpass_API_instances
+   */
+  SERVERS: [
+    "https://gall.openstreetmap.de/api/interpreter",
+    "https://lambert.openstreetmap.de/api/interpreter",
+  ] as readonly string[],
 
-  // Fallback servers (tried in order if primary fails)
-  FALLBACK_URLS: [
-    "https://overpass.private.coffee/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-  ],
+  /** axios client timeout */
+  TIMEOUT_MS: 60_000,
 
-  // Client timeout (axios timeout)
-  TIMEOUT_MS: 60000, // Increased from 30s to 60s
+  /** Overpass QL [timeout:] — how long the server may run the query */
+  QUERY_TIMEOUT_SECONDS: 30,
 
-  // Query timeout (Overpass QL timeout parameter)
-  QUERY_TIMEOUT_SECONDS: 60, // Increased from 25s to 60s
+  /**
+   * Overpass QL [maxsize:] in bytes.
+   * Street queries for a 1–2 km radius typically return < 2 MB.
+   * A lower declaration makes the server more likely to admit our request.
+   */
+  QUERY_MAXSIZE_BYTES: 16 * 1024 * 1024, // 16 MiB
 
-  // Maximum retry attempts (including fallback servers)
-  MAX_RETRIES: 3,
+  /**
+   * Default max seconds to wait for a slot (request-path callers).
+   * Keep short — this blocks the user's HTTP response on cache misses.
+   * Background jobs should pass a longer budget via OverpassQueryOptions.
+   */
+  MAX_SLOT_WAIT_SECONDS: 10,
+
+  /** Max seconds to wait when called from a pg-boss background job. */
+  BACKGROUND_MAX_SLOT_WAIT_SECONDS: 45,
+
+  /** Per-server retry attempts (for transient HTTP / network errors) */
+  MAX_RETRIES: 2,
 
   HIGHWAY_TYPES: [
     "residential",
@@ -410,10 +435,15 @@ export const ACTIVITIES = {
   MIN_DISTANCE_METERS: 100,
 
   /**
-   * Maximum age of activity to process (in days)
-   * Prevents processing very old backlog if webhook was delayed
+   * Maximum age of activity to process (in days).
+   * Override with env SYNC_MAX_AGE_DAYS for a full history import.
    */
-  MAX_AGE_DAYS: 30,
+  MAX_AGE_DAYS: Number(process.env.SYNC_MAX_AGE_DAYS) || 30,
+
+  /**
+   * Minimum hours between manual Strava syncs (CityStrides-style once per day).
+   */
+  SYNC_COOLDOWN_HOURS: 24,
 } as const;
 
 // ============================================
@@ -432,9 +462,9 @@ export const ACTIVITIES = {
 export const GEOMETRY_CACHE = {
   /**
    * Cache time-to-live in hours
-   * Street geometries don't change often, 24h is reasonable
+   * Street geometries rarely change; 7 days reduces Overpass load significantly
    */
-  TTL_HOURS: 24,
+  TTL_HOURS: 168,
 
   /**
    * Prefix for cache keys
@@ -447,6 +477,14 @@ export const GEOMETRY_CACHE = {
    * 3 decimal places = ~111m accuracy (improves cache hit rate, fewer Overpass calls)
    */
   COORD_PRECISION: 3,
+} as const;
+
+// ============================================
+// City Sync (On-Demand: CityStrides Model)
+// ============================================
+export const CITY_SYNC = {
+  /** Days after which a city is re-synced from Overpass (match CityStrides ~6 weeks) */
+  EXPIRY_DAYS: parseInt(process.env.CITY_SYNC_EXPIRY_DAYS ?? "42", 10),
 } as const;
 
 // ============================================
@@ -470,10 +508,21 @@ export const QUEUE = {
   ACTIVITY_PROCESSING: "activity-processing",
 
   /**
-   * Number of concurrent jobs to process
-   * Higher = faster processing, but more load on external APIs
+   * Queue name for background Strava sync (onboarding / initial import)
    */
-  CONCURRENCY: 5,
+  BACKGROUND_SYNC: "background-sync",
+
+  /** Background Overpass city sync (singleton per relationId) */
+  CITY_SYNC: "city-sync",
+
+  /** Deferred GPX analyze when city street data is not ready */
+  GPX_ANALYZE: "gpx-analyze",
+
+  /**
+   * Number of concurrent jobs to process
+   * Reduced to 2 to avoid Overpass rate limits during sync
+   */
+  CONCURRENCY: 2,
 
   /**
    * Job retry configuration
@@ -485,10 +534,23 @@ export const QUEUE = {
   },
 
   /**
+   * Sync job retry (longer delay for Strava/Overpass)
+   */
+  SYNC_RETRY: {
+    MAX_ATTEMPTS: 3,
+    DELAY_SECONDS: 30,
+  },
+
+  /**
    * Job timeout in milliseconds
    * Jobs taking longer than this are considered failed
    */
   JOB_TIMEOUT_MS: 120000, // 2 minutes (allows for slow Overpass)
+
+  /**
+   * Sync job timeout (initial sync can have many activities)
+   */
+  SYNC_JOB_TIMEOUT_MS: 600000, // 10 minutes
 } as const;
 
 // ============================================

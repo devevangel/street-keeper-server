@@ -18,6 +18,7 @@ const ALLOWED_KEYS = [
   "defaultMapZoom",
   "defaultProjectRadius",
   "defaultStreetFilter",
+  "autoUpdateRunDescription",
 ] as const;
 
 export type UpdatePreferencesInput = Partial<{
@@ -33,6 +34,7 @@ export type UpdatePreferencesInput = Partial<{
   defaultMapZoom: number;
   defaultProjectRadius: number;
   defaultStreetFilter: string;
+  autoUpdateRunDescription: boolean;
 }>;
 
 export async function getPreferences(userId: string) {
@@ -41,7 +43,7 @@ export async function getPreferences(userId: string) {
   });
   if (!prefs) {
     prefs = await prisma.userPreferences.create({
-      data: { userId },
+      data: { userId, mapStyle: "satellite" },
     });
   }
   return prefs;

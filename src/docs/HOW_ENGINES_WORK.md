@@ -261,22 +261,37 @@ flowchart LR
 
 ---
 
-## 8. PBF and local caches — the offline shortcut
+## 8. V2 Data Source: On-Demand City Sync (current approach)
+
+We **pivoted from self-hosting a full PBF pre-seed to using the Overpass API on demand**, matching how [CityStrides](https://citystrides.com) works. This avoids storing 7.5 GB+ of map data and makes free-tier hosting possible.
+
+**How it works:**
+
+1. When a user **creates a project** (center + radius), we take their center point (lat, lng).
+2. We ask Overpass: **"Which city (administrative boundary) contains this point?"** — a small, fast query (`is_in`).
+3. We check the **CitySync** table: have we already synced this city? If yes and not expired, we skip.
+4. If not: we **query Overpass for all streets in that city** (CityStrides-style query: named, pedestrian-accessible ways within the city boundary). We get ways and their nodes with coordinates.
+5. We **upsert** the result into **NodeCache**, **WayNode**, and **WayTotalEdges** (same tables V2 already uses). We record the sync in **CitySync** with an expiry (e.g. 6 weeks).
+6. From then on, **all projects in that city** use the database; no Overpass call until the city is re-synced.
+
+**What you get:** One Overpass query per city, once. Subsequent projects in the same city are instant. DB size stays small (e.g. 50–200 MB per city instead of 7.5 GB for a whole region). No PBF file or seed script required.
+
+**Manual sync:** You can run `npm run sync:city -- --lat 50.7889 --lng -1.0743` (or `--relation 55130`) to pre-sync a city without creating a project.
+
+---
+
+## 9. PBF and local caches — legacy / optional
 
 **What is a PBF file?**  
 A **PBF** (Protocol Buffer Binary) file is a compressed download of OpenStreetMap data for a region (e.g. a country or state). It contains the same nodes, ways, and geometry we would get from Overpass, but for a whole area at once.
 
-**Why we use it:**  
-We run a seed script that loads the PBF into **NodeCache** (node coordinates), **WayCache** (node→way mapping), **WayNode** (way→node list), and **WayTotalEdges** (total nodes per way). Then Engine V2 can answer "which nodes are near this GPS point?" and "how many nodes does this street have?" entirely from the database. No Overpass (or any external API) is needed for matching.
+**Legacy use:** We used to require a PBF seed so V2 had NodeCache, WayNode, WayTotalEdges (and WayCache) for a whole region. The app now uses **on-demand city sync** (see section 8) instead. The PBF seed script is **optional**: you can still run `npm run seed:way-cache -- path/to/region.pbf` if you want to pre-load a full region (e.g. for offline or to avoid Overpass for many cities at once). It fills NodeCache, WayCache, WayNode, and WayTotalEdges. Use `--node-cache-only` or `--way-nodes-only` to run in stages. After seeding, you could set `SKIP_OVERPASS=true` for legacy behaviour; with on-demand sync, that is no longer required.
 
-**How to seed it:**  
-Run the script (e.g. `npm run seed:way-cache -- path/to/region.pbf`). It fills NodeCache, WayCache, WayNode, and WayTotalEdges. You can use flags like `--node-cache-only` or `--way-nodes-only` to run in stages. After seeding, set `SKIP_OVERPASS=true` so V2 does not call Overpass.
-
-**Analogy:** Instead of asking the librarian every time you need a book, you download the whole catalog to your laptop and search there.
+**Analogy:** Instead of asking the librarian every time you need a book, you can still download the whole catalog (PBF) if you want — but now you can also just ask for one shelf (one city) when you need it.
 
 ---
 
-## 9. How progress is stored (V1 vs V2)
+## 10. How progress is stored (V1 vs V2)
 
 | Aspect | V1 | V2 |
 |--------|----|----|
@@ -290,7 +305,7 @@ We only ask "was this GPS point within 25 m of this map node?" So we get a clear
 
 ---
 
-## 10. Drawbacks and trade-offs
+## 11. Drawbacks and trade-offs
 
 ### V1 drawbacks
 
@@ -305,7 +320,7 @@ We only ask "was this GPS point within 25 m of this map node?" So we get a clear
 
 | Drawback | Explanation |
 |----------|-------------|
-| PBF seed required | You need to run the seed script (NodeCache, WayNode, WayTotalEdges, WayCache) for the region you care about. Can be slow and memory-heavy for large areas. |
+| City sync on first use | The first project in a new city triggers an Overpass query (30–60 s); after that the city is cached. No PBF seed required. |
 | One query per GPS point | For each point we query NodeCache (e.g. by bbox); many points mean many queries. Batched/optimized in practice. |
 | 90% rule edge cases | Short streets (≤10 nodes) require 100%; one missed node (e.g. bad GPS at a corner) leaves the street incomplete. |
 | Harder to debug | You think in nodes and ways; completion is derived at query time, not stored per street. |
@@ -314,16 +329,16 @@ We only ask "was this GPS point within 25 m of this map node?" So we get a clear
 
 | | V1 | V2 |
 |-|----|----|
-| **Cost** | Free (Overpass) + optional Mapbox (paid). | Free: node proximity + PBF seed; no external matching API. |
+| **Cost** | Free (Overpass) + optional Mapbox (paid). | Free: node proximity + on-demand city sync (Overpass per city); no PBF or external matching API. |
 | **Accuracy** | ~98% with Mapbox, ~85% without. | CityStrides-style: 25 m snap + 90% node rule; stable and comparable to CityStrides. |
 | **Speed** | Can be slower (Overpass + optional Mapbox per run). | No external matching call; depends on DB (NodeCache lookups per point). |
 | **Complexity** | Simpler: area → match → percentage. | Simple pipeline: points → mark nodes within 25 m → UserNodeHit; completion derived at query time. |
 | **Persistence** | UserStreetProgress (percentage). | UserNodeHit (node hits); completion derived from UserNodeHit + WayNode + WayTotalEdges. |
-| **Offline** | Needs Overpass (and Mapbox if used). | Can run fully offline after PBF seed (NodeCache, WayNode, WayTotalEdges, WayCache). |
+| **Offline** | Needs Overpass (and Mapbox if used). | Needs Overpass for first sync per city; then DB-only. Optional PBF seed can pre-fill a region. |
 
 ---
 
-## 11. The frontend — how the UI picks an engine
+## 12. The frontend — how the UI picks an engine
 
 The app does not need to know whether the backend used V1 or V2. It just calls "analyze" and "get map streets." The backend (and a small setting) decide which engine runs.
 

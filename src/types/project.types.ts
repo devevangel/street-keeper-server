@@ -173,6 +173,26 @@ export interface ProjectMapStreet {
     type: "LineString";
     coordinates: [number, number][];
   };
+  /** From UserStreetProgress: times user ran on this street */
+  runCount?: number;
+  firstRunDate?: string | null; // ISO
+  lastRunDate?: string | null; // ISO
+}
+
+/** Quick win: street at 75%+ completion, with remaining meters to finish */
+export interface ProjectQuickWin {
+  osmId: string;
+  name: string;
+  percentage: number;
+  remainingMeters: number;
+}
+
+/** Project-level run stats for sidebar */
+export interface ProjectMapProjectStats {
+  totalRuns: number;
+  totalDistanceKm: number;
+  firstRunDate: string | null;
+  lastRunDate: string | null;
 }
 
 /** Boundary for project map (circle or polygon) */
@@ -195,6 +215,10 @@ export interface ProjectMapStats {
   totalStreetNames: number;
   /** Street names where every segment is completed. */
   completedStreetNames: number;
+  /** Street names with partial progress (> 0% but not completed). */
+  partialStreetNames: number;
+  /** Street names with zero progress. */
+  notStartedStreetNames: number;
 }
 
 export interface ProjectMapData {
@@ -212,6 +236,10 @@ export interface ProjectMapData {
   streets: ProjectMapStreet[];
   /** Whether geometry came from cache (vs fresh Overpass query) */
   geometryCacheHit: boolean;
+  /** Run stats for this project (activities in project) */
+  projectStats?: ProjectMapProjectStats;
+  /** Streets at 75%+ completion (almost there) */
+  quickWins?: ProjectQuickWin[];
 }
 
 // ============================================
@@ -302,6 +330,7 @@ export interface PreviewProjectInput {
   polygonCoordinates?: [number, number][];
   boundaryMode?: BoundaryMode;
   includeStreets?: boolean;
+  userId?: string;
 }
 
 /**
@@ -388,6 +417,10 @@ export interface ProjectPreview {
     segmentCount: number;
     totalLengthMeters: number;
     highwayType: string;
+    osmId?: string;
+    geometry?: { type: "LineString"; coordinates: [number, number][] };
+    percentage?: number;
+    status?: "completed" | "partial" | "not_started";
   }>;
 }
 

@@ -30,6 +30,7 @@ import {
   processActivity,
   recheckActivityForNewProjects,
 } from "./activity-processor.service.js";
+import { addSyncJob } from "../queues/activity.queue.js";
 
 // ============================================
 // Types
@@ -119,10 +120,10 @@ async function processOneActivity(
   const existing = await getActivityByStravaId(stravaId);
   if (existing) {
     if (!existing.isProcessed) {
+      console.log(`[Sync] Activity ${stravaId} exists in DB but unprocessed — processing now`);
       await processActivity(existing.id, userId);
       return { status: "processed" };
     }
-    // Already processed: still check for new projects (created before this activity, date+time)
     const newProjectsUpdated = await recheckActivityForNewProjects(
       existing.id,
       userId
@@ -200,6 +201,9 @@ export async function syncRecentActivities(
   userId: string,
   options?: SyncRecentOptions
 ): Promise<SyncRecentResult> {
+  const syncStart = Date.now();
+  console.log(`[Sync] Starting sync for user ${userId.slice(0, 8)}…`);
+
   const accessToken = await getValidAccessToken(userId);
 
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -207,6 +211,10 @@ export async function syncRecentActivities(
   const after = options?.after ?? defaultAfter;
   const before = options?.before;
   const perPage = Math.min(200, Math.max(1, options?.perPage ?? 30));
+
+  console.log(
+    `[Sync] Fetching from Strava: after=${new Date(after * 1000).toISOString()}, perPage=${perPage}`
+  );
 
   let summaries;
   try {
@@ -223,6 +231,8 @@ export async function syncRecentActivities(
     throw err;
   }
 
+  console.log(`[Sync] Strava returned ${summaries.length} activities`);
+
   const result: SyncRecentResult = {
     synced: 0,
     processed: 0,
@@ -230,10 +240,12 @@ export async function syncRecentActivities(
     errors: [],
   };
 
+  // Phase 1: Process activities returned by Strava
   for (const summary of summaries) {
     const stravaId = String(summary.id);
     try {
       const one = await processOneActivity(userId, stravaId, accessToken);
+      console.log(`[Sync] Strava activity ${stravaId}: ${one.status}${"reason" in one ? ` (${one.reason})` : ""}`);
       switch (one.status) {
         case "synced":
           result.synced += 1;
@@ -249,14 +261,297 @@ export async function syncRecentActivities(
           break;
       }
     } catch (err) {
-      result.errors.push({
-        stravaId,
-        reason: err instanceof Error ? err.message : "Unknown error",
-      });
+      const reason = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[Sync] Error processing Strava activity ${stravaId}:`, reason);
+      result.errors.push({ stravaId, reason });
     }
   }
 
+  // Phase 2: Process any remaining unprocessed activities already in the DB.
+  // This catches activities older than the Strava time window or beyond the page size
+  // (e.g. after running reset:everything).
+  const unprocessed = await prisma.activity.findMany({
+    where: { userId, isProcessed: false },
+    select: { id: true, stravaId: true, startDate: true },
+    orderBy: { startDate: "asc" },
+  });
+
+  if (unprocessed.length > 0) {
+    console.log(
+      `[Sync] Found ${unprocessed.length} unprocessed activities in DB (not covered by Strava window). Processing…`
+    );
+  }
+
+  for (const act of unprocessed) {
+    try {
+      await processActivity(act.id, userId);
+      result.processed += 1;
+      console.log(
+        `[Sync] DB activity ${act.stravaId} (${act.startDate.toISOString().slice(0, 10)}): processed`
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[Sync] Error processing DB activity ${act.stravaId}:`, reason);
+      result.errors.push({ stravaId: act.stravaId, reason });
+    }
+  }
+
+  const elapsed = Date.now() - syncStart;
+  console.log(
+    `[Sync] Done in ${elapsed}ms — synced: ${result.synced}, processed: ${result.processed}, skipped: ${result.skipped}, errors: ${result.errors.length}`
+  );
+
   return result;
+}
+
+// ============================================
+// Background sync (pg-boss)
+// ============================================
+
+const INTER_ACTIVITY_DELAY_MS = 300;
+const TOKEN_REFRESH_INTERVAL = 10;
+/** Queued jobs older than this are considered stale (worker never picked up). */
+const QUEUED_STALE_MS = 2 * 60 * 1000;
+
+/**
+ * Fetch all activity summaries from Strava with pagination (page size 200).
+ * Loops until an empty page is returned.
+ */
+async function fetchAllActivitySummaries(
+  accessToken: string,
+  after?: number,
+  before?: number
+): Promise<Array<{ id: number }>> {
+  const perPage = 200;
+  const all: Array<{ id: number }> = [];
+  let page = 1;
+
+  for (;;) {
+    const chunk = await listAthleteActivities(accessToken, {
+      after,
+      before,
+      page,
+      perPage,
+    });
+    if (chunk.length === 0) break;
+    for (const a of chunk) all.push({ id: a.id });
+    if (chunk.length < perPage) break;
+    page += 1;
+  }
+
+  return all;
+}
+
+export interface StartBackgroundSyncResult {
+  syncId: string;
+  total: number;
+  status: string;
+}
+
+/** Cooldown: no new sync if last completed sync was within this many hours.
+ *  Override with env SYNC_COOLDOWN_HOURS=0 for local dev. */
+const envCooldown = process.env.SYNC_COOLDOWN_HOURS;
+const SYNC_COOLDOWN_MS =
+  (envCooldown != null ? Number(envCooldown) : ACTIVITIES.SYNC_COOLDOWN_HOURS) *
+  60 *
+  60 *
+  1000;
+
+/**
+ * Start a background sync: fetch activity list with pagination, create SyncJob, enqueue.
+ * Returns immediately. Duplicate guard: if user already has queued/running job, returns that job.
+ * Stale guard: queued jobs older than QUEUED_STALE_MS are marked failed and a new job is created.
+ * Rate limit: only one successful sync per SYNC_COOLDOWN_HOURS (default 24); otherwise throws SYNC_RATE_LIMITED with nextSyncAt.
+ */
+export async function startBackgroundSync(
+  userId: string,
+  options?: { after?: number; before?: number }
+): Promise<StartBackgroundSyncResult> {
+  const lastCompleted = await prisma.syncJob.findFirst({
+    where: { userId, status: "completed" },
+    orderBy: { completedAt: "desc" },
+    select: { completedAt: true },
+  });
+  if (lastCompleted?.completedAt) {
+    const nextSyncAt = new Date(
+      lastCompleted.completedAt.getTime() + SYNC_COOLDOWN_MS
+    );
+    if (Date.now() < nextSyncAt.getTime()) {
+      throw new SyncError(
+        "Strava can only be synced once per day. Try again later.",
+        "SYNC_RATE_LIMITED",
+        nextSyncAt
+      );
+    }
+  }
+
+  const existing = await prisma.syncJob.findFirst({
+    where: {
+      userId,
+      status: { in: ["queued", "running"] },
+    },
+    orderBy: { startedAt: "desc" },
+  });
+
+  if (existing) {
+    const ageMs = Date.now() - existing.startedAt.getTime();
+    if (
+      existing.status === "queued" &&
+      ageMs > QUEUED_STALE_MS
+    ) {
+      console.log(
+        `[Sync] Stale queued job ${existing.id} (${Math.round(ageMs / 1000)}s old) — marking failed, creating new job`
+      );
+      await prisma.syncJob.update({
+        where: { id: existing.id },
+        data: {
+          status: "failed",
+          lastErrorMessage: "Job never picked up by worker (queue may have been unavailable)",
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+    } else {
+      return {
+        syncId: existing.id,
+        total: existing.total,
+        status: existing.status,
+      };
+    }
+  }
+
+  const accessToken = await getValidAccessToken(userId);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const defaultAfter = nowSeconds - ACTIVITIES.MAX_AGE_DAYS * 24 * 60 * 60;
+  const after = options?.after ?? defaultAfter;
+  const before = options?.before ?? undefined;
+
+  console.log(
+    `[Sync] Fetching all activities: after=${new Date(after * 1000).toISOString()} (MAX_AGE_DAYS=${ACTIVITIES.MAX_AGE_DAYS})`,
+  );
+  const summaries = await fetchAllActivitySummaries(accessToken, after, before);
+  const total = summaries.length;
+  console.log(`[Sync] Found ${total} activities from Strava`);
+
+  const job = await prisma.syncJob.create({
+    data: {
+      userId,
+      status: "queued",
+      type: "initial",
+      total,
+      after,
+      before: before ?? null,
+    },
+  });
+
+  await addSyncJob({ syncJobId: job.id, userId });
+
+  return {
+    syncId: job.id,
+    total,
+    status: "queued",
+  };
+}
+
+/**
+ * Process a sync job (called by pg-boss worker).
+ * Loads fresh credentials, re-fetches activity list, processes from job.processed onward.
+ */
+export async function processSyncJob(syncJobId: string, userId: string): Promise<void> {
+  const job = await prisma.syncJob.findUnique({
+    where: { id: syncJobId },
+  });
+
+  if (!job || job.status !== "queued") {
+    return;
+  }
+
+  await prisma.syncJob.update({
+    where: { id: syncJobId },
+    data: { status: "running" },
+  });
+
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken(userId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await prisma.syncJob.update({
+      where: { id: syncJobId },
+      data: {
+        status: "failed",
+        lastErrorMessage: `Token: ${msg}`,
+        completedAt: new Date(),
+      },
+    });
+    return;
+  }
+
+  const summaries = await fetchAllActivitySummaries(
+    accessToken,
+    job.after ?? undefined,
+    job.before ?? undefined
+  );
+
+  let processed = job.processed;
+  let skipped = job.skipped;
+  let errors = job.errors;
+  let lastErrorMessage: string | null = job.lastErrorMessage;
+
+  for (let i = job.processed; i < summaries.length; i++) {
+    if (i > 0 && i % TOKEN_REFRESH_INTERVAL === 0) {
+      try {
+        accessToken = await getValidAccessToken(userId);
+      } catch {
+        // keep previous token
+      }
+    }
+
+    const stravaId = String(summaries[i].id);
+    try {
+      const one = await processOneActivity(userId, stravaId, accessToken);
+      switch (one.status) {
+        case "synced":
+        case "processed":
+          processed += 1;
+          break;
+        case "skipped":
+          skipped += 1;
+          break;
+        case "error":
+          errors += 1;
+          lastErrorMessage = one.reason;
+          break;
+      }
+    } catch (err) {
+      errors += 1;
+      lastErrorMessage = err instanceof Error ? err.message : String(err);
+    }
+
+    await prisma.syncJob.update({
+      where: { id: syncJobId },
+      data: {
+        processed,
+        skipped,
+        errors,
+        lastErrorMessage,
+        updatedAt: new Date(),
+      },
+    });
+
+    if (i < summaries.length - 1) {
+      await new Promise((r) => setTimeout(r, INTER_ACTIVITY_DELAY_MS));
+    }
+  }
+
+  await prisma.syncJob.update({
+    where: { id: syncJobId },
+    data: {
+      status: "completed",
+      completedAt: new Date(),
+      updatedAt: new Date(),
+    },
+  });
 }
 
 // ============================================
@@ -265,10 +560,13 @@ export async function syncRecentActivities(
 
 export class SyncError extends Error {
   public code: string;
+  /** When the next sync is allowed (for SYNC_RATE_LIMITED). */
+  public nextSyncAt?: Date;
 
-  constructor(message: string, code: string) {
+  constructor(message: string, code: string, nextSyncAt?: Date) {
     super(message);
     this.name = "SyncError";
     this.code = code;
+    this.nextSyncAt = nextSyncAt;
   }
 }

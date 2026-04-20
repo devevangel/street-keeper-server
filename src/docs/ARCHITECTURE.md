@@ -154,7 +154,7 @@ The codebase follows a strict three-layer architecture:
 - **Purpose:** GPS-to-street matching using node proximity (no external matching service)
 - **Used for:** Marking which OSM nodes a user has been within 25 metres of; street completion is derived from node hit counts
 - **Implementation:** For each GPS point, query **NodeCache** for nodes within a 25-metre radius; mark hits in **UserNodeHit**. Street completion is derived at query time from **UserNodeHit** + **WayNode** + **WayTotalEdges** using a 90% node completion rule (100% for streets with ≤10 nodes).
-- **No external APIs for matching:** V2 uses only pre-seeded local data (NodeCache, WayNode, WayTotalEdges) after running the PBF seed script.
+- **Data source (on-demand city sync):** NodeCache, WayNode, and WayTotalEdges are filled **per city** from the **Overpass API** when a user creates a project: we detect the city (Overpass `is_in`), check **CitySync**, and if missing we query Overpass for all streets in that city and upsert. One sync per city; no PBF file required. See [How Engines Work](/docs/how-engines-work) section 8.
 
 ---
 
@@ -306,6 +306,33 @@ The codebase follows a strict three-layer architecture:
 ---
 
 ## Data Flow Diagrams
+
+### Background Sync Architecture
+
+Background Strava sync (onboarding / initial import) uses a **durable queue** (pg-boss) so work survives server restarts, deploys, and container replacement. Fire-and-forget (e.g. `setImmediate`) would lose in-flight jobs on process death.
+
+```mermaid
+flowchart LR
+  Request["POST /sync?background=true"]
+  Guard["Duplicate guard"]
+  Fetch["Paginated Strava fetch"]
+  Create["Create SyncJob"]
+  Enqueue["Enqueue pg-boss"]
+  Return["Return syncId, total"]
+  Worker["Sync worker"]
+  Token["getValidAccessToken from DB"]
+  Loop["Process activities sequentially"]
+  Update["Update SyncJob progress"]
+  Done["status=completed"]
+
+  Request --> Guard --> Fetch --> Create --> Enqueue --> Return
+  Enqueue --> Worker
+  Worker --> Token --> Loop --> Update --> Done
+```
+
+- **Phase 1:** Check for existing queued/running SyncJob (single-flight per user). Fetch all activity pages from Strava (200 per page). Create SyncJob, enqueue job with `syncJobId` and `userId`, return immediately.
+- **Phase 2:** Worker loads fresh credentials from DB (never uses a token from the request). Re-fetches activity list, processes from `SyncJob.processed` onward with 300ms delay between activities. Updates progress after each; sets `completed` or `failed` at the end.
+- **Empty database:** Homepage and map services handle null/zero/empty query results; the map shows base tiles and zero streets until sync populates data.
 
 ### Strava OAuth Flow
 

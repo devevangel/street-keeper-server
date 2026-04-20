@@ -115,7 +115,7 @@ import {
  *
  * @example
  * const points = [{ lat: 50.79, lng: -1.09 }, ...];
- * const streets = await queryStreetsInBoundingBox(bbox);
+ * const streets = await getLocalStreetsInBBox(bbox);
  * const matched = matchPointsToStreets(points, streets);
  * // Returns: [
  * //   {

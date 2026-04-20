@@ -25,6 +25,7 @@ model User {
   stravaAccessToken    String?
   stravaRefreshToken   String?
   stravaTokenExpiresAt DateTime?
+  stravaGrantedScopes  String?   // Comma-separated scopes actually granted by user (e.g. "read,activity:read_all,activity:write")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -37,6 +38,33 @@ model User {
   nodeHits       UserNodeHit[]
   milestones     UserMilestone[]
   preferences    UserPreferences?
+  syncJobs       SyncJob[]
+}
+
+// ============================================
+// SyncJob Model (background Strava sync)
+// ============================================
+
+model SyncJob {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status           String    @default("queued") // "queued" | "running" | "completed" | "failed"
+  type             String    @default("initial") // "initial" | "incremental"
+  total            Int       @default(0)
+  processed        Int       @default(0)
+  skipped          Int       @default(0)
+  errors           Int       @default(0)
+  lastErrorMessage String?
+  /** Unix timestamp (seconds) - fetch activities after this time. Used by worker to re-fetch list. */
+  after            Int?
+  /** Unix timestamp (seconds) - fetch activities before this time. */
+  before           Int?
+  startedAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  completedAt      DateTime?
+
+  @@index([userId])
 }
 
 // ============================================
@@ -155,26 +183,6 @@ model ProjectActivity {
 }
 
 // ============================================
-// Geometry Cache Model
-// ============================================
-
-model GeometryCache {
-  id String @id @default(uuid())
-
-  // Cache key format: "radius:{lat}:{lng}:{meters}" or "bbox:{s}:{w}:{n}:{e}"
-  cacheKey String @unique
-
-  // Cached street geometries (OsmStreet[] with full geometry)
-  geometries Json
-
-  createdAt DateTime @default(now())
-  expiresAt DateTime
-
-  @@index([cacheKey])
-  @@index([expiresAt])
-}
-
-// ============================================
 // User Street Progress Model
 // ============================================
 // Tracks user-level street progress across all routes.
@@ -274,6 +282,27 @@ model WayCache {
 }
 
 // ============================================
+// City Sync (On-Demand: CityStrides Model)
+// ============================================
+// Tracks which OSM cities have been synced from Overpass. One sync per city;
+// subsequent projects in the same city reuse cached NodeCache/WayNode/WayTotalEdges.
+
+model CitySync {
+  id         String                                  @id @default(uuid())
+  relationId BigInt                                  @unique // OSM relation ID (area id in Overpass = 3600000000 + relationId)
+  name       String // City name from OSM
+  adminLevel Int // OSM admin_level (typically 8 for city)
+  nodeCount  Int                                     @default(0)
+  wayCount   Int                                     @default(0)
+  syncedAt   DateTime                                @default(now())
+  expiresAt  DateTime // Re-sync after this (e.g. syncedAt + 6 weeks)
+  boundary   Unsupported("geometry(Geometry,4326)")?
+
+  @@index([relationId])
+  @@index([expiresAt])
+}
+
+// ============================================
 // Way Total Edges (Parser-Test: Street Completion)
 // ============================================
 // One row per way: total edge count (nodes.length - 1). Filled by seed script.
@@ -286,6 +315,14 @@ model WayTotalEdges {
   name        String? // Denormalized for display
   highwayType String // e.g. residential, footway
   createdAt   DateTime @default(now())
+
+  // PostGIS — also written via raw SQL during city sync
+  geometry     Unsupported("geometry(LineString,4326)")?
+  lengthMeters Float?
+  surface      String?
+  access       String?
+  ref          String?
+  altNames     String[] @default([])
 }
 
 // ============================================
@@ -311,8 +348,9 @@ model UserNodeHit {
 // Maps each way to its constituent nodes. Populated by seed script for completion queries.
 
 model WayNode {
-  wayId  BigInt
-  nodeId BigInt
+  wayId    BigInt
+  nodeId   BigInt
+  sequence Int? // OSM node order within the way (0-based)
 
   @@id([wayId, nodeId])
   @@index([nodeId])
@@ -330,6 +368,8 @@ model NodeCache {
   lat       Float // Latitude
   lon       Float // Longitude
   createdAt DateTime @default(now())
+  // PostGIS point; maintained via raw SQL + city sync
+  geom      Unsupported("geometry(Point,4326)")?
 
   @@index([lat, lon]) // For bounding box queries (city-level is sufficient)
 }
@@ -416,13 +456,16 @@ model UserPreferences {
   lastViewedRadius Int?
 
   // Display preferences
-  distanceUnit         String @default("km") // "km" | "miles" | "meters"
-  theme                String @default("system") // "dark" | "light" | "system"
-  dateFormat           String @default("short") // "short" | "long" | "numeric"
-  mapStyle             String @default("standard") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
-  defaultMapZoom       Int    @default(15) // 13-19
-  defaultProjectRadius Int    @default(300) // meters
-  defaultStreetFilter  String @default("all") // "all" | "completed" | "inProgress" | "notStarted"
+  distanceUnit         String  @default("km") // "km" | "miles" | "meters"
+  theme                String  @default("system") // "dark" | "light" | "system"
+  dateFormat           String  @default("short") // "short" | "long" | "numeric"
+  mapStyle             String  @default("satellite") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
+  defaultMapZoom       Int     @default(15) // 13-19
+  defaultProjectRadius Int     @default(300) // meters
+  defaultStreetFilter  String  @default("all") // "all" | "completed" | "inProgress" | "notStarted"
+
+  // Strava integration
+  autoUpdateRunDescription Boolean @default(true) // Append Street Keeper stats to Strava run descriptions
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
