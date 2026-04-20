@@ -1,6 +1,3 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.seedMilestoneTypes = seedMilestoneTypes;
 const MILESTONE_TYPES = [
     // MVP Milestone Types (Phase 1)
     {
@@ -182,6 +179,6 @@ async function run(prisma) {
         });
     }
 }
-async function seedMilestoneTypes(prisma) {
+export async function seedMilestoneTypes(prisma) {
     await run(prisma);
 }

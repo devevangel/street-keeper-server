@@ -14,7 +14,6 @@ build/
 *.tsbuildinfo
 
 # Database
-prisma/migrations/
 *.db
 *.db-journal
 
@@ -38,5 +37,6 @@ Thumbs.db
 # Logs
 logs/
 *.log
-/src/generated/prisma
-package-lock.json
+
+# Generated Prisma client (built during deploy)
+src/generated/
