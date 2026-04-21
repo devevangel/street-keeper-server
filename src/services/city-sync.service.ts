@@ -36,7 +36,7 @@ export interface CitySyncRecord {
   expiresAt: Date;
 }
 
-const BATCH_SIZE = 2000;
+const BATCH_SIZE = 500;
 const CITY_QUERY_TIMEOUT_SECONDS = 900;
 
 /** Overpass highway regex aligned with OVERPASS.HIGHWAY_TYPES + user-facing queries */
@@ -170,29 +170,21 @@ out;
     }
   }
 
-  // Upsert NodeCache
+  // Upsert NodeCache using raw SQL for performance over remote DB
   const nodeEntries = [...nodeMap.entries()];
   for (let i = 0; i < nodeEntries.length; i += BATCH_SIZE) {
     const batch = nodeEntries.slice(i, i + BATCH_SIZE);
-    await prisma.$transaction(
-      batch.map(([nodeId, coords]) =>
-        prisma.nodeCache.upsert({
-          where: { nodeId: BigInt(nodeId) },
-          create: {
-            nodeId: BigInt(nodeId),
-            lat: coords.lat,
-            lon: coords.lon,
-          },
-          update: { lat: coords.lat, lon: coords.lon },
-        }),
-      ),
+    const values = batch.map(
+      ([nodeId, coords]) =>
+        Prisma.sql`(${BigInt(nodeId)}, ${coords.lat}, ${coords.lon}, ST_SetSRID(ST_MakePoint(${coords.lon}, ${coords.lat}), 4326))`,
     );
     await prisma.$executeRaw`
-      UPDATE "NodeCache"
-      SET "geom" = ST_SetSRID(ST_MakePoint("lon", "lat"), 4326)
-      WHERE "nodeId" IN (${Prisma.join(
-        batch.map(([nodeId]) => Prisma.sql`${BigInt(nodeId)}`),
-      )})
+      INSERT INTO "NodeCache" ("nodeId", "lat", "lon", "geom")
+      VALUES ${Prisma.join(values)}
+      ON CONFLICT ("nodeId") DO UPDATE SET
+        "lat" = EXCLUDED."lat",
+        "lon" = EXCLUDED."lon",
+        "geom" = EXCLUDED."geom"
     `;
   }
 
@@ -223,49 +215,36 @@ out;
     }
   }
 
-  // Upsert WayTotalEdges
+  // Upsert WayTotalEdges using raw SQL
   for (let i = 0; i < wayTotalRows.length; i += BATCH_SIZE) {
     const batch = wayTotalRows.slice(i, i + BATCH_SIZE);
-    await prisma.$transaction(
-      batch.map((row) =>
-        prisma.wayTotalEdges.upsert({
-          where: { wayId: BigInt(row.wayId) },
-          create: {
-            wayId: BigInt(row.wayId),
-            totalEdges: row.totalNodes - 1,
-            totalNodes: row.totalNodes,
-            name: row.name,
-            highwayType: row.highwayType,
-          },
-          update: {
-            totalNodes: row.totalNodes,
-            totalEdges: row.totalNodes - 1,
-            name: row.name,
-            highwayType: row.highwayType,
-          },
-        }),
-      ),
+    const values = batch.map(
+      (row) =>
+        Prisma.sql`(${BigInt(row.wayId)}, ${row.totalNodes - 1}, ${row.totalNodes}, ${row.name}, ${row.highwayType})`,
     );
+    await prisma.$executeRaw`
+      INSERT INTO "WayTotalEdges" ("wayId", "totalEdges", "totalNodes", "name", "highwayType")
+      VALUES ${Prisma.join(values)}
+      ON CONFLICT ("wayId") DO UPDATE SET
+        "totalEdges" = EXCLUDED."totalEdges",
+        "totalNodes" = EXCLUDED."totalNodes",
+        "name" = EXCLUDED."name",
+        "highwayType" = EXCLUDED."highwayType"
+    `;
   }
 
-  // Upsert WayNode (ignore conflicts for duplicate way-node pairs)
+  // Upsert WayNode using raw SQL
   for (let i = 0; i < wayNodeRows.length; i += BATCH_SIZE) {
     const batch = wayNodeRows.slice(i, i + BATCH_SIZE);
-    await prisma.$transaction(
-      batch.map((row) =>
-        prisma.wayNode.upsert({
-          where: {
-            wayId_nodeId: { wayId: row.wayId, nodeId: row.nodeId },
-          },
-          create: {
-            wayId: row.wayId,
-            nodeId: row.nodeId,
-            sequence: row.sequence,
-          },
-          update: { sequence: row.sequence },
-        }),
-      ),
+    const values = batch.map(
+      (row) => Prisma.sql`(${row.wayId}, ${row.nodeId}, ${row.sequence})`,
     );
+    await prisma.$executeRaw`
+      INSERT INTO "WayNode" ("wayId", "nodeId", "sequence")
+      VALUES ${Prisma.join(values)}
+      ON CONFLICT ("wayId", "nodeId") DO UPDATE SET
+        "sequence" = EXCLUDED."sequence"
+    `;
   }
 
   // PostGIS geometry + metadata (after Prisma upserts created core rows)
@@ -311,19 +290,22 @@ out;
 
   for (let i = 0; i < geometryRows.length; i += BATCH_SIZE) {
     const batch = geometryRows.slice(i, i + BATCH_SIZE);
-    for (const r of batch) {
-      await prisma.$executeRaw`
-        UPDATE "WayTotalEdges"
-        SET
-          "geometry" = ST_SetSRID(ST_GeomFromGeoJSON(${r.geojson}::json), 4326),
-          "lengthMeters" = ${r.lengthMeters},
-          "surface" = ${r.surface},
-          "access" = ${r.access},
-          "ref" = ${r.ref},
-          "altNames" = ${r.altNames}::text[]
-        WHERE "wayId" = ${r.wayId}
-      `;
-    }
+    const values = batch.map(
+      (r) =>
+        Prisma.sql`(${r.wayId}, ST_SetSRID(ST_GeomFromGeoJSON(${r.geojson}::json), 4326), ${r.lengthMeters}, ${r.surface}, ${r.access}, ${r.ref}, ${r.altNames}::text[])`,
+    );
+    await prisma.$executeRaw`
+      UPDATE "WayTotalEdges" AS w SET
+        "geometry" = v."geometry",
+        "lengthMeters" = v."lengthMeters",
+        "surface" = v."surface",
+        "access" = v."access",
+        "ref" = v."ref",
+        "altNames" = v."altNames"
+      FROM (VALUES ${Prisma.join(values)})
+        AS v("wayId", "geometry", "lengthMeters", "surface", "access", "ref", "altNames")
+      WHERE w."wayId" = v."wayId"::bigint
+    `;
   }
 
   const now = new Date();

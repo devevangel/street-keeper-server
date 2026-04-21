@@ -237,6 +237,15 @@ router.get("/sync/status", async (req: Request, res: Response) => {
 router.post("/sync", async (req: Request, res: Response) => {
   const userId = req.user!.id;
   const background = req.query.background === "true";
+  const force = req.query.force === "true";
+
+  if (force) {
+    const resetResult = await prisma.activity.updateMany({
+      where: { userId, isProcessed: true },
+      data: { isProcessed: false },
+    });
+    console.log(`[Sync] Force reprocess: reset ${resetResult.count} activities for user ${userId.slice(0, 8)}`);
+  }
 
   const after = req.query.after
     ? parseInt(req.query.after as string, 10)
