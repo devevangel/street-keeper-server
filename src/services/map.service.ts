@@ -123,13 +123,14 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
     }
     const weightedCompletionRatio =
       totalWeight === 0 ? 0 : weightedSum / totalWeight;
+    const weightedPercentage = Math.round(weightedCompletionRatio * 100);
 
-    const status =
+    const status: "completed" | "partial" | "not_started" =
       weightedCompletionRatio >= STREET_COMPLETION_THRESHOLD
         ? "completed"
-        : "partial";
-
-    const weightedPercentage = Math.round(weightedCompletionRatio * 100);
+        : weightedPercentage > 0
+          ? "partial"
+          : "not_started";
     const stats: MapStreetStats = {
       runCount: totalRuns,
       completionCount: totalCompletions,
@@ -322,7 +323,7 @@ export async function getMapStreets(
   // Use aggressive normalization so "Park Road" and "Park Road (A3066)" match.
   const streetDataByName = new Map<
     string,
-    { status: "completed" | "partial"; percentage: number }
+    { status: "completed" | "partial" | "not_started"; percentage: number }
   >();
   for (const street of streets) {
     const key = normalizeStreetNameForMatching(street.name) || street.osmId;
@@ -403,18 +404,20 @@ export async function getMapStreetsV2(
   for (const geom of geometries) {
     if (isUnnamedStreet(geom.name)) continue;
     const comp = completionByOsmId.get(geom.osmId);
-    if (!comp || comp.edgesTotal === 0) continue;
 
-    const percentage = Math.round(
-      (comp.edgesCompleted / comp.edgesTotal) * 100,
-    );
+    const percentage =
+      comp && comp.edgesTotal > 0
+        ? Math.round((comp.edgesCompleted / comp.edgesTotal) * 100)
+        : 0;
+
     if (percentage < minPercentage) continue;
 
-    const status = comp.isComplete ? "completed" : "partial";
+    const status: "completed" | "partial" | "not_started" =
+      comp?.isComplete ? "completed" : percentage > 0 ? "partial" : "not_started";
+
     const isConnector =
       geom.lengthMeters <= STREET_AGGREGATION.CONNECTOR_MAX_LENGTH_METERS;
 
-    // V2: do not set runCount/completionCount (node-based progress, not activity count)
     const stats: MapStreetStats = {
       runCount: 0,
       completionCount: 0,
@@ -422,7 +425,7 @@ export async function getMapStreetsV2(
       lastRunDate: null,
       totalLengthMeters: geom.lengthMeters,
       currentPercentage: percentage,
-      everCompleted: comp.isComplete,
+      everCompleted: comp?.isComplete ?? false,
       weightedCompletionRatio: percentage / 100,
       segmentCount: 1,
       connectorCount: isConnector ? 1 : 0,
@@ -445,7 +448,7 @@ export async function getMapStreetsV2(
   // Propagate aggregated status and percentage to segments using aggressive normalization
   const streetDataByName = new Map<
     string,
-    { status: "completed" | "partial"; percentage: number }
+    { status: "completed" | "partial" | "not_started"; percentage: number }
   >();
   for (const street of streets) {
     const key = normalizeStreetNameForMatching(street.name) || street.osmId;

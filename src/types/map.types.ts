@@ -52,8 +52,8 @@ export interface MapStreet {
   lengthMeters: number;
   /** Current coverage percentage (0-100) */
   percentage: number;
-  /** Display status: completed (green) or partial (yellow) */
-  status: "completed" | "partial";
+  /** Display status: completed (green), partial (yellow), not_started (grey) */
+  status: "completed" | "partial" | "not_started";
   /** GeoJSON LineString for the full street (always present) */
   geometry: {
     type: "LineString";
