@@ -157,16 +157,8 @@ export async function getHomepageData(
     mapRadius = DEFAULT_RADIUS;
   }
 
-  if (!contextProjectId) {
-    const autoProject = await prisma.project.findFirst({
-      where: { userId, isArchived: false },
-      orderBy: { updatedAt: "desc" },
-      select: { id: true },
-    });
-    if (autoProject) {
-      contextProjectId = autoProject.id;
-    }
-  }
+  // Only use contextProjectId when the frontend explicitly passes a projectId
+  // (i.e. from the project detail page). Homepage never auto-selects a project.
 
   const activityForRunsWhere = explicitProjectScope
     ? {
