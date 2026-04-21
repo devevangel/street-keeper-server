@@ -39,7 +39,13 @@ function getPrismaClient(): PrismaClient {
 
   // Create Prisma adapter and client
   const adapter = new PrismaPg(pool);
-  prisma = new PrismaClient({ adapter });
+  prisma = new PrismaClient({
+    adapter,
+    transactionOptions: {
+      maxWait: 10000,
+      timeout: 15000,
+    },
+  });
 
   return prisma;
 }
