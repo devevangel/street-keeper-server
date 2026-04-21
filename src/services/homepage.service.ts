@@ -69,11 +69,13 @@ function computeUserState(
   activeSyncJob: boolean,
   activeProjectCount: number,
   anyProjectHasProgress: boolean,
+  processedActivityCount: number,
 ): UserState {
   if (activityCount === 0) {
     return activeSyncJob ? "syncing" : "brand_new";
   }
   if (activeProjectCount === 0) return "has_runs_no_project";
+  if (processedActivityCount > 0) return "active";
   if (!anyProjectHasProgress) return "project_processing";
   return "active";
 }
@@ -186,6 +188,7 @@ export async function getHomepageData(
     recentActivitiesRaw,
     projectForContext,
     projectScopedActivityCount,
+    processedActivityCount,
   ] = await Promise.all([
     prisma.activity.findFirst({
       where: activityForRunsWhere,
@@ -258,6 +261,7 @@ export async function getHomepageData(
           },
         })
       : Promise.resolve(0),
+    prisma.activity.count({ where: { userId, isProcessed: true } }),
   ]);
 
   const userState = computeUserState(
@@ -265,6 +269,7 @@ export async function getHomepageData(
     activeSyncJob != null,
     activeProjectCount,
     projectsWithProgressCount > 0,
+    processedActivityCount,
   );
 
   const lastActivityDate = lastActivity?.startDate ?? null;

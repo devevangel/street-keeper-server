@@ -204,7 +204,7 @@ export async function syncRecentActivities(
   const syncStart = Date.now();
   console.log(`[Sync] Starting sync for user ${userId.slice(0, 8)}…`);
 
-  const accessToken = await getValidAccessToken(userId);
+  let accessToken = await getValidAccessToken(userId);
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const defaultAfter = nowSeconds - ACTIVITIES.MAX_AGE_DAYS * 24 * 60 * 60;
@@ -241,8 +241,18 @@ export async function syncRecentActivities(
   };
 
   // Phase 1: Process activities returned by Strava
-  for (const summary of summaries) {
+  for (let idx = 0; idx < summaries.length; idx++) {
+    const summary = summaries[idx];
     const stravaId = String(summary.id);
+
+    if (idx > 0 && idx % TOKEN_REFRESH_INTERVAL === 0) {
+      try {
+        accessToken = await getValidAccessToken(userId);
+      } catch {
+        // keep previous token
+      }
+    }
+
     try {
       const one = await processOneActivity(userId, stravaId, accessToken);
       console.log(`[Sync] Strava activity ${stravaId}: ${one.status}${"reason" in one ? ` (${one.reason})` : ""}`);
