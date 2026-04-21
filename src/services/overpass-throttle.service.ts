@@ -4,7 +4,8 @@
  * to avoid rate limits (429). Used by city sync (Overpass ingestion).
  */
 
-const MIN_DELAY_MS = 1500;
+/** Space out Overpass calls to reduce 429s when sync + map + activities run together. */
+const MIN_DELAY_MS = 2800;
 let lastRequestTime = 0;
 
 interface QueuedTask<T> {

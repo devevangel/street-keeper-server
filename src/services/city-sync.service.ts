@@ -72,7 +72,10 @@ area.a["boundary"="administrative"];
 out tags;
 `;
   const data = await throttledOverpassQuery(() =>
-    executeRawOverpassQuery(query, { caller: "detect-city" }),
+    executeRawOverpassQuery(query, {
+      caller: "detect-city",
+      maxWaitSeconds: OVERPASS.CITY_SYNC_MAX_SLOT_WAIT_SECONDS,
+    }),
   );
 
   if (!data.elements || data.elements.length === 0) {
@@ -150,7 +153,7 @@ out;
 
   const data = await throttledOverpassQuery(() =>
     executeRawOverpassQuery(query, {
-      maxWaitSeconds: OVERPASS.BACKGROUND_MAX_SLOT_WAIT_SECONDS,
+      maxWaitSeconds: OVERPASS.CITY_SYNC_MAX_SLOT_WAIT_SECONDS,
       caller: "city-sync",
     }),
   );
@@ -198,15 +201,26 @@ out;
   const wayNodeRows: { wayId: bigint; nodeId: bigint; sequence: number }[] =
     [];
 
+  const seenWayIds = new Set<number>();
+  const seenWayNode = new Set<string>();
+
   for (const w of ways) {
     if (!w.nodes || w.nodes.length < 2 || w.id == null) continue;
     const wayId = w.id;
-    const totalNodes = w.nodes.length;
-    const name = w.tags?.name ?? null;
-    const highwayType = w.tags?.highway ?? "unknown";
-    wayTotalRows.push({ wayId, totalNodes, name, highwayType });
+
+    if (!seenWayIds.has(wayId)) {
+      seenWayIds.add(wayId);
+      const totalNodes = w.nodes.length;
+      const name = w.tags?.name ?? null;
+      const highwayType = w.tags?.highway ?? "unknown";
+      wayTotalRows.push({ wayId, totalNodes, name, highwayType });
+    }
+
     for (let idx = 0; idx < w.nodes.length; idx++) {
       const nid = w.nodes[idx];
+      const key = `${wayId}:${nid}`;
+      if (seenWayNode.has(key)) continue;
+      seenWayNode.add(key);
       wayNodeRows.push({
         wayId: BigInt(wayId),
         nodeId: BigInt(nid),
@@ -296,12 +310,12 @@ out;
     );
     await prisma.$executeRaw`
       UPDATE "WayTotalEdges" AS w SET
-        "geometry" = v."geometry",
-        "lengthMeters" = v."lengthMeters",
-        "surface" = v."surface",
-        "access" = v."access",
-        "ref" = v."ref",
-        "altNames" = v."altNames"
+        "geometry" = v."geometry"::geometry,
+        "lengthMeters" = v."lengthMeters"::double precision,
+        "surface" = v."surface"::text,
+        "access" = v."access"::text,
+        "ref" = v."ref"::text,
+        "altNames" = v."altNames"::text[]
       FROM (VALUES ${Prisma.join(values)})
         AS v("wayId", "geometry", "lengthMeters", "surface", "access", "ref", "altNames")
       WHERE w."wayId" = v."wayId"::bigint

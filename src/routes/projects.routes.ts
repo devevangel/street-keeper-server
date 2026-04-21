@@ -261,10 +261,15 @@ router.get("/preview", async (req: Request, res: Response) => {
       preview,
     });
   } catch (error) {
-    if (error instanceof OverpassError) {
+    const errMsg = error instanceof Error ? error.message : "";
+    if (
+      error instanceof OverpassError ||
+      errMsg.includes("All Overpass servers failed")
+    ) {
       res.status(502).json({
         success: false,
-        error: "Failed to query street data. Please try again.",
+        error:
+          "OpenStreetMap servers are busy. Wait a minute and try again, or try again later.",
         code: ERROR_CODES.OVERPASS_ERROR,
       });
       return;
@@ -521,10 +526,15 @@ router.post("/", async (req: Request, res: Response) => {
       message: `Project "${project.name}" created with ${project.totalStreets} streets`,
     });
   } catch (error) {
-    if (error instanceof OverpassError) {
+    const errMsg = error instanceof Error ? error.message : "";
+    if (
+      error instanceof OverpassError ||
+      errMsg.includes("All Overpass servers failed")
+    ) {
       res.status(502).json({
         success: false,
-        error: "Failed to query street data. Please try again.",
+        error:
+          "OpenStreetMap servers are busy. Wait a minute and try again, or try again later.",
         code: ERROR_CODES.OVERPASS_ERROR,
       });
       return;

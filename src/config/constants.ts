@@ -118,21 +118,35 @@ export function getEnvVarOptional(name: string, defaultValue: string): string {
   return process.env[name] ?? defaultValue;
 }
 
+const DEFAULT_OVERPASS_SERVERS = [
+  "https://gall.openstreetmap.de/api/interpreter",
+  "https://lambert.openstreetmap.de/api/interpreter",
+] as const;
+
+function parseOverpassServers(): readonly string[] {
+  const raw = process.env.OVERPASS_SERVERS?.trim();
+  if (!raw) return DEFAULT_OVERPASS_SERVERS;
+  const urls = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return urls.length > 0 ? urls : DEFAULT_OVERPASS_SERVERS;
+}
+
+/** City detect + full-city sync: public Overpass often needs 30–90s for a slot. */
+function citySyncMaxSlotWaitSeconds(): number {
+  const n = parseInt(process.env.OVERPASS_CITY_SLOT_WAIT_SECONDS ?? "", 10);
+  if (Number.isFinite(n) && n >= 30) return Math.min(n, 300);
+  return 120;
+}
+
 export const OVERPASS = {
   /**
-   * Server list, tried in order.
-   *
-   * overpass-api.de resolves to two independent servers (gall + lambert) with
-   * separate rate-limit pools.  We list both explicitly so we can check their
-   * /api/status endpoints independently and pick whichever has a free slot.
+   * Server list. Override with env `OVERPASS_SERVERS` (comma-separated interpreter URLs).
    *
    * @see https://dev.overpass-api.de/overpass-doc/en/preface/commons.html
-   * @see https://wiki.openstreetmap.org/wiki/Overpass_API#Public_Overpass_API_instances
    */
-  SERVERS: [
-    "https://gall.openstreetmap.de/api/interpreter",
-    "https://lambert.openstreetmap.de/api/interpreter",
-  ] as readonly string[],
+  SERVERS: parseOverpassServers(),
 
   /** axios client timeout */
   TIMEOUT_MS: 60_000,
@@ -148,17 +162,25 @@ export const OVERPASS = {
   QUERY_MAXSIZE_BYTES: 16 * 1024 * 1024, // 16 MiB
 
   /**
-   * Default max seconds to wait for a slot (request-path callers).
-   * Keep short — this blocks the user's HTTP response on cache misses.
-   * Background jobs should pass a longer budget via OverpassQueryOptions.
+   * Default max seconds to wait for a slot (lightweight request-path callers).
    */
   MAX_SLOT_WAIT_SECONDS: 10,
 
-  /** Max seconds to wait when called from a pg-boss background job. */
-  BACKGROUND_MAX_SLOT_WAIT_SECONDS: 45,
+  /**
+   * City detect + full-city Overpass download. Blocks project preview until done.
+   * Default 120s; set `OVERPASS_CITY_SLOT_WAIT_SECONDS` (30–300) on Render if needed.
+   */
+  get CITY_SYNC_MAX_SLOT_WAIT_SECONDS(): number {
+    return citySyncMaxSlotWaitSeconds();
+  },
+
+  /** @deprecated Prefer CITY_SYNC_MAX_SLOT_WAIT_SECONDS (same value). */
+  get BACKGROUND_MAX_SLOT_WAIT_SECONDS(): number {
+    return citySyncMaxSlotWaitSeconds();
+  },
 
   /** Per-server retry attempts (for transient HTTP / network errors) */
-  MAX_RETRIES: 2,
+  MAX_RETRIES: 3,
 
   HIGHWAY_TYPES: [
     "residential",
