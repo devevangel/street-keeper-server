@@ -1,9 +1,9 @@
 /**
  * Reset the entire database: truncate all tables so you can test from a clean slate.
  *
- * Use this to verify on-demand city sync: after running, create a project and the
- * backend will sync that city from Overpass and repopulate NodeCache, WayNode,
- * WayTotalEdges, and CitySync.
+ * Use this to verify on-demand city sync: after running, log in again and create a
+ * project in a new area — the backend will pull city data from Overpass when needed
+ * (CitySync, WayTotalEdges, etc.) and background Strava sync runs as implemented.
  *
  * Truncates (in FK-safe order, with CASCADE):
  *   App data: SuggestionCooldown, AnalyticsEvent, UserMilestone, UserPreferences,
@@ -12,13 +12,12 @@
  *   Map/seed data: WayCache, CitySync, WayTotalEdges, WayNode, NodeCache
  *   Seed config: MilestoneType
  *
- * Usage (from backend directory):
- *   npx tsx src/scripts/reset-database.ts
+ * Usage (from backend directory — loads backend/.env via package.json):
  *   npm run db:reset
  *
- * Requires: DATABASE_URL in .env
+ * Requires: DATABASE_URL in backend/.env (e.g. Supabase).
  *
- * Alternative (drops DB and re-runs all migrations): npx prisma migrate reset --force
+ * Full replay of migrations instead of truncate: npm run db:migrate:reset
  */
 
 import "dotenv/config";

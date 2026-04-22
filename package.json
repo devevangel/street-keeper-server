@@ -10,6 +10,9 @@
     "dev:prod": "npm run dev:remote",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
+    "db:migrate:reset": "cross-env DOTENV_CONFIG_PATH=.env npx prisma migrate reset --force",
+    "db:reset:local": "npm run db:migrate:reset",
+    "db:reset:remote": "cross-env DOTENV_CONFIG_PATH=.env.remote npx prisma migrate reset --force",
     "build": "npx prisma generate && npx prisma migrate deploy && (tsc || true)",
     "start": "node dist/server.js",
     "test": "vitest run",
@@ -29,7 +32,7 @@
     "delete:archived-project-data": "tsx src/scripts/delete-archived-project-data.ts",
     "delete:all-projects": "tsx src/scripts/delete-all-projects.ts",
     "db:size": "tsx src/scripts/db-size.ts",
-    "db:reset": "tsx src/scripts/reset-database.ts",
+    "db:reset": "cross-env DOTENV_CONFIG_PATH=.env tsx src/scripts/reset-database.ts",
     "sync:city": "tsx src/scripts/sync-city.ts",
     "webhook:register": "tsx src/scripts/register-webhook.ts",
     "reset:user-data": "tsx src/scripts/reset-user-data.ts"
