@@ -214,16 +214,24 @@ export async function previewProject(
   let streetsList: ProjectPreview["streets"] | undefined;
   if (includeStreets) {
     const allOsmIds = filteredStreets.map((s) => s.osmId);
-    const progressMap = new Map<string, number>();
+    /** Per OSM way: node-hit % and V2 "fully complete" (90%/100% rule), not conflated with 0–100 threshold math */
+    const completionByOsmId = new Map<
+      string,
+      { pct: number; isComplete: boolean }
+    >();
     if (userId && allOsmIds.length > 0) {
       const wayIds = allOsmIds.map((id) => osmIdToWayId(id));
       const completion = await deriveStreetCompletionForArea(userId, wayIds);
       for (const c of completion) {
         const osmId = `way/${String(c.wayId)}`;
-        const pct = c.edgesTotal > 0
-          ? Math.min(100, Math.round((c.edgesCompleted / c.edgesTotal) * 100))
-          : 0;
-        progressMap.set(osmId, pct);
+        const pct =
+          c.edgesTotal > 0
+            ? Math.min(
+                100,
+                Math.round((c.edgesCompleted / c.edgesTotal) * 100),
+              )
+            : 0;
+        completionByOsmId.set(osmId, { pct, isComplete: c.isComplete });
       }
     }
 
@@ -240,13 +248,22 @@ export async function previewProject(
         let weightedPct = 0;
         if (streetTotalLen > 0) {
           weightedPct = data.segments.reduce((sum, s) => {
-            const pct = progressMap.get(s.osmId) ?? 0;
+            const row = completionByOsmId.get(s.osmId);
+            const pct = row?.pct ?? 0;
             return sum + pct * s.lengthMeters;
           }, 0) / streetTotalLen;
         }
         const percentage = Math.round(weightedPct * 100) / 100;
+        // "Completed" only if every segment (way) in this street name is V2-complete.
+        // (Previously we compared percentage 0–100 to getCompletionThreshold() which returns
+        // a 0–1 fraction, so e.g. 50% wrongly counted as done.)
+        const allSegmentsComplete =
+          data.segments.length > 0 &&
+          data.segments.every(
+            (s) => completionByOsmId.get(s.osmId)?.isComplete === true,
+          );
         const status: "completed" | "partial" | "not_started" =
-          percentage >= getCompletionThreshold()
+          allSegmentsComplete
             ? "completed"
             : percentage > 0
               ? "partial"
