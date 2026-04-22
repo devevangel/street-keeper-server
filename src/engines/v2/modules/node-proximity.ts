@@ -9,8 +9,10 @@ import { NODE_PROXIMITY_CONFIG } from "../config.js";
 
 const SNAP_RADIUS_M = NODE_PROXIMITY_CONFIG.snapRadiusM;
 
-/** Max GPS points per spatial query to keep planner/memory reasonable. */
-const GPS_CHUNK_SIZE = 3000;
+/** Max GPS points per spatial query. Keep small to avoid statement timeouts
+ *  on hosted Postgres (Supabase free tier has 60s limit). Each chunk does a
+ *  cross-join with NodeCache so cost ≈ O(chunk × nodes_in_bbox). */
+const GPS_CHUNK_SIZE = 200;
 /** Max node IDs per bulk INSERT batch. */
 const UPSERT_BATCH_SIZE = 500;
 
@@ -41,6 +43,13 @@ export async function markHitNodes(
     const lngs = chunk.map((p) => p.lng);
     const lats = chunk.map((p) => p.lat);
 
+    // Pre-compute a bounding box for this chunk with a buffer (~0.0003° ≈ 30m)
+    const buffer = 0.0003;
+    const minLng = Math.min(...lngs) - buffer;
+    const maxLng = Math.max(...lngs) + buffer;
+    const minLat = Math.min(...lats) - buffer;
+    const maxLat = Math.max(...lats) + buffer;
+
     const rows = await prisma.$queryRaw<Array<{ nodeId: bigint }>>`
       WITH pts AS (
         SELECT * FROM unnest(${lngs}::float8[], ${lats}::float8[]) AS t(lng, lat)
@@ -48,6 +57,8 @@ export async function markHitNodes(
       SELECT DISTINCT nc."nodeId"
       FROM "NodeCache" nc, pts
       WHERE nc."geom" IS NOT NULL
+        AND nc."lat" BETWEEN ${minLat} AND ${maxLat}
+        AND nc."lon" BETWEEN ${minLng} AND ${maxLng}
         AND ST_DWithin(
           nc."geom"::geography,
           ST_SetSRID(ST_MakePoint(pts.lng, pts.lat), 4326)::geography,
