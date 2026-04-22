@@ -332,6 +332,8 @@ const TOKEN_REFRESH_INTERVAL = 10;
 const SYNC_CONCURRENCY = 3;
 /** Queued jobs older than this are considered stale (worker never picked up). */
 const QUEUED_STALE_MS = 2 * 60 * 1000;
+/** Running jobs older than this are considered orphaned (server restarted mid-processing). */
+const RUNNING_STALE_MS = 15 * 60 * 1000;
 
 /**
  * Fetch all activity summaries from Strava with pagination (page size 200).
@@ -424,18 +426,23 @@ export async function startBackgroundSync(
 
   if (existing) {
     const ageMs = Date.now() - existing.startedAt.getTime();
-    if (
-      existing.status === "queued" &&
-      ageMs > QUEUED_STALE_MS
-    ) {
+    const isStale =
+      (existing.status === "queued" && ageMs > QUEUED_STALE_MS) ||
+      (existing.status === "running" && ageMs > RUNNING_STALE_MS);
+
+    if (isStale) {
+      const reason =
+        existing.status === "queued"
+          ? "Job never picked up by worker"
+          : `Job was running for ${Math.round(ageMs / 60_000)}m — likely killed by server restart`;
       console.log(
-        `[Sync] Stale queued job ${existing.id} (${Math.round(ageMs / 1000)}s old) — marking failed, creating new job`
+        `[Sync] Stale ${existing.status} job ${existing.id} (${Math.round(ageMs / 1000)}s old) — marking failed`
       );
       await prisma.syncJob.update({
         where: { id: existing.id },
         data: {
           status: "failed",
-          lastErrorMessage: "Job never picked up by worker (queue may have been unavailable)",
+          lastErrorMessage: reason,
           completedAt: new Date(),
           updatedAt: new Date(),
         },
@@ -557,9 +564,15 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
     }
 
     const outcomes = await Promise.all(
-      batch.map((sid) =>
-        processOneActivity(userId, String(sid), accessToken),
-      ),
+      batch.map(async (sid) => {
+        try {
+          return await processOneActivity(userId, String(sid), accessToken);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          console.warn(`[Sync] Activity ${sid} threw:`, reason);
+          return { status: "error" as const, reason };
+        }
+      }),
     );
 
     for (const one of outcomes) {
@@ -594,36 +607,6 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
 
     if (activityIndex < idList.length) {
       await new Promise((r) => setTimeout(r, INTER_ACTIVITY_DELAY_MS));
-    }
-  }
-
-  // Phase 2: retry any DB activities still unprocessed (e.g. V2 failed previously).
-  const unprocessed = await prisma.activity.findMany({
-    where: { userId, isProcessed: false, isDeleted: false },
-    select: { id: true, stravaId: true },
-    orderBy: { startDate: "asc" },
-  });
-
-  if (unprocessed.length > 0) {
-    console.log(
-      `[Sync] Phase 2: ${unprocessed.length} unprocessed activities in DB — retrying`
-    );
-    for (const act of unprocessed) {
-      try {
-        await processActivity(act.id, userId);
-        processed += 1;
-      } catch (err) {
-        errors += 1;
-        lastErrorMessage = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[Sync] Phase 2 failed for ${act.stravaId}:`,
-          lastErrorMessage
-        );
-      }
-      await prisma.syncJob.update({
-        where: { id: syncJobId },
-        data: { processed, errors, lastErrorMessage, updatedAt: new Date() },
-      });
     }
   }
 

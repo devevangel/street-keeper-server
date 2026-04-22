@@ -109,6 +109,26 @@ async function main(): Promise<void> {
     console.warn("[PostGIS] Startup coverage query skipped:", msg);
   }
 
+  // Self-heal: mark orphaned sync jobs (server crashed/restarted mid-processing) as failed
+  // so the UI doesn't show "Syncing X/Y" forever and new syncs can start.
+  try {
+    const orphaned = await prisma.syncJob.updateMany({
+      where: { status: { in: ["queued", "running"] } },
+      data: {
+        status: "failed",
+        lastErrorMessage: "Server restarted while job was in progress",
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      },
+    });
+    if (orphaned.count > 0) {
+      console.log(`[Startup] Marked ${orphaned.count} orphaned sync jobs as failed`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[Startup] Orphaned job cleanup skipped:", msg);
+  }
+
   // Self-heal: reset activities marked processed but with zero node hits
   // (caused by V2 failures e.g. Overpass outages). They'll be reprocessed on next sync.
   try {
