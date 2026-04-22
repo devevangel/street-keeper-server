@@ -60,6 +60,10 @@ import {
   ProjectValidationError,
 } from "../services/project.service.js";
 import { getSuggestions } from "../services/suggestion.service.js";
+import {
+  getProjectSuggestionsPayload,
+  ProjectNotFoundError as ProjectSuggestionsNotFoundError,
+} from "../services/project-suggestions.service.js";
 import { listActivitiesForProject } from "../services/activity.service.js";
 import { getProjectTraces } from "../services/map.service.js";
 import prisma from "../lib/prisma.js";
@@ -980,6 +984,58 @@ router.get("/:id/suggestions", async (req: Request, res: Response) => {
     }
 
     console.error("[Projects] Suggestions error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      code: ERROR_CODES.INTERNAL_ERROR,
+    });
+  }
+});
+
+// ============================================
+// Next Run (project-scoped homepage-style payload)
+// ============================================
+
+/**
+ * GET /projects/:id/next-runs
+ *
+ * Returns a project-scoped "Next Run" payload for the project detail page:
+ *   - primarySuggestion + alternates (same shape as homepage suggestions,
+ *     but always anchored to the project's center/radius)
+ *   - totalActivities, totalDistanceKm scoped to activities linked to this project
+ *   - lastRun + recentRuns scoped to project activities
+ *
+ * Independent from the homepage endpoint so the project detail page is
+ * no longer coupled to global homepage state.
+ */
+router.get("/:id/next-runs", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const projectId = req.params.id;
+
+  try {
+    const data = await getProjectSuggestionsPayload(userId, projectId);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (
+      error instanceof ProjectSuggestionsNotFoundError ||
+      error instanceof ProjectNotFoundError
+    ) {
+      res.status(404).json({
+        success: false,
+        error: "Project not found",
+        code: ERROR_CODES.PROJECT_NOT_FOUND,
+      });
+      return;
+    }
+    if (error instanceof ProjectAccessDeniedError) {
+      res.status(403).json({
+        success: false,
+        error: "Access denied to this project",
+        code: ERROR_CODES.PROJECT_ACCESS_DENIED,
+      });
+      return;
+    }
+    console.error("[Projects] Next-runs error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error",

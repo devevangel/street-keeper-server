@@ -278,7 +278,11 @@ export async function getSuggestions(
   });
   if (progressRows.length > 0) {
     const row = progressRows[0];
-    const street = streets.find((s) => s.osmId === row.osmId);
+    // Exclude fully-completed streets: the nudge is to push 3-4 runs toward
+    // mastery, not to repeat an already-100%-covered street.
+    const street = streets.find(
+      (s) => s.osmId === row.osmId && s.percentage < 100,
+    );
     if (street) {
       repeatStreet = toSuggestion(
         street,
@@ -453,12 +457,26 @@ function streetValue(
   return 100 - Math.min(distFromCenter / 10, 99);
 }
 
+interface ClusterCandidateOptions {
+  /** Max distance (m) a candidate street can be from the context center to be considered. */
+  candidateRadiusM?: number;
+  /** Max bbox diameter (m) a cluster is allowed to span. */
+  maxBboxDiameterM?: number;
+  /** Max total street length (m) budget per cluster. */
+  maxDistanceM?: number;
+}
+
 function buildClusterCandidates(
   streets: ClusterableStreet[],
   centerLat: number,
   centerLng: number,
   max: number = CLUSTER_MAX_COUNT,
+  opts: ClusterCandidateOptions = {},
 ): HomepageSuggestion[] {
+  const candidateRadiusM = opts.candidateRadiusM ?? CLUSTER_CANDIDATE_RADIUS_M;
+  const maxBboxDiameterM = opts.maxBboxDiameterM ?? CLUSTER_MAX_BBOX_DIAMETER_M;
+  const maxDistanceM = opts.maxDistanceM ?? CLUSTER_MAX_DISTANCE_M;
+
   const candidates = streets.filter((street) => {
     if (!street.name || isUnnamedStreet(street.name)) return false;
     if (street.percentage >= 100) return false;
@@ -466,7 +484,7 @@ function buildClusterCandidates(
     if (coords.length < 2) return false;
     if (
       distanceMapStreetToPoint(street, centerLat, centerLng) >
-      CLUSTER_CANDIDATE_RADIUS_M
+      candidateRadiusM
     ) {
       return false;
     }
@@ -515,7 +533,7 @@ function buildClusterCandidates(
 
     const group: ClusterableStreet[] = [seed.street];
     const picked = new Set<string>([seed.street.osmId]);
-    let remainingBudget = CLUSTER_MAX_DISTANCE_M - seed.street.lengthMeters;
+    let remainingBudget = maxDistanceM - seed.street.lengthMeters;
     let minLat = seed.centroid.lat;
     let maxLat = seed.centroid.lat;
     let minLng = seed.centroid.lng;
@@ -536,7 +554,7 @@ function buildClusterCandidates(
         const nMaxLat = Math.max(maxLat, item.centroid.lat);
         const nMinLng = Math.min(minLng, item.centroid.lng);
         const nMaxLng = Math.max(maxLng, item.centroid.lng);
-        return bboxDiameterMeters(nMinLat, nMaxLat, nMinLng, nMaxLng) <= CLUSTER_MAX_BBOX_DIAMETER_M;
+        return bboxDiameterMeters(nMinLat, nMaxLat, nMinLng, nMaxLng) <= maxBboxDiameterM;
       })
       .sort((a, b) => a.distFromCenter - b.distFromCenter)[0];
     if (complement) {
@@ -560,7 +578,7 @@ function buildClusterCandidates(
           const nextMaxLng = Math.max(maxLng, item.centroid.lng);
           return (
             bboxDiameterMeters(nextMinLat, nextMaxLat, nextMinLng, nextMaxLng) <=
-            CLUSTER_MAX_BBOX_DIAMETER_M
+            maxBboxDiameterM
           );
         })
         .sort(
@@ -838,10 +856,23 @@ export async function getHomepageSuggestions(
       candidates,
     );
 
+    // For project scope, scale cluster constants to the project radius so
+    // clusters actually form inside the bounded area (homepage defaults
+    // are tuned for a small ~1km neighborhood circle around the user).
+    const projectRadius = context.radius ?? CLUSTER_CANDIDATE_RADIUS_M;
     const clusterSuggestions = buildClusterCandidates(
       response._rawStreets,
       context.lat ?? 0,
       context.lng ?? 0,
+      CLUSTER_MAX_COUNT,
+      {
+        candidateRadiusM: Math.max(CLUSTER_CANDIDATE_RADIUS_M, projectRadius),
+        maxBboxDiameterM: Math.max(
+          CLUSTER_MAX_BBOX_DIAMETER_M,
+          projectRadius,
+        ),
+        maxDistanceM: Math.max(CLUSTER_MAX_DISTANCE_M, projectRadius * 2.5),
+      },
     );
     candidates.push(...clusterSuggestions);
   } else if (
@@ -936,6 +967,19 @@ export async function getHomepageSuggestions(
   }
 
   const MIN_SUGGESTIONS = 2;
+
+  // Scope non-streak cooldown keys by context so a quick_win cooled down from
+  // the homepage doesn't silence the same street inside a project (and vice
+  // versa). streak_saver is intentionally left global to preserve existing
+  // streak-nudging behavior.
+  const scopeSuffix = context.projectId
+    ? `:project:${context.projectId}`
+    : ":home";
+  for (const c of candidates) {
+    if (c.type !== "streak_saver") {
+      c.cooldownKey = `${c.cooldownKey}${scopeSuffix}`;
+    }
+  }
 
   const filtered: HomepageSuggestion[] = [];
   for (const c of candidates) {
@@ -1116,8 +1160,13 @@ function buildCandidatesFromMapStreets(
     }
   }
 
+  // Exclude fully-completed streets: the "one more run to mastery" nudge
+  // doesn't make sense once a street is already at 100%.
   const repeatStreet = streets.find(
-    (s) => s.stats.runCount >= 3 && s.stats.runCount <= 4,
+    (s) =>
+      s.stats.runCount >= 3 &&
+      s.stats.runCount <= 4 &&
+      s.percentage < 100,
   );
   if (repeatStreet) {
     const bbox = mapStreetToBbox(repeatStreet);
