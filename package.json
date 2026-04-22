@@ -4,7 +4,12 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "dev": "nodemon",
+    "dev": "npm run dev:local",
+    "dev:local": "cross-env DOTENV_CONFIG_PATH=.env nodemon",
+    "dev:remote": "cross-env DOTENV_CONFIG_PATH=.env.remote nodemon",
+    "dev:prod": "npm run dev:remote",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
     "build": "npx prisma generate && npx prisma migrate deploy && (tsc || true)",
     "start": "node dist/server.js",
     "test": "vitest run",
@@ -25,7 +30,9 @@
     "delete:all-projects": "tsx src/scripts/delete-all-projects.ts",
     "db:size": "tsx src/scripts/db-size.ts",
     "db:reset": "tsx src/scripts/reset-database.ts",
-    "sync:city": "tsx src/scripts/sync-city.ts"
+    "sync:city": "tsx src/scripts/sync-city.ts",
+    "webhook:register": "tsx src/scripts/register-webhook.ts",
+    "reset:user-data": "tsx src/scripts/reset-user-data.ts"
   },
   "keywords": [],
   "author": "",
@@ -66,6 +73,7 @@
     "@types/supertest": "^6.0.3",
     "@types/swagger-jsdoc": "^6.0.4",
     "@types/swagger-ui-express": "^4.1.8",
+    "cross-env": "^10.1.0",
     "eslint": "^9.39.2",
     "nodemon": "^3.1.11",
     "prisma": "^7.2.0",

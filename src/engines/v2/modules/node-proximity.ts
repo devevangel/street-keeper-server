@@ -1,9 +1,7 @@
 /**
  * CityStrides-style node proximity.
  *
- * For each GPS point, finds all NodeCache nodes within SNAP_RADIUS_M (25m),
- * then bulk upserts to UserNodeHit. No map-matching; multiple nodes/ways can
- * be credited per point.
+ * Batch PostGIS: all GPS points in one (or chunked) spatial join, then bulk upsert UserNodeHit.
  */
 
 import prisma from "../../../lib/prisma.js";
@@ -11,22 +9,21 @@ import { NODE_PROXIMITY_CONFIG } from "../config.js";
 
 const SNAP_RADIUS_M = NODE_PROXIMITY_CONFIG.snapRadiusM;
 
+/** Max GPS points per spatial query to keep planner/memory reasonable. */
+const GPS_CHUNK_SIZE = 3000;
+/** Max node IDs per bulk INSERT batch. */
+const UPSERT_BATCH_SIZE = 500;
+
 /** Point with lat/lng (compatible with V1 GpxPoint and v2 GpxPoint) */
 export interface GpsPoint {
   lat: number;
   lng: number;
 }
 
-const BATCH_SIZE = 500;
-
 /**
  * For each GPS point, find NodeCache nodes within SNAP_RADIUS_M (25m), then
  * bulk upsert (userId, nodeId) to UserNodeHit with hitAt = runDate so project
  * progress can be scoped to "runs on or after project creation".
- * Returns the number of unique nodes hit this run and the array of node IDs.
- *
- * @param runDate - Activity/run start time; stored as hitAt so deriveProjectProgressV2Scoped
- *                  can filter to only count hits from runs on or after project.createdAt.
  */
 export async function markHitNodes(
   userId: string,
@@ -39,20 +36,26 @@ export async function markHitNodes(
 
   const hitNodeIds = new Set<bigint>();
 
-  for (const point of gpsPoints) {
-    const nearbyNodes = await prisma.$queryRaw<
-      Array<{ nodeId: bigint; lat: number; lon: number }>
-    >`
-      SELECT "nodeId", "lat", "lon" FROM "NodeCache"
-      WHERE "geom" IS NOT NULL
+  for (let offset = 0; offset < gpsPoints.length; offset += GPS_CHUNK_SIZE) {
+    const chunk = gpsPoints.slice(offset, offset + GPS_CHUNK_SIZE);
+    const lngs = chunk.map((p) => p.lng);
+    const lats = chunk.map((p) => p.lat);
+
+    const rows = await prisma.$queryRaw<Array<{ nodeId: bigint }>>`
+      WITH pts AS (
+        SELECT * FROM unnest(${lngs}::float8[], ${lats}::float8[]) AS t(lng, lat)
+      )
+      SELECT DISTINCT nc."nodeId"
+      FROM "NodeCache" nc, pts
+      WHERE nc."geom" IS NOT NULL
         AND ST_DWithin(
-          "geom"::geography,
-          ST_SetSRID(ST_MakePoint(${point.lng}, ${point.lat}), 4326)::geography,
+          nc."geom"::geography,
+          ST_SetSRID(ST_MakePoint(pts.lng, pts.lat), 4326)::geography,
           ${SNAP_RADIUS_M}
         )
     `;
-    for (const node of nearbyNodes) {
-      hitNodeIds.add(node.nodeId);
+    for (const r of rows) {
+      hitNodeIds.add(r.nodeId);
     }
   }
 
@@ -61,23 +64,16 @@ export async function markHitNodes(
   }
 
   const nodeIds = [...hitNodeIds];
-  for (let i = 0; i < nodeIds.length; i += BATCH_SIZE) {
-    const batch = nodeIds.slice(i, i + BATCH_SIZE);
-    await prisma.$transaction(
-      batch.map((nodeId) =>
-        prisma.userNodeHit.upsert({
-          where: {
-            userId_nodeId: { userId, nodeId },
-          },
-          create: {
-            userId,
-            nodeId,
-            hitAt: runDate,
-          },
-          update: { hitAt: runDate },
-        }),
-      ),
-    );
+  const hitAtParam = runDate;
+
+  for (let i = 0; i < nodeIds.length; i += UPSERT_BATCH_SIZE) {
+    const batch = nodeIds.slice(i, i + UPSERT_BATCH_SIZE);
+    await prisma.$executeRaw`
+      INSERT INTO "UserNodeHit" ("id", "userId", "nodeId", "hitAt")
+      SELECT gen_random_uuid(), ${userId}::uuid, x, ${hitAtParam}::timestamptz
+      FROM unnest(${batch}::bigint[]) AS x
+      ON CONFLICT ("userId", "nodeId") DO UPDATE SET "hitAt" = EXCLUDED."hitAt"
+    `;
   }
 
   console.log(

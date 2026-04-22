@@ -1,0 +1,18 @@
+# Optional: local PostGIS if you do not already run Postgres on your machine.
+# Not required for `npm run dev` — only provides the database.
+# From backend/: npm run db:up  →  npx prisma migrate deploy  →  npm run dev:local
+
+services:
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: streetkeeper
+    volumes:
+      - streetkeeper_pg_data:/var/lib/postgresql/data
+
+volumes:
+  streetkeeper_pg_data:

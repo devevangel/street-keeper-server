@@ -95,30 +95,12 @@ import {
   type OverlapResult,
 } from "./overlap-detection.service.js";
 import { updateProjectProgress } from "./project.service.js";
-import {
-  upsertStreetProgress,
-  calculateCoverageInterval,
-  type CoverageInterval,
-} from "./user-street-progress.service.js";
-import { getCompletionThreshold, ENGINE } from "../config/constants.js";
+import { upsertStreetProgress } from "./user-street-progress.service.js";
 import { processActivityV2 } from "../engines/v2/process-activity.js";
 import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.js";
-import { ensureCitySynced } from "./city-sync.service.js";
-import {
-  getLocalStreetsInBBox,
-  getLocalStreetsInRadius,
-} from "./local-streets.service.js";
-import { matchPointsToStreetsHybrid } from "../engines/v1/street-matching.js";
-import {
-  aggregateSegmentsIntoLogicalStreets,
-  isUnnamedStreet,
-  normalizeStreetNameForMatching,
-  streetNamesMatch,
-} from "../engines/v1/street-aggregation.js";
-import { STREET_MATCHING } from "../config/constants.js";
 import prisma from "../lib/prisma.js";
-import type { GpxPoint, OsmStreet, MatchedStreet } from "../types/run.types.js";
-import type { StreetSnapshot, SnapshotStreet } from "../types/project.types.js";
+import type { GpxPoint } from "../types/run.types.js";
+import type { StreetSnapshot } from "../types/project.types.js";
 import type { ActivityImpact } from "../types/activity.types.js";
 
 // ============================================
@@ -170,64 +152,8 @@ export interface ActivityProcessingResult {
 }
 
 /**
- * Street coverage result from matching
- */
-interface StreetCoverage {
-  /** OSM ID of the street */
-  osmId: string;
-  /** Coverage percentage (0-100) */
-  percentage: number;
-  /** Whether this activity alone would complete the street */
-  isComplete: boolean;
-}
-
-// ============================================
-// Helper Functions
-// ============================================
-
-/**
- * Calculate bounding box from activity GPS coordinates.
- * Used for standalone activity processing (no routes) to query streets in area.
- *
- * @param coordinates - Activity GPS points
- * @returns Bounding box { south, west, north, east } with small buffer for edge matching
- */
-function calculateActivityBoundingBox(coordinates: GpxPoint[]): {
-  south: number;
-  west: number;
-  north: number;
-  east: number;
-} {
-  let minLat = Infinity;
-  let maxLat = -Infinity;
-  let minLng = Infinity;
-  let maxLng = -Infinity;
-  for (const pt of coordinates) {
-    if (pt.lat < minLat) minLat = pt.lat;
-    if (pt.lat > maxLat) maxLat = pt.lat;
-    if (pt.lng < minLng) minLng = pt.lng;
-    if (pt.lng > maxLng) maxLng = pt.lng;
-  }
-  // ~50m buffer for edge matching
-  const buffer = 0.0005;
-  return {
-    south: minLat - buffer,
-    west: minLng - buffer,
-    north: maxLat + buffer,
-    east: maxLng + buffer,
-  };
-}
-
-/**
  * Process an activity when the user has no overlapping routes.
- * Queries streets in the activity's bounding box, matches GPS points to streets,
- * and updates UserStreetProgress (v1) and/or UserNodeHit (v2) per ENGINE.VERSION.
- *
- * @param activityId - Internal activity ID (for logging)
- * @param userId - User ID
- * @param coordinates - Activity GPS points
- * @param startDate - Activity start date (for v2 runDate)
- * @returns Count of streets covered and completed (from v1 when applicable)
+ * Persists node hits (V2) for map-level progress.
  */
 async function processStandaloneActivity(
   activityId: string,
@@ -235,105 +161,20 @@ async function processStandaloneActivity(
   coordinates: GpxPoint[],
   startDate: Date | null
 ): Promise<{ streetsCovered: number; streetsCompleted: number }> {
-  let streetsCovered = 0;
-  let streetsCompleted = 0;
-
-  if (ENGINE.VERSION === "v1" || ENGINE.VERSION === "both") {
-    const bbox = calculateActivityBoundingBox(coordinates);
-    const centerLat = (bbox.south + bbox.north) / 2;
-    const centerLng = (bbox.west + bbox.east) / 2;
-    await ensureCitySynced(centerLat, centerLng);
-    const geometries = await getLocalStreetsInBBox(bbox);
-
-    if (geometries.length === 0) {
-      console.log(
-        `[Processor] Standalone: no streets in bbox for activity ${activityId}`
-      );
-    } else {
-      const matchedStreets = await matchPointsToStreetsHybrid(
-        coordinates,
-        geometries
-      );
-
-      if (matchedStreets.length === 0) {
-        console.log(
-          `[Processor] Standalone: no street matches for activity ${activityId}`
-        );
-      } else {
-        const filteredStreets = matchedStreets.filter((m) => {
-          const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
-          const percentage = ratio * 100;
-          return (
-            m.matchedPointsCount >= STREET_MATCHING.MIN_POINTS_PER_STREET &&
-            percentage >= STREET_MATCHING.MIN_COVERAGE_PERCENTAGE
-          );
-        });
-
-        if (filteredStreets.length === 0) {
-          console.log(
-            `[Processor] Standalone: no streets passed filter for activity ${activityId}`
-          );
-        } else {
-          const namedStreets = filteredStreets.filter(
-            (m) => !isUnnamedStreet(m.name)
-          );
-
-          if (namedStreets.length === 0) {
-            console.log(
-              `[Processor] Standalone: no named streets for activity ${activityId}`
-            );
-          } else {
-            console.log(
-              `[Processor] Standalone: matched ${matchedStreets.length} streets, ${namedStreets.length} named for activity ${activityId}`
-            );
-
-            const streetProgressInput = namedStreets.map((m) => {
-              const ratio = m.geometryCoverageRatio ?? m.coverageRatio;
-              const percentage = Math.min(100, Math.round(ratio * 100));
-              const threshold = getCompletionThreshold(m.lengthMeters);
-              const isComplete = ratio >= threshold;
-              const coverageInterval: CoverageInterval | undefined =
-                m.coverageInterval ??
-                (percentage > 0 ? [0, percentage] : undefined);
-
-              return {
-                osmId: m.osmId,
-                name: m.name,
-                highwayType: m.highwayType,
-                lengthMeters: m.lengthMeters,
-                percentage,
-                isComplete,
-                coverageInterval,
-              };
-            });
-
-            await upsertStreetProgress(userId, streetProgressInput);
-            streetsCovered = streetProgressInput.length;
-            streetsCompleted = streetProgressInput.filter(
-              (s) => s.isComplete
-            ).length;
-          }
-        }
-      }
-    }
+  try {
+    const runDate = startDate ?? new Date();
+    const result = await processActivityV2(userId, coordinates, runDate);
+    console.log(
+      `[Processor] Standalone v2: ${result.nodesHit} nodes hit for activity ${activityId}`
+    );
+  } catch (v2Error) {
+    console.warn(
+      `[Processor] V2 pipeline failed for activity ${activityId}:`,
+      v2Error instanceof Error ? v2Error.message : v2Error
+    );
   }
 
-  if (ENGINE.VERSION === "v2" || ENGINE.VERSION === "both") {
-    try {
-      const runDate = startDate ?? new Date();
-      const result = await processActivityV2(userId, coordinates, runDate);
-      console.log(
-        `[Processor] Standalone v2: ${result.nodesHit} nodes hit for activity ${activityId}`
-      );
-    } catch (v2Error) {
-      console.warn(
-        `[Processor] V2 pipeline failed for activity ${activityId}:`,
-        v2Error instanceof Error ? v2Error.message : v2Error
-      );
-    }
-  }
-
-  return { streetsCovered, streetsCompleted };
+  return { streetsCovered: 0, streetsCompleted: 0 };
 }
 
 // ============================================
@@ -379,7 +220,7 @@ export async function processActivity(
     if (!activity) {
       throw new ActivityNotFoundError(activityId);
     }
-    const coordinates = activity.coordinates as GpxPoint[];
+    const coordinates = activity.coordinates as unknown as GpxPoint[];
 
     if (coordinates.length === 0) {
       console.log(`[Processor] Activity ${activityId} has no coordinates`);
@@ -503,10 +344,10 @@ export async function recheckActivityForNewProjects(
     where: { id: activityId },
     select: { coordinates: true, startDate: true },
   });
-  if (!activity || !activity.coordinates?.length) {
+  const coordinates = activity?.coordinates as unknown as GpxPoint[] | undefined;
+  if (!activity || !coordinates?.length) {
     return 0;
   }
-  const coordinates = activity.coordinates as GpxPoint[];
 
   const overlappingProjects = await detectOverlappingProjects(
     userId,
@@ -551,16 +392,8 @@ export async function recheckActivityForNewProjects(
 // ============================================
 
 /**
- * Process a single project overlap
- *
- * When ENGINE.VERSION is v1: Gets snapshot, queries geometries, matches GPS to streets,
- * calculates coverage, updates project progress and UserStreetProgress, saves ProjectActivity.
- *
- * When ENGINE.VERSION is v2: Runs processActivityV2 first (persist UserNodeHit), then
- * deriveProjectProgressV2 to get percentages from UserNodeHit + WayNode; updates
- * project progress and UserStreetProgress from that; saves ProjectActivity. No Overpass/Mapbox.
- *
- * When ENGINE.VERSION is both: Same as v1, then also runs processActivityV2 for UserNodeHit.
+ * Process a single project overlap (V2): persist node hits, derive scoped progress,
+ * update project and user-level street progress, save ProjectActivity.
  */
 async function processProjectOverlap(
   activityId: string,
@@ -574,14 +407,10 @@ async function processProjectOverlap(
     `[Processor] Processing project "${project.name}" (${project.id})`
   );
 
-  // Step 1: Get the project's current snapshot and createdAt (for scoped progress)
   const projectData = await prisma.project.findUnique({
     where: { id: project.id },
     select: {
       streetsSnapshot: true,
-      centerLat: true,
-      centerLng: true,
-      radiusMeters: true,
       createdAt: true,
     },
   });
@@ -590,393 +419,72 @@ async function processProjectOverlap(
     throw new Error(`Project ${project.id} not found`);
   }
 
-  const snapshot = projectData.streetsSnapshot as StreetSnapshot;
+  const snapshot = projectData.streetsSnapshot as unknown as StreetSnapshot;
   const snapshotByOsmId = new Map(snapshot.streets.map((s) => [s.osmId, s]));
 
-  // When ENGINE.VERSION is v2, use V2 pipeline only: persist node hits then derive progress from UserNodeHit + WayNode (scoped to hits after project creation).
-  if (ENGINE.VERSION === "v2") {
-    const runDate = startDate ?? new Date();
-    await processActivityV2(userId, coordinates, runDate);
+  const runDate = startDate ?? new Date();
+  await processActivityV2(userId, coordinates, runDate);
 
-    const v2Results = await deriveProjectProgressV2Scoped(
-      userId,
-      snapshot.streets,
-      projectData.createdAt,
-    );
-    const streetUpdates = v2Results.map((r) => ({
-      osmId: r.osmId,
-      percentage: r.percentage,
-      lastRunDate: new Date().toISOString(),
-    }));
-
-    if (streetUpdates.length > 0) {
-      await updateProjectProgress(project.id, streetUpdates);
-      console.log(
-        `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}" (V2)`
-      );
-    }
-
-    const completed: string[] = [];
-    const improved: Array<{ osmId: string; from: number; to: number }> = [];
-    for (const r of v2Results) {
-      const old = snapshotByOsmId.get(r.osmId);
-      if (r.isComplete && old && !old.completed) completed.push(r.osmId);
-      if (old && r.percentage > old.percentage)
-        improved.push({
-          osmId: r.osmId,
-          from: old.percentage,
-          to: r.percentage,
-        });
-    }
-    const impact: ActivityImpact = { completed, improved };
-
-    const streetProgressInput = v2Results
-      .map((r) => {
-        const snap = snapshotByOsmId.get(r.osmId);
-        if (!snap) return null;
-        return {
-          osmId: r.osmId,
-          name: snap.name,
-          highwayType: snap.highwayType,
-          lengthMeters: snap.lengthMeters,
-          percentage: r.percentage,
-          isComplete: r.isComplete,
-        };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null);
-    if (streetProgressInput.length > 0)
-      await upsertStreetProgress(userId, streetProgressInput);
-
-    await saveProjectActivity(project.id, activityId, impact);
-
-    return {
-      projectId: project.id,
-      projectName: project.name,
-      pointsInProject: overlap.pointsInsideCount,
-      streetsCovered: impact.improved.length,
-      streetsCompleted: impact.completed.length,
-      streetsImproved: impact.improved.length,
-      impact,
-    };
-  }
-
-  // V1 or both: use V1 matching (geometries, match, aggregate, calculate impact)
-  // Step 2: Get street geometries (for matching)
-  const geometries = await getStreetGeometries(
-    projectData.centerLat,
-    projectData.centerLng,
-    projectData.radiusMeters
+  const v2Results = await deriveProjectProgressV2Scoped(
+    userId,
+    snapshot.streets,
+    projectData.createdAt,
   );
+  const streetUpdates = v2Results.map((r) => ({
+    osmId: r.osmId,
+    percentage: r.percentage,
+    lastRunDate: new Date().toISOString(),
+  }));
 
-  // Step 3: Match GPS points to streets
-  const matchedStreets = await matchPointsToStreetsHybrid(
-    coordinates,
-    geometries
-  );
-  console.log(
-    `[Processor] Matched ${matchedStreets.length} streets for project "${project.name}"`
-  );
-
-  // Step 4: Aggregate matched streets (combine segments)
-  const aggregated = aggregateSegmentsIntoLogicalStreets(matchedStreets);
-
-  // Step 5: Calculate coverage and impact
-  const { coverages, impact } = calculateRouteImpact(
-    snapshot,
-    aggregated.streets,
-    matchedStreets
-  );
-
-  // Step 6: Update project progress
-  if (coverages.length > 0) {
-    const streetUpdates = coverages.map((c) => ({
-      osmId: c.osmId,
-      percentage: c.percentage,
-      lastRunDate: new Date().toISOString(),
-    }));
-
+  if (streetUpdates.length > 0) {
     await updateProjectProgress(project.id, streetUpdates);
     console.log(
-      `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}"`
+      `[Processor] Updated ${streetUpdates.length} streets in project "${project.name}" (V2)`
     );
-    // Step 6a: Update user-level street progress (for map feature)
-    const streetProgressInput = coverages
-      .map((c) => {
-        const snap = snapshotByOsmId.get(c.osmId);
-        if (!snap) return null;
-        return {
-          osmId: c.osmId,
-          name: snap.name,
-          highwayType: snap.highwayType,
-          lengthMeters: snap.lengthMeters,
-          percentage: c.percentage,
-          isComplete: c.isComplete,
-        };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null);
+  }
+
+  const completed: string[] = [];
+  const improved: Array<{ osmId: string; from: number; to: number }> = [];
+  for (const r of v2Results) {
+    const old = snapshotByOsmId.get(r.osmId);
+    if (r.isComplete && old && !old.completed) completed.push(r.osmId);
+    if (old && r.percentage > old.percentage)
+      improved.push({
+        osmId: r.osmId,
+        from: old.percentage,
+        to: r.percentage,
+      });
+  }
+  const impact: ActivityImpact = { completed, improved };
+
+  const streetProgressInput = v2Results
+    .map((r) => {
+      const snap = snapshotByOsmId.get(r.osmId);
+      if (!snap) return null;
+      return {
+        osmId: r.osmId,
+        name: snap.name,
+        highwayType: snap.highwayType,
+        lengthMeters: snap.lengthMeters,
+        percentage: r.percentage,
+        isComplete: r.isComplete,
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+  if (streetProgressInput.length > 0)
     await upsertStreetProgress(userId, streetProgressInput);
-  }
 
-  // Step 7: Save project-activity relationship
   await saveProjectActivity(project.id, activityId, impact);
-
-  if (ENGINE.VERSION === "both") {
-    try {
-      const runDate = startDate ?? new Date();
-      await processActivityV2(userId, coordinates, runDate);
-    } catch (v2Error) {
-      console.warn(
-        `[Processor] V2 pipeline failed for activity ${activityId} (project ${project.name}):`,
-        v2Error instanceof Error ? v2Error.message : v2Error
-      );
-    }
-  }
 
   return {
     projectId: project.id,
     projectName: project.name,
     pointsInProject: overlap.pointsInsideCount,
-    streetsCovered: coverages.length,
+    streetsCovered: impact.improved.length,
     streetsCompleted: impact.completed.length,
     streetsImproved: impact.improved.length,
     impact,
   };
-}
-
-// ============================================
-// Street Geometry Fetching
-// ============================================
-
-/**
- * Get street geometries for a route area from PostGIS (synced city data).
- */
-async function getStreetGeometries(
-  centerLat: number,
-  centerLng: number,
-  radiusMeters: number
-): Promise<OsmStreet[]> {
-  await ensureCitySynced(centerLat, centerLng);
-  return getLocalStreetsInRadius(centerLat, centerLng, radiusMeters);
-}
-
-// ============================================
-// Coverage Calculation
-// ============================================
-
-/**
- * Calculate impact of activity on route streets
- *
- * Compares matched streets from the activity with the route's snapshot
- * to determine which streets were affected and how.
- *
- * MATCHING ALGORITHM:
- * -------------------
- * For each matched street from the activity, we find the corresponding
- * street in the route snapshot by:
- * 1. Exact OSM ID match (preferred)
- * 2. Normalized name match (for cross-source matching)
- *
- * COVERAGE CALCULATION:
- * ---------------------
- * Coverage percentage = (distance covered / total length) × 100
- * - Uses geometry-based coverage when available (more accurate)
- * - Clamps to 100% maximum
- * - 90%+ is considered "completed"
- *
- * @param snapshot - Route's current street snapshot
- * @param aggregatedStreets - Aggregated matched streets
- * @param rawMatchedStreets - Raw matched streets (for OSM ID lookup)
- * @returns Coverage results and impact details
- */
-function calculateRouteImpact(
-  snapshot: StreetSnapshot,
-  aggregatedStreets: Array<{
-    name: string;
-    normalizedName: string;
-    coverageRatio: number;
-    segmentOsmIds: string[];
-  }>,
-  rawMatchedStreets: MatchedStreet[]
-): { coverages: StreetCoverage[]; impact: ActivityImpact } {
-  const coverages: StreetCoverage[] = [];
-  const completed: string[] = [];
-  const improved: Array<{ osmId: string; from: number; to: number }> = [];
-
-  // Build lookup maps for efficient matching
-  // Map: osmId -> MatchedStreet (for raw matches)
-  const rawByOsmId = new Map(rawMatchedStreets.map((s) => [s.osmId, s]));
-
-  // Map: normalizedName -> MatchedStreet[] (for grouping segments by name)
-  const rawByName = groupRawMatchesByName(rawMatchedStreets);
-
-  // Map: normalizedName -> aggregated street
-  const aggregatedByName = new Map(
-    aggregatedStreets.map((s) => [s.normalizedName, s])
-  );
-
-  // Process each street in the snapshot
-  for (const snapshotStreet of snapshot.streets) {
-    // Try to find matching activity coverage
-    const coverage = findMatchingCoverage(
-      snapshotStreet,
-      rawByOsmId,
-      rawByName,
-      aggregatedByName,
-      rawMatchedStreets
-    );
-
-    if (coverage === null) {
-      // Street not covered by this activity
-      continue;
-    }
-
-    // Calculate new percentage (0-100)
-    const newPercentage = Math.min(Math.round(coverage.ratio * 100), 100);
-    const oldPercentage = snapshotStreet.percentage;
-
-    // Use length-based threshold for completion determination
-    const threshold = getCompletionThreshold(snapshotStreet.lengthMeters);
-    const thresholdPercentage = Math.round(threshold * 100);
-
-    // Only update if coverage increased (MAX rule)
-    const wasInRun = rawByOsmId.has(snapshotStreet.osmId);
-
-    if (newPercentage > oldPercentage) {
-      coverages.push({
-        osmId: snapshotStreet.osmId,
-        percentage: newPercentage,
-        isComplete: newPercentage >= thresholdPercentage,
-      });
-
-      // Only count toward run impact (completed/improved) if this street was actually in the run (OSM ID match). Name-matched segments would otherwise inflate the count (e.g. 35 segments named "High Street" all getting the same ratio).
-      if (wasInRun) {
-        improved.push({
-          osmId: snapshotStreet.osmId,
-          from: oldPercentage,
-          to: newPercentage,
-        });
-        if (
-          newPercentage >= thresholdPercentage &&
-          oldPercentage < thresholdPercentage
-        ) {
-          completed.push(snapshotStreet.osmId);
-        }
-      }
-    } else if (
-      newPercentage >= thresholdPercentage &&
-      oldPercentage >= thresholdPercentage
-    ) {
-      // Already complete, still count as coverage but no improvement
-      coverages.push({
-        osmId: snapshotStreet.osmId,
-        percentage: oldPercentage, // Keep existing
-        isComplete: true,
-      });
-    }
-  }
-
-  return {
-    coverages,
-    impact: { completed, improved },
-  };
-}
-
-/**
- * Group raw matched streets by normalized name
- *
- * Used to aggregate multiple OSM segments (ways) that share the same street name.
- *
- * @param rawMatchedStreets - Array of matched streets
- * @returns Map of normalized name -> MatchedStreet[]
- */
-function groupRawMatchesByName(
-  rawMatchedStreets: MatchedStreet[]
-): Map<string, MatchedStreet[]> {
-  const grouped = new Map<string, MatchedStreet[]>();
-
-  for (const street of rawMatchedStreets) {
-    const normalized = normalizeStreetNameForMatching(street.name);
-    if (!grouped.has(normalized)) {
-      grouped.set(normalized, []);
-    }
-    grouped.get(normalized)!.push(street);
-  }
-
-  return grouped;
-}
-
-/**
- * Find matching coverage from activity for a snapshot street
- *
- * Tries multiple matching strategies:
- * 1. Direct OSM ID match in raw matched streets (most accurate)
- * 2. Normalized name match in aggregated streets
- * 3. Grouped name match: find all raw segments with same name, calculate weighted coverage
- * 4. Fuzzy name match against all matched streets
- *
- * @param snapshotStreet - Street from route snapshot
- * @param rawByOsmId - Map of OSM ID -> MatchedStreet
- * @param rawByName - Map of normalized name -> MatchedStreet[] (for segment aggregation)
- * @param aggregatedByName - Map of normalized name -> aggregated street
- * @param rawMatchedStreets - All raw matched streets (for fuzzy matching)
- * @returns Coverage ratio or null if not covered
- */
-function findMatchingCoverage(
-  snapshotStreet: SnapshotStreet,
-  rawByOsmId: Map<string, MatchedStreet>,
-  rawByName: Map<string, MatchedStreet[]>,
-  aggregatedByName: Map<
-    string,
-    { coverageRatio: number; segmentOsmIds: string[] }
-  >,
-  rawMatchedStreets: MatchedStreet[]
-): { ratio: number } | null {
-  // Strategy 1: Direct OSM ID match (most accurate)
-  const rawMatch = rawByOsmId.get(snapshotStreet.osmId);
-  if (rawMatch) {
-    // Use geometry coverage if available (more accurate)
-    const ratio = rawMatch.geometryCoverageRatio ?? rawMatch.coverageRatio;
-    return { ratio };
-  }
-
-  // Strategy 2: Normalized name match in aggregated streets
-  const normalizedName = normalizeStreetNameForMatching(snapshotStreet.name);
-  const aggregatedMatch = aggregatedByName.get(normalizedName);
-  if (aggregatedMatch) {
-    return { ratio: aggregatedMatch.coverageRatio };
-  }
-
-  // Strategy 3: Grouped name match - find all raw segments with same name
-  // This handles cases where Mapbox matched different OSM segments than the snapshot
-  const nameMatches = rawByName.get(normalizedName);
-  if (nameMatches && nameMatches.length > 0) {
-    // Calculate length-weighted average coverage across all segments
-    const totalLength = nameMatches.reduce((sum, s) => sum + s.lengthMeters, 0);
-    if (totalLength > 0) {
-      const weightedCoverage = nameMatches.reduce((sum, s) => {
-        const ratio = s.geometryCoverageRatio ?? s.coverageRatio;
-        return sum + ratio * s.lengthMeters;
-      }, 0);
-      const ratio = weightedCoverage / totalLength;
-      console.log(
-        `[Coverage] Name match for "${snapshotStreet.name}" (${
-          nameMatches.length
-        } segments): ${(ratio * 100).toFixed(1)}%`
-      );
-      return { ratio };
-    }
-  }
-
-  // Strategy 4: Fuzzy name match
-  for (const matched of rawMatchedStreets) {
-    if (streetNamesMatch(snapshotStreet.name, matched.name)) {
-      const ratio = matched.geometryCoverageRatio ?? matched.coverageRatio;
-      return { ratio };
-    }
-  }
-
-  // No match found
-  return null;
 }
 
 // ============================================
@@ -1044,6 +552,7 @@ export async function reprocessProjectActivities(
     select: {
       id: true,
       coordinates: true,
+      startDate: true,
     },
     orderBy: {
       startDate: "asc",
@@ -1073,9 +582,17 @@ export async function reprocessProjectActivities(
   let processed = 0;
 
   for (const activity of activities) {
-    const coordinates = activity.coordinates as GpxPoint[];
+    const coordinates = activity.coordinates as unknown as GpxPoint[];
 
     if (!coordinates || coordinates.length === 0) {
+      continue;
+    }
+
+    if (
+      project.centerLat == null ||
+      project.centerLng == null ||
+      project.radiusMeters == null
+    ) {
       continue;
     }
 
@@ -1104,7 +621,8 @@ export async function reprocessProjectActivities(
           activity.id,
           userId,
           mockOverlap,
-          coordinates
+          coordinates,
+          activity.startDate
         );
         processed++;
       } catch (error) {
@@ -1136,7 +654,7 @@ async function resetProjectProgress(projectId: string): Promise<void> {
 
   if (!project) return;
 
-  const snapshot = project.streetsSnapshot as StreetSnapshot;
+  const snapshot = project.streetsSnapshot as unknown as StreetSnapshot;
 
   for (const street of snapshot.streets) {
     street.completed = false;

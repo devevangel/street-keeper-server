@@ -42,6 +42,7 @@
 
 import prisma from "../lib/prisma.js";
 import { STRAVA_WEBHOOK, ERROR_CODES } from "../config/constants.js";
+import { softDeleteActivityByStravaId } from "./activity.service.js";
 import {
   addActivityProcessingJob,
   isActivityJobQueued,
@@ -156,11 +157,25 @@ export async function handleWebhookEvent(
   );
 
   // Step 1: Validate event type
-  // We only care about activity creates
-  if (!isEventSupported(payload)) {
+  if (!isActivityWebhookSupported(payload)) {
     const reason = `unsupported_event:${payload.object_type}/${payload.aspect_type}`;
     console.log(`[Webhook] Skipping: ${reason}`);
     return { action: "skipped", reason };
+  }
+
+  // Delete: soft-delete in DB only (no queue; fast)
+  if (payload.aspect_type === "delete") {
+    const { deleted } = await softDeleteActivityByStravaId(
+      String(payload.object_id),
+      payload.owner_id
+    );
+    console.log(
+      `[Webhook] Delete activity ${payload.object_id}: ${deleted ? "marked deleted" : "not found"}`
+    );
+    return {
+      action: "skipped",
+      reason: deleted ? "activity_soft_deleted" : "activity_not_found",
+    };
   }
 
   // Step 2: Find user by Strava athlete ID
@@ -214,16 +229,16 @@ export async function handleWebhookEvent(
 }
 
 /**
- * Check if event type is supported
- * 
- * We only process:
- * - object_type: "activity" (not "athlete")
- * - aspect_type: "create" (not "update" or "delete")
+ * Activity events: create and update are queued for processing; delete handled above.
  */
-function isEventSupported(payload: StravaWebhookPayload): boolean {
+function isActivityWebhookSupported(payload: StravaWebhookPayload): boolean {
+  if (payload.object_type !== STRAVA_WEBHOOK.SUPPORTED_EVENTS.OBJECT_TYPE) {
+    return false;
+  }
   return (
-    payload.object_type === STRAVA_WEBHOOK.SUPPORTED_EVENTS.OBJECT_TYPE &&
-    payload.aspect_type === STRAVA_WEBHOOK.SUPPORTED_EVENTS.ASPECT_TYPE
+    payload.aspect_type === "create" ||
+    payload.aspect_type === "update" ||
+    payload.aspect_type === "delete"
   );
 }
 

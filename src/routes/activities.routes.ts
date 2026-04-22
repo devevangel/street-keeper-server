@@ -43,6 +43,7 @@ import {
 import {
   syncRecentActivities,
   startBackgroundSync,
+  checkGapFillNeeded,
   SyncError,
 } from "../services/sync.service.js";
 import { ERROR_CODES } from "../config/constants.js";
@@ -113,21 +114,33 @@ router.get("/sync/status", async (req: Request, res: Response) => {
   const userId = req.user!.id;
 
   try {
-    const job = await prisma.syncJob.findFirst({
-      where: { userId },
-      orderBy: { startedAt: "desc" },
-      select: {
-        id: true,
-        status: true,
-        type: true,
-        total: true,
-        processed: true,
-        skipped: true,
-        errors: true,
-        lastErrorMessage: true,
-        updatedAt: true,
-      },
-    });
+    const [job, lastCompleted, latestActivity] = await Promise.all([
+      prisma.syncJob.findFirst({
+        where: { userId },
+        orderBy: { startedAt: "desc" },
+        select: {
+          id: true,
+          status: true,
+          type: true,
+          total: true,
+          processed: true,
+          skipped: true,
+          errors: true,
+          lastErrorMessage: true,
+          updatedAt: true,
+        },
+      }),
+      prisma.syncJob.findFirst({
+        where: { userId, status: "completed" },
+        orderBy: { completedAt: "desc" },
+        select: { completedAt: true },
+      }),
+      prisma.activity.findFirst({
+        where: { userId, isDeleted: false },
+        orderBy: { startDate: "desc" },
+        select: { startDate: true, name: true, stravaId: true },
+      }),
+    ]);
 
     if (!job) {
       res.status(200).json({
@@ -140,6 +153,9 @@ router.get("/sync/status", async (req: Request, res: Response) => {
         errors: 0,
         lastErrorMessage: null,
         updatedAt: null,
+        lastCompletedAt: lastCompleted?.completedAt?.toISOString() ?? null,
+        latestStoredActivityStartDate: latestActivity?.startDate.toISOString() ?? null,
+        latestStoredActivityName: latestActivity?.name ?? null,
       });
       return;
     }
@@ -154,6 +170,9 @@ router.get("/sync/status", async (req: Request, res: Response) => {
       errors: job.errors,
       lastErrorMessage: job.lastErrorMessage,
       updatedAt: job.updatedAt.toISOString(),
+      lastCompletedAt: lastCompleted?.completedAt?.toISOString() ?? null,
+      latestStoredActivityStartDate: latestActivity?.startDate.toISOString() ?? null,
+      latestStoredActivityName: latestActivity?.name ?? null,
     });
   } catch (err) {
     console.error("[Activities] GET /sync/status error:", err);
@@ -162,6 +181,21 @@ router.get("/sync/status", async (req: Request, res: Response) => {
       error: "Internal server error",
       code: ERROR_CODES.INTERNAL_ERROR,
     });
+  }
+});
+
+// ============================================
+// Gap-fill: Strava has newer activity than we stored (optional silent sync)
+// ============================================
+
+router.get("/sync/gap-check", async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  try {
+    const { needsBackgroundSync } = await checkGapFillNeeded(userId);
+    res.status(200).json({ needsBackgroundSync });
+  } catch (err) {
+    console.error("[Activities] GET /sync/gap-check error:", err);
+    res.status(200).json({ needsBackgroundSync: false });
   }
 });
 
@@ -238,6 +272,7 @@ router.post("/sync", async (req: Request, res: Response) => {
   const userId = req.user!.id;
   const background = req.query.background === "true";
   const force = req.query.force === "true";
+  const bypassCooldown = req.query.bypassCooldown === "true";
 
   if (force) {
     const resetResult = await prisma.activity.updateMany({
@@ -290,6 +325,7 @@ router.post("/sync", async (req: Request, res: Response) => {
       const result = await startBackgroundSync(userId, {
         after: after ?? undefined,
         before: before ?? undefined,
+        bypassCooldown,
       });
       res.status(200).json({
         success: true,

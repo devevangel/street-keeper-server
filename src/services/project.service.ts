@@ -613,9 +613,8 @@ export async function createProject(
   );
 
   if (includePreviousRuns) {
-    const BACKFILL_TIMEOUT_MS = 10_000;
-    try {
-      const backfillPromise = (async () => {
+    void (async () => {
+      try {
         const v2Results = await deriveProjectProgressV2Scoped(
           userId,
           snapshot.streets.map((s) => ({
@@ -637,20 +636,13 @@ export async function createProject(
         await updateProjectProgress(project.id, streetUpdates, {
           forceUpdate: true,
         });
-      })();
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("Backfill timeout")),
-          BACKFILL_TIMEOUT_MS
-        )
-      );
-      await Promise.race([backfillPromise, timeoutPromise]);
-    } catch (err) {
-      console.warn(
-        `[Project] Include previous runs backfill failed or timed out for project ${project.id}:`,
-        err instanceof Error ? err.message : err
-      );
-    }
+      } catch (err) {
+        console.warn(
+          `[Project] Include previous runs backfill failed for project ${project.id}:`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    })();
   }
 
   const finalProject = await prisma.project.findUnique({

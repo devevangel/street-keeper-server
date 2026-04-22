@@ -4,6 +4,7 @@
  */
 
 import prisma from "../lib/prisma.js";
+import { startBackgroundSync } from "./sync.service.js";
 import {
   exchangeCodeForTokens,
   refreshAccessToken,
@@ -31,6 +32,15 @@ export async function handleStravaCallback(
 
   // Find or create user (persist granted scopes for feature gating)
   const user = await findOrCreateStravaUser(userData, grantedScopes);
+
+  const activityCount = await prisma.activity.count({
+    where: { userId: user.id, isDeleted: false },
+  });
+  if (activityCount === 0) {
+    startBackgroundSync(user.id, { bypassCooldown: true }).catch((e) =>
+      console.error("[Auth] First-login background sync failed:", e),
+    );
+  }
 
   return {
     id: user.id,

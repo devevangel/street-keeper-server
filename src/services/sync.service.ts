@@ -119,6 +119,14 @@ async function processOneActivity(
 
   const existing = await getActivityByStravaId(stravaId);
   if (existing) {
+    if (existing.isDeleted) {
+      await prisma.activity.update({
+        where: { id: existing.id },
+        data: { isDeleted: false },
+      });
+      await processActivity(existing.id, userId);
+      return { status: "processed" };
+    }
     if (!existing.isProcessed) {
       console.log(`[Sync] Activity ${stravaId} exists in DB but unprocessed — processing now`);
       await processActivity(existing.id, userId);
@@ -281,7 +289,7 @@ export async function syncRecentActivities(
   // This catches activities older than the Strava time window or beyond the page size
   // (e.g. after running reset:everything).
   const unprocessed = await prisma.activity.findMany({
-    where: { userId, isProcessed: false },
+    where: { userId, isProcessed: false, isDeleted: false },
     select: { id: true, stravaId: true, startDate: true },
     orderBy: { startDate: "asc" },
   });
@@ -320,6 +328,8 @@ export async function syncRecentActivities(
 
 const INTER_ACTIVITY_DELAY_MS = 300;
 const TOKEN_REFRESH_INTERVAL = 10;
+/** Parallel Strava fetches per batch (stay under rate limits). */
+const SYNC_CONCURRENCY = 3;
 /** Queued jobs older than this are considered stale (worker never picked up). */
 const QUEUED_STALE_MS = 2 * 60 * 1000;
 
@@ -367,31 +377,40 @@ const SYNC_COOLDOWN_MS =
   60 *
   1000;
 
+export interface StartBackgroundSyncOptions {
+  after?: number;
+  before?: number;
+  /** Skip 24h cooldown (first signup / explicit admin). */
+  bypassCooldown?: boolean;
+}
+
 /**
  * Start a background sync: fetch activity list with pagination, create SyncJob, enqueue.
  * Returns immediately. Duplicate guard: if user already has queued/running job, returns that job.
  * Stale guard: queued jobs older than QUEUED_STALE_MS are marked failed and a new job is created.
- * Rate limit: only one successful sync per SYNC_COOLDOWN_HOURS (default 24); otherwise throws SYNC_RATE_LIMITED with nextSyncAt.
+ * Rate limit: only one successful sync per SYNC_COOLDOWN_HOURS (default 24); otherwise throws SYNC_RATE_LIMITED with nextSyncAt (unless bypassCooldown).
  */
 export async function startBackgroundSync(
   userId: string,
-  options?: { after?: number; before?: number }
+  options?: StartBackgroundSyncOptions
 ): Promise<StartBackgroundSyncResult> {
-  const lastCompleted = await prisma.syncJob.findFirst({
-    where: { userId, status: "completed" },
-    orderBy: { completedAt: "desc" },
-    select: { completedAt: true },
-  });
-  if (lastCompleted?.completedAt) {
-    const nextSyncAt = new Date(
-      lastCompleted.completedAt.getTime() + SYNC_COOLDOWN_MS
-    );
-    if (Date.now() < nextSyncAt.getTime()) {
-      throw new SyncError(
-        "Strava can only be synced once per day. Try again later.",
-        "SYNC_RATE_LIMITED",
-        nextSyncAt
+  if (!options?.bypassCooldown) {
+    const lastCompleted = await prisma.syncJob.findFirst({
+      where: { userId, status: "completed" },
+      orderBy: { completedAt: "desc" },
+      select: { completedAt: true },
+    });
+    if (lastCompleted?.completedAt) {
+      const nextSyncAt = new Date(
+        lastCompleted.completedAt.getTime() + SYNC_COOLDOWN_MS
       );
+      if (Date.now() < nextSyncAt.getTime()) {
+        throw new SyncError(
+          "Strava can only be synced once per day. Try again later.",
+          "SYNC_RATE_LIMITED",
+          nextSyncAt
+        );
+      }
     }
   }
 
@@ -441,6 +460,7 @@ export async function startBackgroundSync(
   );
   const summaries = await fetchAllActivitySummaries(accessToken, after, before);
   const total = summaries.length;
+  const stravaActivityIds = summaries.map((s) => s.id);
   console.log(`[Sync] Found ${total} activities from Strava`);
 
   const job = await prisma.syncJob.create({
@@ -449,6 +469,7 @@ export async function startBackgroundSync(
       status: "queued",
       type: "initial",
       total,
+      stravaActivityIds,
       after,
       before: before ?? null,
     },
@@ -503,13 +524,29 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
     job.before ?? undefined
   );
 
+  const storedIds = job.stravaActivityIds as number[] | null;
+  const idList: number[] =
+    storedIds && storedIds.length > 0
+      ? storedIds
+      : summaries.map((s) => s.id);
+
   let processed = job.processed;
   let skipped = job.skipped;
   let errors = job.errors;
   let lastErrorMessage: string | null = job.lastErrorMessage;
 
-  for (let i = job.processed; i < summaries.length; i++) {
-    if (i > 0 && i % TOKEN_REFRESH_INTERVAL === 0) {
+  /** Next index into idList: total activities already attempted (success + skip + error). */
+  let activityIndex = job.processed + job.skipped + job.errors;
+  let handledCount = activityIndex;
+
+  while (activityIndex < idList.length) {
+    const batchEnd = Math.min(
+      activityIndex + SYNC_CONCURRENCY,
+      idList.length,
+    );
+    const batch = idList.slice(activityIndex, batchEnd);
+
+    if (handledCount > 0 && handledCount % TOKEN_REFRESH_INTERVAL === 0) {
       try {
         accessToken = await getValidAccessToken(userId);
       } catch {
@@ -517,9 +554,13 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
       }
     }
 
-    const stravaId = String(summaries[i].id);
-    try {
-      const one = await processOneActivity(userId, stravaId, accessToken);
+    const outcomes = await Promise.all(
+      batch.map((sid) =>
+        processOneActivity(userId, String(sid), accessToken),
+      ),
+    );
+
+    for (const one of outcomes) {
       switch (one.status) {
         case "synced":
         case "processed":
@@ -533,10 +574,10 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
           lastErrorMessage = one.reason;
           break;
       }
-    } catch (err) {
-      errors += 1;
-      lastErrorMessage = err instanceof Error ? err.message : String(err);
+      handledCount += 1;
     }
+
+    activityIndex = batchEnd;
 
     await prisma.syncJob.update({
       where: { id: syncJobId },
@@ -549,7 +590,7 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
       },
     });
 
-    if (i < summaries.length - 1) {
+    if (activityIndex < idList.length) {
       await new Promise((r) => setTimeout(r, INTER_ACTIVITY_DELAY_MS));
     }
   }
@@ -562,6 +603,32 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
       updatedAt: new Date(),
     },
   });
+}
+
+/**
+ * True if Strava's newest activity is missing locally (e.g. webhook missed while server slept).
+ */
+export async function checkGapFillNeeded(userId: string): Promise<{
+  needsBackgroundSync: boolean;
+}> {
+  try {
+    const accessToken = await getValidAccessToken(userId);
+    const recent = await listAthleteActivities(accessToken, {
+      page: 1,
+      perPage: 1,
+    });
+    if (recent.length === 0) return { needsBackgroundSync: false };
+    const latestStravaId = String(recent[0].id);
+    const existing = await prisma.activity.findFirst({
+      where: { userId, stravaId: latestStravaId, isDeleted: false },
+      select: { id: true },
+    });
+    if (!existing) return { needsBackgroundSync: true };
+    return { needsBackgroundSync: false };
+  } catch (e) {
+    console.warn("[Sync] gap-check failed:", e);
+    return { needsBackgroundSync: false };
+  }
 }
 
 // ============================================

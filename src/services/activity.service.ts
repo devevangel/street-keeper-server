@@ -216,7 +216,7 @@ export async function listActivities(
 
   const [activities, total] = await Promise.all([
     prisma.activity.findMany({
-      where: { userId },
+      where: { userId, isDeleted: false },
       orderBy: { startDate: "desc" },
       skip,
       take: pageSize,
@@ -229,7 +229,7 @@ export async function listActivities(
         },
       },
     }),
-    prisma.activity.count({ where: { userId } }),
+    prisma.activity.count({ where: { userId, isDeleted: false } }),
   ]);
 
   const activityList: ActivityListItem[] = activities.map((a) => ({
@@ -430,13 +430,32 @@ export async function deleteActivity(
  */
 export async function getActivityByStravaId(
   stravaId: string
-): Promise<{ id: string; isProcessed: boolean } | null> {
+): Promise<{ id: string; isProcessed: boolean; isDeleted: boolean } | null> {
   const activity = await prisma.activity.findUnique({
     where: { stravaId },
-    select: { id: true, isProcessed: true },
+    select: { id: true, isProcessed: true, isDeleted: true },
   });
 
   return activity;
+}
+
+/**
+ * Strava webhook delete: hide activity without removing UserNodeHit rows.
+ */
+export async function softDeleteActivityByStravaId(
+  stravaId: string,
+  stravaOwnerAthleteId: number
+): Promise<{ deleted: boolean }> {
+  const user = await prisma.user.findFirst({
+    where: { stravaId: String(stravaOwnerAthleteId) },
+    select: { id: true },
+  });
+  if (!user) return { deleted: false };
+  const r = await prisma.activity.updateMany({
+    where: { userId: user.id, stravaId },
+    data: { isDeleted: true },
+  });
+  return { deleted: r.count > 0 };
 }
 
 /**

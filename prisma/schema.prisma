@@ -56,6 +56,8 @@ model SyncJob {
   skipped          Int       @default(0)
   errors           Int       @default(0)
   lastErrorMessage String?
+  /** Strava numeric activity IDs in stable order (crash-safe resume; avoids re-fetch order drift). */
+  stravaActivityIds Json?
   /** Unix timestamp (seconds) - fetch activities after this time. Used by worker to re-fetch list. */
   after            Int?
   /** Unix timestamp (seconds) - fetch activities before this time. */
@@ -146,6 +148,9 @@ model Activity {
   isProcessed Boolean   @default(false)
   processedAt DateTime?
 
+  /** Soft-delete when Strava sends delete webhook; keep row so we do not purge UserNodeHit. */
+  isDeleted Boolean @default(false)
+
   createdAt DateTime @default(now())
 
   // Relations
@@ -154,6 +159,7 @@ model Activity {
   @@index([userId])
   @@index([stravaId])
   @@index([userId, startDate])
+  @@index([userId, isDeleted])
 }
 
 // ============================================
