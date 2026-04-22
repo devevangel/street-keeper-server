@@ -58,7 +58,7 @@ import type {
   CompletionBins,
 } from "../types/project.types.js";
 import type { GpxPoint } from "../types/run.types.js";
-import { deriveProjectProgressV2Scoped } from "../engines/v2/street-completion.js";
+import { deriveProjectProgressV2Scoped, osmIdToWayId, deriveStreetCompletionForArea } from "../engines/v2/street-completion.js";
 import { normalizeStreetName } from "../utils/normalize-street-name.js";
 import { isUnnamedStreet } from "../engines/v1/street-aggregation.js";
 import { STREET_AGGREGATION } from "../config/constants.js";
@@ -216,12 +216,14 @@ export async function previewProject(
     const allOsmIds = filteredStreets.map((s) => s.osmId);
     const progressMap = new Map<string, number>();
     if (userId && allOsmIds.length > 0) {
-      const progressRows = await prisma.userStreetProgress.findMany({
-        where: { userId, osmId: { in: allOsmIds } },
-        select: { osmId: true, percentage: true },
-      });
-      for (const r of progressRows) {
-        progressMap.set(r.osmId, r.percentage ?? 0);
+      const wayIds = allOsmIds.map((id) => osmIdToWayId(id));
+      const completion = await deriveStreetCompletionForArea(userId, wayIds);
+      for (const c of completion) {
+        const osmId = `way/${String(c.wayId)}`;
+        const pct = c.edgesTotal > 0
+          ? Math.min(100, Math.round((c.edgesCompleted / c.edgesTotal) * 100))
+          : 0;
+        progressMap.set(osmId, pct);
       }
     }
 
