@@ -284,7 +284,6 @@ export async function processActivity(
         );
         projectResults.push(result);
       } catch (error) {
-        // Log error but continue processing other projects
         console.error(
           `[Processor] Error processing project ${overlap.project.id}:`,
           error instanceof Error ? error.message : error
@@ -292,8 +291,15 @@ export async function processActivity(
       }
     }
 
-    // Step 4: Mark activity as processed
-    await markActivityProcessed(activityId);
+    // Step 4: Only mark processed if at least one project succeeded.
+    // If all projects failed (e.g. statement timeout), leave unprocessed for retry.
+    if (projectResults.length > 0) {
+      await markActivityProcessed(activityId);
+    } else {
+      console.warn(
+        `[Processor] All ${overlappingProjects.length} projects failed for activity ${activityId} — leaving unprocessed`
+      );
+    }
 
     const processingTimeMs = Date.now() - startTime;
     console.log(

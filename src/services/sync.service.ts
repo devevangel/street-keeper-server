@@ -518,17 +518,19 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
     return;
   }
 
-  const summaries = await fetchAllActivitySummaries(
-    accessToken,
-    job.after ?? undefined,
-    job.before ?? undefined
-  );
-
   const storedIds = job.stravaActivityIds as number[] | null;
-  const idList: number[] =
-    storedIds && storedIds.length > 0
-      ? storedIds
-      : summaries.map((s) => s.id);
+  let idList: number[];
+  if (storedIds && storedIds.length > 0) {
+    idList = storedIds;
+  } else {
+    // Fallback: re-fetch from Strava only if job has no stored IDs (legacy jobs)
+    const summaries = await fetchAllActivitySummaries(
+      accessToken,
+      job.after ?? undefined,
+      job.before ?? undefined
+    );
+    idList = summaries.map((s) => s.id);
+  }
 
   let processed = job.processed;
   let skipped = job.skipped;
@@ -595,6 +597,36 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
     }
   }
 
+  // Phase 2: retry any DB activities still unprocessed (e.g. V2 failed previously).
+  const unprocessed = await prisma.activity.findMany({
+    where: { userId, isProcessed: false, isDeleted: false },
+    select: { id: true, stravaId: true },
+    orderBy: { startDate: "asc" },
+  });
+
+  if (unprocessed.length > 0) {
+    console.log(
+      `[Sync] Phase 2: ${unprocessed.length} unprocessed activities in DB — retrying`
+    );
+    for (const act of unprocessed) {
+      try {
+        await processActivity(act.id, userId);
+        processed += 1;
+      } catch (err) {
+        errors += 1;
+        lastErrorMessage = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[Sync] Phase 2 failed for ${act.stravaId}:`,
+          lastErrorMessage
+        );
+      }
+      await prisma.syncJob.update({
+        where: { id: syncJobId },
+        data: { processed, errors, lastErrorMessage, updatedAt: new Date() },
+      });
+    }
+  }
+
   await prisma.syncJob.update({
     where: { id: syncJobId },
     data: {
@@ -606,31 +638,16 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
 }
 
 /**
- * True if Strava's newest activity is missing locally (e.g. webhook missed while server slept)
- * OR if there are unprocessed activities AND no sync ran recently (avoids infinite re-trigger
- * when activities keep failing due to e.g. statement timeouts).
+ * True only if Strava has an activity we don't have in our DB at all.
+ * This covers: webhook missed while server slept, manual Strava upload, etc.
+ *
+ * Does NOT trigger for unprocessed activities — those are retried server-side
+ * by the background sync job's Phase 2 (processOneActivity checks isProcessed).
  */
 export async function checkGapFillNeeded(userId: string): Promise<{
   needsBackgroundSync: boolean;
 }> {
   try {
-    const unprocessedCount = await prisma.activity.count({
-      where: { userId, isProcessed: false, isDeleted: false },
-    });
-    if (unprocessedCount > 0) {
-      // Only trigger if no sync completed in the last 10 minutes to avoid
-      // infinite re-sync loops when activities keep failing.
-      const recentSync = await prisma.syncJob.findFirst({
-        where: {
-          userId,
-          status: { in: ["completed", "running", "queued"] },
-          updatedAt: { gte: new Date(Date.now() - 10 * 60 * 1000) },
-        },
-        select: { id: true },
-      });
-      if (!recentSync) return { needsBackgroundSync: true };
-    }
-
     const accessToken = await getValidAccessToken(userId);
     const recent = await listAthleteActivities(accessToken, {
       page: 1,
