@@ -606,12 +606,19 @@ export async function processSyncJob(syncJobId: string, userId: string): Promise
 }
 
 /**
- * True if Strava's newest activity is missing locally (e.g. webhook missed while server slept).
+ * True if Strava's newest activity is missing locally (e.g. webhook missed while server slept)
+ * OR if there are activities in the DB that haven't been processed yet (e.g. V2 failed
+ * during a previous sync due to Overpass outage and were left unprocessed).
  */
 export async function checkGapFillNeeded(userId: string): Promise<{
   needsBackgroundSync: boolean;
 }> {
   try {
+    const unprocessedCount = await prisma.activity.count({
+      where: { userId, isProcessed: false, isDeleted: false },
+    });
+    if (unprocessedCount > 0) return { needsBackgroundSync: true };
+
     const accessToken = await getValidAccessToken(userId);
     const recent = await listAthleteActivities(accessToken, {
       page: 1,
