@@ -24,6 +24,12 @@ export interface SnapshotStreet {
   percentage: number; // 0-100
   lastRunDate: string | null; // ISO date string
 
+  // Centroid of the OSM geometry (lng/lat). Used to disambiguate streets that
+  // share a name but are physically distant (e.g. two "Richmond Place" in one city).
+  // Optional for backward-compatibility with snapshots created before this was added.
+  centerLat?: number;
+  centerLng?: number;
+
   // Flags
   isNew?: boolean; // Added during refresh
 }
@@ -177,6 +183,8 @@ export interface ProjectMapStreet {
   runCount?: number;
   firstRunDate?: string | null; // ISO
   lastRunDate?: string | null; // ISO
+  /** Stable key grouping segments that form one logical street. */
+  logicalStreetKey?: string;
 }
 
 /** Quick win: street at 75%+ completion, with remaining meters to finish */
@@ -421,6 +429,10 @@ export interface ProjectPreview {
     geometry?: { type: "LineString"; coordinates: [number, number][] };
     percentage?: number;
     status?: "completed" | "partial" | "not_started";
+    /** Stable key for the logical street group this segment belongs to.
+     *  Multiple segments sharing the same key form one "logical street"
+     *  (for counting unique streets in the filter card). */
+    logicalStreetKey?: string;
   }>;
 }
 

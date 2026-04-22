@@ -60,6 +60,13 @@ import type {
 import type { GpxPoint } from "../types/run.types.js";
 import { deriveProjectProgressV2Scoped, osmIdToWayId, deriveStreetCompletionForArea } from "../engines/v2/street-completion.js";
 import { v2AggregatedStatusFromSegments } from "../engines/v2/named-street-aggregate.js";
+import {
+  groupByLogicalStreet,
+  haversineMeters as latLngDistanceMeters,
+  lineStringCentroid,
+  mergeSegmentGeometries,
+  type LatLng,
+} from "../engines/v2/street-grouping.js";
 import { normalizeStreetName } from "../utils/normalize-street-name.js";
 import { isUnnamedStreet } from "../engines/v1/street-aggregation.js";
 
@@ -199,15 +206,14 @@ export async function previewProject(
   );
   const streetsByType = groupByHighwayType(filteredStreets);
 
-  const byName = new Map<string, { segments: OsmStreet[]; displayName: string }>();
-  for (const street of filteredStreets) {
-    const key = normalizeStreetName(street.name!);
-    if (!byName.has(key)) {
-      byName.set(key, { segments: [], displayName: street.name! });
-    }
-    byName.get(key)!.segments.push(street);
-  }
-  const totalStreetNames = byName.size;
+  // Group by (name, spatial cluster) so that two distant streets sharing a name
+  // (e.g. two "Richmond Place") are counted and rendered separately, not pooled.
+  const logicalGroups = groupByLogicalStreet(
+    filteredStreets,
+    (s) => s.name,
+    (s) => lineStringCentroid(s.geometry?.coordinates),
+  );
+  const totalStreetNames = logicalGroups.length;
 
   const warnings = generatePreviewWarnings(totalStreetNames, filteredStreets);
 
@@ -235,49 +241,54 @@ export async function previewProject(
       }
     }
 
-    streetsList = Array.from(byName.values())
-      .map((data) => {
-        const firstSegment = data.segments[0];
-        const mergedCoordinates = data.segments.flatMap(
-          (s) => s.geometry?.coordinates ?? []
-        );
-        const streetTotalLen = data.segments.reduce(
-          (sum, s) => sum + s.lengthMeters, 0,
-        );
+    // Return ONE item per OSM segment (so the frontend draws each way as its
+    // own clean polyline — no zigzag from merging parallel carriageways). Each
+    // segment carries the *aggregated* status/percentage of its logical street
+    // group, plus a `logicalStreetKey` so the frontend can count unique streets.
+    const perSegmentEntries: NonNullable<typeof streetsList> = [];
+    for (const group of logicalGroups) {
+      const segments = group.items;
+      const streetTotalLen = segments.reduce(
+        (sum, s) => sum + s.lengthMeters,
+        0,
+      );
 
-        const segmentProgress = data.segments.map((s) => {
-          const row = completionByOsmId.get(s.osmId);
-          const pct = row?.pct ?? 0;
-          const segStatus: "completed" | "partial" | "not_started" =
-            row?.isComplete === true
-              ? "completed"
-              : pct > 0
-                ? "partial"
-                : "not_started";
-          return {
-            lengthMeters: s.lengthMeters,
-            percentage: pct,
-            status: segStatus,
-          };
-        });
-        const { percentage: pctAgg, status } =
-          v2AggregatedStatusFromSegments(segmentProgress);
-        const percentage = Math.round(pctAgg * 100) / 100;
-
+      const segmentProgress = segments.map((s) => {
+        const row = completionByOsmId.get(s.osmId);
+        const pct = row?.pct ?? 0;
+        const segStatus: "completed" | "partial" | "not_started" =
+          row?.isComplete === true
+            ? "completed"
+            : pct > 0
+              ? "partial"
+              : "not_started";
         return {
-          name: data.displayName,
-          segmentCount: data.segments.length,
+          lengthMeters: s.lengthMeters,
+          percentage: pct,
+          status: segStatus,
+        };
+      });
+      const { percentage: pctAgg, status } =
+        v2AggregatedStatusFromSegments(segmentProgress);
+      const percentage = Math.round(pctAgg * 100) / 100;
+
+      for (const seg of segments) {
+        perSegmentEntries.push({
+          name: group.displayName,
+          segmentCount: segments.length,
           totalLengthMeters: streetTotalLen,
-          highwayType: firstSegment?.highwayType || "unknown",
-          osmId: firstSegment?.osmId,
-          geometry: mergedCoordinates.length > 0
-            ? { type: "LineString" as const, coordinates: mergedCoordinates }
-            : undefined,
+          highwayType: seg.highwayType || "unknown",
+          osmId: seg.osmId,
+          geometry: seg.geometry,
           percentage,
           status,
-        };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
+          logicalStreetKey: group.key,
+        });
+      }
+    }
+    streetsList = perSegmentEntries.sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
   }
 
   return {
@@ -357,10 +368,19 @@ async function expandStreetsToFullByName(
 ): Promise<OsmStreet[]> {
   if (filteredStreets.length === 0) return filteredStreets;
 
-  // Get unique normalized street names from filtered streets
-  const existingNames = new Set(
-    filteredStreets.map((s) => normalizeStreetName(s.name || "Unnamed"))
-  );
+  // Map each normalized name to the centroids of its existing segments.
+  // A newly-pulled segment is only accepted if its centroid is close to one of
+  // these — this prevents pulling in a *different* street that happens to share
+  // the name (e.g. the other Richmond Place across town).
+  const existingCentroidsByName = new Map<string, LatLng[]>();
+  for (const s of filteredStreets) {
+    const key = normalizeStreetName(s.name || "Unnamed");
+    const centroid = lineStringCentroid(s.geometry?.coordinates);
+    if (!centroid) continue;
+    const arr = existingCentroidsByName.get(key);
+    if (arr) arr.push(centroid);
+    else existingCentroidsByName.set(key, [centroid]);
+  }
   const existingOsmIds = new Set(filteredStreets.map((s) => s.osmId));
 
   // Query a MUCH larger area to find ALL segments of streets that touch the boundary
@@ -371,9 +391,13 @@ async function expandStreetsToFullByName(
     if (centerLat == null || centerLng == null || radiusMeters == null) {
       return filteredStreets;
     }
-    // Query 10x the radius (or max 50km) to capture entire streets
-    // Example: 1km radius → 10km search; 5km radius → 50km search
-    const expandedRadius = Math.min(radiusMeters * 10, PROJECTS.RADIUS_MAX);
+    // Query just far enough to capture the ends of streets that clip the boundary.
+    // A 2 km buffer is plenty for any urban road. The old 10× multiplier was pulling
+    // in every same-named street in the city, which corrupted grouping/aggregation.
+    const expandedRadius = Math.min(
+      radiusMeters + 2000,
+      PROJECTS.RADIUS_MAX,
+    );
     console.log(
       `[Project] Expanding streets: querying ${expandedRadius}m radius (${(expandedRadius / 1000).toFixed(1)}km) to find all segments`
     );
@@ -387,7 +411,9 @@ async function expandStreetsToFullByName(
     if (!polygonCoordinates || polygonCoordinates.length < 3) {
       return filteredStreets;
     }
-    // For polygon, expand the bounding box by 10x to capture entire streets
+    // For polygon, pad the bounding box by ~2 km on each side (not a 5x multiplier)
+    // so we only capture the ends of streets that clip the polygon, not every
+    // same-named street in the surrounding city.
     const bbox = polygonCoordinates.reduce(
       (acc, [lng, lat]) => ({
         minLat: Math.min(acc.minLat, lat),
@@ -399,9 +425,10 @@ async function expandStreetsToFullByName(
     );
     const latSpan = bbox.maxLat - bbox.minLat;
     const lngSpan = bbox.maxLng - bbox.minLng;
-    // Expand by 10x (5x on each side) to capture entire streets
-    const latPadding = latSpan * 5;
-    const lngPadding = lngSpan * 5;
+    // 2 km ≈ 0.018° lat globally; for lng scale by cos(lat) so the buffer is ~2 km east/west
+    const midLat = (bbox.minLat + bbox.maxLat) / 2;
+    const latPadding = 2000 / 111000;
+    const lngPadding = 2000 / (111000 * Math.max(0.01, Math.cos((midLat * Math.PI) / 180)));
     const expandedPolygon: [number, number][] = [
       [bbox.minLng - lngPadding, bbox.minLat - latPadding],
       [bbox.maxLng + lngPadding, bbox.minLat - latPadding],
@@ -418,10 +445,21 @@ async function expandStreetsToFullByName(
     );
   }
 
-  // Filter to only streets with matching names that aren't already in the list
+  // Accept only segments that (a) share a normalized name with something already
+  // in the boundary AND (b) have a centroid within ~2 km of at least one existing
+  // same-named segment. That second check is what keeps two distant streets that
+  // share a name from being merged as one logical street.
+  const MAX_SAME_STREET_DIST_M = 2000;
   const newSegments: OsmStreet[] = expandedStreets.filter((s) => {
+    if (existingOsmIds.has(s.osmId)) return false;
     const normalizedName = normalizeStreetName(s.name || "Unnamed");
-    return existingNames.has(normalizedName) && !existingOsmIds.has(s.osmId);
+    const anchors = existingCentroidsByName.get(normalizedName);
+    if (!anchors || anchors.length === 0) return false;
+    const centroid = lineStringCentroid(s.geometry?.coordinates);
+    if (!centroid) return false;
+    return anchors.some(
+      (a) => latLngDistanceMeters(a, centroid) <= MAX_SAME_STREET_DIST_M,
+    );
   });
 
   if (newSegments.length === 0) {
@@ -470,6 +508,8 @@ export async function createProject(
     streetsSnapshot: object;
     snapshotDate: Date;
     totalStreets: number;
+    totalStreetNames: number;
+    completedStreetNames: number;
     totalLengthMeters: number;
     completedStreets: number;
     progress: number;
@@ -607,10 +647,13 @@ export async function createProject(
 
   const snapshot = buildStreetSnapshot(streets);
   const totalLengthMeters = streets.reduce((sum, s) => sum + s.lengthMeters, 0);
-  const uniqueStreetNames = new Set(
-    streets.map((s) => normalizeStreetName(s.name || "Unnamed"))
-  );
-  const totalStreetNames = uniqueStreetNames.size;
+  // Location-aware name counting — two physically distant streets with the same
+  // normalized name are counted separately (matches preview / map views).
+  const totalStreetNames = groupByLogicalStreet(
+    streets,
+    (s) => s.name,
+    (s) => lineStringCentroid(s.geometry?.coordinates),
+  ).length;
 
   createData.streetsSnapshot = snapshot as object;
   createData.totalStreets = streets.length;
@@ -923,10 +966,10 @@ export async function getProjectMapData(
           }),
           { minLat: Infinity, maxLat: -Infinity, minLng: Infinity, maxLng: -Infinity }
         );
-        const latSpan = bbox.maxLat - bbox.minLat;
-        const lngSpan = bbox.maxLng - bbox.minLng;
-        const latPadding = latSpan * 5;
-        const lngPadding = lngSpan * 5;
+        const midLat = (bbox.minLat + bbox.maxLat) / 2;
+        const latPadding = 2000 / 111000;
+        const lngPadding =
+          2000 / (111000 * Math.max(0.01, Math.cos((midLat * Math.PI) / 180)));
         const expandedPolygon: [number, number][] = [
           [bbox.minLng - lngPadding, bbox.minLat - latPadding],
           [bbox.maxLng + lngPadding, bbox.minLat - latPadding],
@@ -983,7 +1026,12 @@ export async function getProjectMapData(
       const foundOsmIds = new Set(streetsWithGeometry.map((s) => s.osmId));
       const missingOsmIds = [...snapshotOsmIds].filter((id) => !foundOsmIds.has(id));
       if (missingOsmIds.length > 0) {
-        const expandedRadius = Math.min(radiusMeters * 10, PROJECTS.RADIUS_MAX);
+        // 2 km buffer — enough to capture the ends of streets that clip the
+        // project boundary without pulling in every same-named street nearby.
+        const expandedRadius = Math.min(
+          radiusMeters + 2000,
+          PROJECTS.RADIUS_MAX,
+        );
         const expandedStreets = await getLocalStreetsInRadius(
           centerLat,
           centerLng,
@@ -1082,38 +1130,46 @@ export async function getProjectMapData(
 
   const totalStreets = mapStreets.length;
 
-  // Group segments by street name for aggregation (same logic as map.service)
-  const segmentsByName = new Map<string, typeof mapStreets>();
-  for (const st of mapStreets) {
-    const key = normalizeStreetName(st.name || "Unnamed");
-    if (!segmentsByName.has(key)) segmentsByName.set(key, []);
-    segmentsByName.get(key)!.push(st);
-  }
+  // Location-aware grouping so two distant streets with the same name don't pool.
+  // Map each mapStreet back to its OsmStreet geometry for centroid.
+  const osmByOsmId = new Map(streetsWithGeometry.map((s) => [s.osmId, s]));
+  const logicalGroups = groupByLogicalStreet<ProjectMapStreet>(
+    mapStreets,
+    (s) => s.name || "Unnamed",
+    (s) => lineStringCentroid(osmByOsmId.get(s.osmId)?.geometry?.coordinates),
+  );
 
   // Same aggregation as map.service / preview: V2-complete on every segment + connector-weighted %.
-  const streetDataByName = new Map<
+  const streetDataByKey = new Map<
     string,
     { status: "completed" | "partial" | "not_started"; percentage: number }
   >();
-  for (const [key, segments] of segmentsByName) {
+  const osmIdToGroupKey = new Map<string, string>();
+  for (const group of logicalGroups) {
     const { percentage: weightedPercentage, status } =
       v2AggregatedStatusFromSegments(
-        segments.map((s) => ({
+        group.items.map((s) => ({
           lengthMeters: s.lengthMeters,
           percentage: s.percentage,
           status: s.status,
         })),
       );
-    streetDataByName.set(key, { status, percentage: weightedPercentage });
+    streetDataByKey.set(group.key, { status, percentage: weightedPercentage });
+    for (const item of group.items) {
+      osmIdToGroupKey.set(item.osmId, group.key);
+    }
   }
 
-  // Propagate aggregated status and percentage to all segments
+  // Propagate aggregated status, percentage, and logicalStreetKey to all segments.
   for (const segment of mapStreets) {
-    const key = normalizeStreetName(segment.name || "Unnamed");
-    const aggregated = streetDataByName.get(key);
+    const key = osmIdToGroupKey.get(segment.osmId);
+    const aggregated = key ? streetDataByKey.get(key) : undefined;
     if (aggregated) {
       segment.status = aggregated.status;
       segment.percentage = aggregated.percentage;
+    }
+    if (key) {
+      segment.logicalStreetKey = key;
     }
   }
 
@@ -1121,12 +1177,12 @@ export async function getProjectMapData(
   let completedStreetNames = 0;
   let partialStreetNames = 0;
   let notStartedStreetNames = 0;
-  for (const [, data] of streetDataByName) {
+  for (const [, data] of streetDataByKey) {
     if (data.status === "completed") completedStreetNames += 1;
     else if (data.status === "partial") partialStreetNames += 1;
     else notStartedStreetNames += 1;
   }
-  const totalStreetNames = streetDataByName.size;
+  const totalStreetNames = streetDataByKey.size;
 
   // Recalculate segment counts and completion % to match propagated statuses
   completedCount = mapStreets.filter((s) => s.status === "completed").length;
@@ -1169,10 +1225,15 @@ export async function getProjectMapData(
     lastRunDate: lastRun?.toISOString() ?? null,
   };
 
+  const groupItemsByKey = new Map<string, ProjectMapStreet[]>();
+  for (const group of logicalGroups) {
+    groupItemsByKey.set(group.key, group.items);
+  }
+
   const quickWins: Array<{ osmId: string; name: string; percentage: number; remainingMeters: number }> = [];
-  for (const [key, data] of streetDataByName) {
+  for (const [key, data] of streetDataByKey) {
     if (data.percentage >= 75 && data.percentage < 100) {
-      const segments = segmentsByName.get(key) ?? [];
+      const segments = groupItemsByKey.get(key) ?? [];
       const remainingMeters = segments.reduce(
         (sum, s) => sum + s.lengthMeters * (1 - s.percentage / 100),
         0
@@ -1194,7 +1255,7 @@ export async function getProjectMapData(
   if (quickWins.length === 0) {
     let bestKey: string | null = null;
     let bestPct = -1;
-    for (const [key, data] of streetDataByName) {
+    for (const [key, data] of streetDataByKey) {
       if (
         data.percentage > 0 &&
         data.percentage < 100 &&
@@ -1205,8 +1266,8 @@ export async function getProjectMapData(
       }
     }
     if (bestKey != null) {
-      const segments = segmentsByName.get(bestKey) ?? [];
-      const data = streetDataByName.get(bestKey);
+      const segments = groupItemsByKey.get(bestKey) ?? [];
+      const data = streetDataByKey.get(bestKey);
       const remainingMeters = segments.reduce(
         (sum, s) => sum + s.lengthMeters * (1 - s.percentage / 100),
         0
@@ -1892,18 +1953,24 @@ export function groupSnapshotByStreetName(snapshot: StreetSnapshot): {
   completedStreetNames: number;
   completionBins: CompletionBins;
 } {
-  const byName = new Map<string, SnapshotStreet[]>();
-  for (const s of snapshot.streets) {
-    // Use normalized name for grouping key
-    const key = normalizeStreetName(s.name || "Unnamed");
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key)!.push(s);
-  }
+  // Location-aware grouping: two distant streets that share a name are counted
+  // separately. Snapshots created before centroids were added fall back to
+  // name-only grouping (no centroid → all items share a bucket).
+  const groups = groupByLogicalStreet<SnapshotStreet>(
+    snapshot.streets,
+    (s) => s.name || "Unnamed",
+    (s) =>
+      s.centerLat != null && s.centerLng != null
+        ? ({ lat: s.centerLat, lng: s.centerLng } as LatLng)
+        : null,
+  );
+
   let completed = 0;
   let almostThere = 0;
   let inProgress = 0;
   let notStarted = 0;
-  for (const ways of byName.values()) {
+  for (const group of groups) {
+    const ways = group.items;
     const totalLength = ways.reduce((sum, w) => sum + w.lengthMeters, 0);
     const weightedPct =
       totalLength > 0
@@ -1921,7 +1988,7 @@ export function groupSnapshotByStreetName(snapshot: StreetSnapshot): {
     }
   }
   return {
-    totalStreetNames: byName.size,
+    totalStreetNames: groups.length,
     completedStreetNames: completed,
     completionBins: {
       completed,
@@ -1933,15 +2000,24 @@ export function groupSnapshotByStreetName(snapshot: StreetSnapshot): {
 }
 
 function buildStreetSnapshot(streets: OsmStreet[]): StreetSnapshot {
-  const snapshotStreets: SnapshotStreet[] = streets.map((street) => ({
-    osmId: street.osmId,
-    name: street.name,
-    lengthMeters: Math.round(street.lengthMeters * 100) / 100,
-    highwayType: street.highwayType,
-    completed: false,
-    percentage: 0,
-    lastRunDate: null,
-  }));
+  const snapshotStreets: SnapshotStreet[] = streets.map((street) => {
+    const centroid = lineStringCentroid(street.geometry?.coordinates);
+    return {
+      osmId: street.osmId,
+      name: street.name,
+      lengthMeters: Math.round(street.lengthMeters * 100) / 100,
+      highwayType: street.highwayType,
+      completed: false,
+      percentage: 0,
+      lastRunDate: null,
+      ...(centroid
+        ? {
+            centerLat: Math.round(centroid.lat * 1_000_000) / 1_000_000,
+            centerLng: Math.round(centroid.lng * 1_000_000) / 1_000_000,
+          }
+        : {}),
+    };
+  });
 
   return {
     streets: snapshotStreets,
@@ -1963,6 +2039,13 @@ function mergeSnapshots(
 
   for (const freshStreet of freshStreets) {
     const existing = oldMap.get(freshStreet.osmId);
+    const centroid = lineStringCentroid(freshStreet.geometry?.coordinates);
+    const centroidFields = centroid
+      ? {
+          centerLat: Math.round(centroid.lat * 1_000_000) / 1_000_000,
+          centerLng: Math.round(centroid.lng * 1_000_000) / 1_000_000,
+        }
+      : {};
 
     if (existing) {
       unchanged.push(freshStreet.osmId);
@@ -1972,6 +2055,7 @@ function mergeSnapshots(
         lengthMeters: Math.round(freshStreet.lengthMeters * 100) / 100,
         highwayType: freshStreet.highwayType,
         isNew: false,
+        ...centroidFields,
       });
     } else {
       added.push(freshStreet.osmId);
@@ -1984,6 +2068,7 @@ function mergeSnapshots(
         percentage: 0,
         lastRunDate: null,
         isNew: true,
+        ...centroidFields,
       });
     }
   }

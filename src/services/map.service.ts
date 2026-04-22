@@ -13,16 +13,17 @@ import * as turf from "@turf/turf";
 import { getLocalStreetsInRadius } from "./local-streets.service.js";
 import { ensureCitySyncedAsync } from "./city-sync.service.js";
 import { getUserStreetProgress } from "./user-street-progress.service.js";
-import {
-  isUnnamedStreet,
-  normalizeStreetName,
-  normalizeStreetNameForMatching,
-} from "../engines/v1/street-aggregation.js";
+import { isUnnamedStreet } from "../engines/v1/street-aggregation.js";
 import {
   deriveStreetCompletionForArea,
   osmIdToWayId,
 } from "../engines/v2/street-completion.js";
 import { v2AggregatedStatusFromSegments } from "../engines/v2/named-street-aggregate.js";
+import {
+  groupByLogicalStreet,
+  lineStringCentroid,
+  mergeSegmentGeometries,
+} from "../engines/v2/street-grouping.js";
 import type { OsmStreet, GpxPoint } from "../types/run.types.js";
 import type {
   MapStreet,
@@ -44,36 +45,49 @@ import {
 // ============================================
 
 /**
- * Aggregate segment-level streets into logical streets by normalized name.
- * Used so the list shows one row per street (e.g. "Elm Grove") instead of
- * multiple rows for the same street (different OSM segments).
+ * Aggregate segment-level streets into logical streets.
+ *
+ * Grouped by (normalized name, spatial cluster) so that two distant streets with
+ * the same name (e.g. two "Richmond Place" on opposite sides of town) are reported
+ * as separate entries rather than pooling their node hits and rendering as one
+ * long zigzag polyline.
  *
  * Completion: length-weighted % with connector segments weighted at CONNECTOR_WEIGHT.
  * Street status "completed" only if every segment is V2-complete (CityStrides node rule per way).
  *
- * IMPORTANT: Concatenates ALL segment geometries into a single polyline for accurate map rendering.
- * Segments are sorted geographically before concatenation to form a continuous line.
+ * Geometry merge: per-cluster, sorted geographically + duplicate endpoints trimmed.
  */
-function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
-  if (streets.length === 0) return [];
+type AggregateResult = {
+  streets: MapStreet[];
+  /** osmId → aggregated status/percentage for the cluster that osmId belongs to. */
+  byOsmId: Map<
+    string,
+    { status: "completed" | "partial" | "not_started"; percentage: number }
+  >;
+};
 
-  const byName = new Map<string, MapStreet[]>();
-
-  for (const street of streets) {
-    // Use aggressive normalization to group "Park Road" and "Park Road (A3066)" together
-    const key = normalizeStreetNameForMatching(street.name) || street.osmId;
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key)!.push(street);
-  }
+function aggregateStreetsByName(streets: MapStreet[]): AggregateResult {
+  if (streets.length === 0) return { streets: [], byOsmId: new Map() };
 
   const { CONNECTOR_MAX_LENGTH_METERS } = STREET_AGGREGATION;
 
-  return Array.from(byName.values()).map((segments) => {
+  const groups = groupByLogicalStreet<MapStreet>(
+    streets,
+    (s) => s.name,
+    (s) => lineStringCentroid(s.geometry?.coordinates),
+  );
+
+  const byOsmId = new Map<
+    string,
+    { status: "completed" | "partial" | "not_started"; percentage: number }
+  >();
+
+  const aggregated = groups.map((group) => {
+    const segments = group.items;
     const byPercentage = [...segments].sort(
       (a, b) => b.percentage - a.percentage,
     );
     const base = byPercentage[0];
-    const maxPercentage = base.percentage;
     const totalRuns = segments.reduce((sum, s) => sum + s.stats.runCount, 0);
     const totalCompletions = segments.reduce(
       (sum, s) => sum + s.stats.completionCount,
@@ -103,7 +117,6 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       0,
     );
 
-    // Classify segments: connector = length <= CONNECTOR_MAX_LENGTH_METERS
     const connectorCount = segments.filter(
       (s) => s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS,
     ).length;
@@ -130,40 +143,14 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       connectorCount,
     };
 
-    // Concatenate ALL segment geometries into a single polyline
-    // Sort segments geographically by their first coordinate (latitude) for continuity
-    const sortedSegments = [...segments].sort((a, b) => {
-      const aFirst = a.geometry.coordinates[0];
-      const bFirst = b.geometry.coordinates[0];
-      // Sort by latitude (index 1 in GeoJSON [lng, lat])
-      // If latitudes are similar, sort by longitude
-      const latDiff = aFirst[1] - bFirst[1];
-      if (Math.abs(latDiff) > 0.0001) return latDiff;
-      return aFirst[0] - bFirst[0];
-    });
-
-    // Concatenate all coordinates, removing duplicates at segment boundaries
-    const allCoordinates: [number, number][] = [];
-    for (const segment of sortedSegments) {
-      for (const coord of segment.geometry.coordinates) {
-        // Skip duplicate points at segment boundaries
-        const lastCoord = allCoordinates[allCoordinates.length - 1];
-        if (
-          lastCoord &&
-          Math.abs(lastCoord[0] - coord[0]) < 0.000001 &&
-          Math.abs(lastCoord[1] - coord[1]) < 0.000001
-        ) {
-          continue;
-        }
-        allCoordinates.push(coord);
-      }
-    }
-
-    // Build merged geometry
-    const mergedGeometry = {
+    const mergedGeometry = mergeSegmentGeometries(segments) ?? {
       type: "LineString" as const,
-      coordinates: allCoordinates,
+      coordinates: [],
     };
+
+    for (const s of segments) {
+      byOsmId.set(s.osmId, { status, percentage: weightedPercentage });
+    }
 
     return {
       osmId: base.osmId,
@@ -176,6 +163,8 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       stats,
     };
   });
+
+  return { streets: aggregated, byOsmId };
 }
 
 // ============================================
@@ -301,26 +290,14 @@ export async function getMapStreets(
     });
   }
 
-  // 4. Aggregate by name for list and stats (no duplicates)
-  const streets = aggregateStreetsByName(segments);
+  // 4. Aggregate by (name, location cluster) for list and stats (no duplicates).
+  const { streets, byOsmId: aggregatedByOsmId } =
+    aggregateStreetsByName(segments);
 
-  // 5. Propagate aggregated street status and percentage to segments so all
-  // segments of a street share the same visual style and popup info on the map.
-  // Use aggressive normalization so "Park Road" and "Park Road (A3066)" match.
-  const streetDataByName = new Map<
-    string,
-    { status: "completed" | "partial" | "not_started"; percentage: number }
-  >();
-  for (const street of streets) {
-    const key = normalizeStreetNameForMatching(street.name) || street.osmId;
-    streetDataByName.set(key, {
-      status: street.status,
-      percentage: street.percentage,
-    });
-  }
+  // 5. Propagate aggregated street status and percentage to every segment in the
+  // same cluster so they share visual style and popup info on the map.
   for (const segment of segments) {
-    const key = normalizeStreetNameForMatching(segment.name) || segment.osmId;
-    const aggregated = streetDataByName.get(key);
+    const aggregated = aggregatedByOsmId.get(segment.osmId);
     if (aggregated) {
       segment.status = aggregated.status;
       segment.percentage = aggregated.percentage;
@@ -429,23 +406,12 @@ export async function getMapStreetsV2(
     });
   }
 
-  const streets = aggregateStreetsByName(segments);
+  const { streets, byOsmId: aggregatedByOsmId } =
+    aggregateStreetsByName(segments);
 
-  // Propagate aggregated status and percentage to segments using aggressive normalization
-  const streetDataByName = new Map<
-    string,
-    { status: "completed" | "partial" | "not_started"; percentage: number }
-  >();
-  for (const street of streets) {
-    const key = normalizeStreetNameForMatching(street.name) || street.osmId;
-    streetDataByName.set(key, {
-      status: street.status,
-      percentage: street.percentage,
-    });
-  }
+  // Propagate aggregated cluster status/percentage to every segment (cluster-aware).
   for (const segment of segments) {
-    const key = normalizeStreetNameForMatching(segment.name) || segment.osmId;
-    const aggregated = streetDataByName.get(key);
+    const aggregated = aggregatedByOsmId.get(segment.osmId);
     if (aggregated) {
       segment.status = aggregated.status;
       segment.percentage = aggregated.percentage;
