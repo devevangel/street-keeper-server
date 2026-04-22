@@ -293,9 +293,9 @@ export const STREET_AGGREGATION = {
   // Raw ratios are kept unclamped for debugging
   MAX_DISPLAY_COVERAGE_RATIO: 1.0,
 
-  // Street-level completion (map aggregation)
-  // A street is "completed" when its length-weighted completion ratio meets this threshold.
-  // STRICT: Requires 98% weighted completion for full accuracy.
+  // Legacy ratio threshold: aggregated map status no longer uses this — "completed" requires
+  // every OSM segment in the name group to be V2-complete (CityStrides node rule); see
+  // `engines/v2/named-street-aggregate.ts`. Retained for reference / external tooling.
   STREET_COMPLETION_THRESHOLD: 0.98,
 
   // Connector segments: short links (e.g. between intersections) that count less.

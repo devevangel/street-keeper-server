@@ -22,6 +22,7 @@ import {
   deriveStreetCompletionForArea,
   osmIdToWayId,
 } from "../engines/v2/street-completion.js";
+import { v2AggregatedStatusFromSegments } from "../engines/v2/named-street-aggregate.js";
 import type { OsmStreet, GpxPoint } from "../types/run.types.js";
 import type {
   MapStreet,
@@ -47,8 +48,8 @@ import {
  * Used so the list shows one row per street (e.g. "Elm Grove") instead of
  * multiple rows for the same street (different OSM segments).
  *
- * Completion: length-weighted ratio with connector segments weighted at CONNECTOR_WEIGHT.
- * Street status (completed/partial) is derived from weightedCompletionRatio >= STREET_COMPLETION_THRESHOLD.
+ * Completion: length-weighted % with connector segments weighted at CONNECTOR_WEIGHT.
+ * Street status "completed" only if every segment is V2-complete (CityStrides node rule per way).
  *
  * IMPORTANT: Concatenates ALL segment geometries into a single polyline for accurate map rendering.
  * Segments are sorted geographically before concatenation to form a continuous line.
@@ -65,11 +66,7 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
     byName.get(key)!.push(street);
   }
 
-  const {
-    STREET_COMPLETION_THRESHOLD,
-    CONNECTOR_MAX_LENGTH_METERS,
-    CONNECTOR_WEIGHT,
-  } = STREET_AGGREGATION;
+  const { CONNECTOR_MAX_LENGTH_METERS } = STREET_AGGREGATION;
 
   return Array.from(byName.values()).map((segments) => {
     const byPercentage = [...segments].sort(
@@ -111,26 +108,15 @@ function aggregateStreetsByName(streets: MapStreet[]): MapStreet[] {
       (s) => s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS,
     ).length;
 
-    // Length-weighted completion: each segment contributes (percentage/100) * weight,
-    // where weight = lengthMeters * (CONNECTOR_WEIGHT for connectors, 1 for primary).
-    let weightedSum = 0;
-    let totalWeight = 0;
-    for (const s of segments) {
-      const isConnector = s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS;
-      const weight = s.lengthMeters * (isConnector ? CONNECTOR_WEIGHT : 1);
-      weightedSum += (s.percentage / 100) * weight;
-      totalWeight += weight;
-    }
-    const weightedCompletionRatio =
-      totalWeight === 0 ? 0 : weightedSum / totalWeight;
-    const weightedPercentage = Math.round(weightedCompletionRatio * 100);
-
-    const status: "completed" | "partial" | "not_started" =
-      weightedCompletionRatio >= STREET_COMPLETION_THRESHOLD
-        ? "completed"
-        : weightedPercentage > 0
-          ? "partial"
-          : "not_started";
+    const { percentage: weightedPercentage, status } =
+      v2AggregatedStatusFromSegments(
+        segments.map((s) => ({
+          lengthMeters: s.lengthMeters,
+          percentage: s.percentage,
+          status: s.status,
+        })),
+      );
+    const weightedCompletionRatio = weightedPercentage / 100;
     const stats: MapStreetStats = {
       runCount: totalRuns,
       completionCount: totalCompletions,

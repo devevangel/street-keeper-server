@@ -59,9 +59,9 @@ import type {
 } from "../types/project.types.js";
 import type { GpxPoint } from "../types/run.types.js";
 import { deriveProjectProgressV2Scoped, osmIdToWayId, deriveStreetCompletionForArea } from "../engines/v2/street-completion.js";
+import { v2AggregatedStatusFromSegments } from "../engines/v2/named-street-aggregate.js";
 import { normalizeStreetName } from "../utils/normalize-street-name.js";
 import { isUnnamedStreet } from "../engines/v1/street-aggregation.js";
-import { STREET_AGGREGATION } from "../config/constants.js";
 
 // In-memory cache for project map geometry to avoid duplicate Overpass calls
 // (React StrictMode fires effects twice; users revisiting a project reuse cached geometry)
@@ -245,29 +245,24 @@ export async function previewProject(
           (sum, s) => sum + s.lengthMeters, 0,
         );
 
-        let weightedPct = 0;
-        if (streetTotalLen > 0) {
-          weightedPct = data.segments.reduce((sum, s) => {
-            const row = completionByOsmId.get(s.osmId);
-            const pct = row?.pct ?? 0;
-            return sum + pct * s.lengthMeters;
-          }, 0) / streetTotalLen;
-        }
-        const percentage = Math.round(weightedPct * 100) / 100;
-        // "Completed" only if every segment (way) in this street name is V2-complete.
-        // (Previously we compared percentage 0–100 to getCompletionThreshold() which returns
-        // a 0–1 fraction, so e.g. 50% wrongly counted as done.)
-        const allSegmentsComplete =
-          data.segments.length > 0 &&
-          data.segments.every(
-            (s) => completionByOsmId.get(s.osmId)?.isComplete === true,
-          );
-        const status: "completed" | "partial" | "not_started" =
-          allSegmentsComplete
-            ? "completed"
-            : percentage > 0
-              ? "partial"
-              : "not_started";
+        const segmentProgress = data.segments.map((s) => {
+          const row = completionByOsmId.get(s.osmId);
+          const pct = row?.pct ?? 0;
+          const segStatus: "completed" | "partial" | "not_started" =
+            row?.isComplete === true
+              ? "completed"
+              : pct > 0
+                ? "partial"
+                : "not_started";
+          return {
+            lengthMeters: s.lengthMeters,
+            percentage: pct,
+            status: segStatus,
+          };
+        });
+        const { percentage: pctAgg, status } =
+          v2AggregatedStatusFromSegments(segmentProgress);
+        const percentage = Math.round(pctAgg * 100) / 100;
 
         return {
           name: data.displayName,
@@ -854,14 +849,12 @@ export async function getProjectById(
 // Project Map Data
 // ============================================
 
-const MAP_COMPLETION_THRESHOLD = 90;
-
 /**
  * Get project-scoped map data: streets with geometry and status for map rendering.
  *
  * Fetches street geometries from PostGIS (WayTotalEdges), merges with
- * project snapshot progress, and returns streets with status (completed / partial / not_started)
- * and GeoJSON LineString geometry.
+ * live V2 progress (UserNodeHit + node counts per way), and returns streets with status
+ * (completed / partial / not_started) using the same CityStrides-style rules as the home map.
  *
  * @param projectId - Project UUID
  * @param userId - Authenticated user ID (must own the project)
@@ -886,9 +879,6 @@ export async function getProjectMapData(
   }
 
   const snapshot = project.streetsSnapshot as StreetSnapshot;
-  const progressByOsmId = new Map(
-    snapshot.streets.map((s) => [s.osmId, { percentage: s.percentage }])
-  );
   const snapshotOsmIds = new Set(snapshot.streets.map((s) => s.osmId));
 
   const boundaryType = (project as { boundaryType?: string }).boundaryType ?? "circle";
@@ -1048,21 +1038,32 @@ export async function getProjectMapData(
     (s) => s.name && !isUnnamedStreet(s.name)
   );
 
+  const wayIdsForV2 = streetsWithGeometry.map((s) => osmIdToWayId(s.osmId));
+  const v2Completion =
+    wayIdsForV2.length > 0
+      ? await deriveStreetCompletionForArea(userId, wayIdsForV2)
+      : [];
+  const v2ByWayId = new Map(v2Completion.map((c) => [c.wayId, c]));
+
   const mapStreets: ProjectMapStreet[] = streetsWithGeometry.map((osm) => {
-    const progress = progressByOsmId.get(osm.osmId);
-    const percentage = progress?.percentage ?? 0;
+    const wayId = osmIdToWayId(osm.osmId);
+    const comp = v2ByWayId.get(wayId);
+    const percentage =
+      comp && comp.edgesTotal > 0
+        ? Math.min(
+            100,
+            Math.round((comp.edgesCompleted / comp.edgesTotal) * 100),
+          )
+        : 0;
     const stats = progressByOsmIdWithStats.get(osm.osmId);
 
     let status: ProjectMapStreet["status"];
-    if (percentage >= MAP_COMPLETION_THRESHOLD) {
+    if (comp?.isComplete) {
       status = "completed";
-      completedCount++;
     } else if (percentage > 0) {
       status = "partial";
-      partialCount++;
     } else {
       status = "not_started";
-      notRunCount++;
     }
 
     return {
@@ -1089,31 +1090,20 @@ export async function getProjectMapData(
     segmentsByName.get(key)!.push(st);
   }
 
-  // Compute length-weighted percentage and status per street name.
-  // Matches map.service: all segments of same street share same color on map.
-  const { STREET_COMPLETION_THRESHOLD, CONNECTOR_MAX_LENGTH_METERS, CONNECTOR_WEIGHT } =
-    STREET_AGGREGATION;
+  // Same aggregation as map.service / preview: V2-complete on every segment + connector-weighted %.
   const streetDataByName = new Map<
     string,
     { status: "completed" | "partial" | "not_started"; percentage: number }
   >();
   for (const [key, segments] of segmentsByName) {
-    let weightedSum = 0;
-    let totalWeight = 0;
-    for (const s of segments) {
-      const isConnector = s.lengthMeters <= CONNECTOR_MAX_LENGTH_METERS;
-      const weight = s.lengthMeters * (isConnector ? CONNECTOR_WEIGHT : 1);
-      weightedSum += (s.percentage / 100) * weight;
-      totalWeight += weight;
-    }
-    const weightedRatio = totalWeight === 0 ? 0 : weightedSum / totalWeight;
-    const weightedPercentage = Math.round(weightedRatio * 100);
-    const status: "completed" | "partial" | "not_started" =
-      weightedRatio >= STREET_COMPLETION_THRESHOLD
-        ? "completed"
-        : weightedPercentage > 0
-          ? "partial"
-          : "not_started";
+    const { percentage: weightedPercentage, status } =
+      v2AggregatedStatusFromSegments(
+        segments.map((s) => ({
+          lengthMeters: s.lengthMeters,
+          percentage: s.percentage,
+          status: s.status,
+        })),
+      );
     streetDataByName.set(key, { status, percentage: weightedPercentage });
   }
 
