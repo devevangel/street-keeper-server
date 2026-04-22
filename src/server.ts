@@ -1,7 +1,7 @@
 // Load environment variables FIRST (before any other imports that might need them)
 import "dotenv/config";
 
-import express, { Application, Request, Response } from "express";
+import express, { Application, Request, Response, NextFunction } from "express";
 import cors from "cors";
 import compression from "compression";
 import routes from "./routes/index.js";
@@ -31,6 +31,19 @@ app.use(
 app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Request logger — logs method, path, status, and duration for every request
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const ms = Date.now() - start;
+    const status = res.statusCode;
+    const color = status >= 500 ? "\x1b[31m" : status >= 400 ? "\x1b[33m" : "\x1b[32m";
+    const reset = "\x1b[0m";
+    console.log(`${color}${req.method} ${req.path} → ${status}${reset} (${ms}ms)`);
+  });
+  next();
+});
 
 // Documentation Routes (mounted before API for /docs prefix)
 app.use("/docs", docsRoutes);
