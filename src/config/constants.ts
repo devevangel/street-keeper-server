@@ -119,6 +119,7 @@ export function getEnvVarOptional(name: string, defaultValue: string): string {
 }
 
 const DEFAULT_OVERPASS_SERVERS = [
+  "https://overpass-api.de/api/interpreter",
   "https://gall.openstreetmap.de/api/interpreter",
   "https://lambert.openstreetmap.de/api/interpreter",
 ] as const;

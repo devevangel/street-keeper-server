@@ -59,6 +59,9 @@ async function checkServerStatus(serverUrl: string): Promise<SlotInfo | null> {
     const res = await axios.get<string>(statusUrl, {
       timeout: 2_000,
       responseType: "text",
+      headers: {
+        "User-Agent": "StreetKeeper/1.0 (https://street-keeper-client.vercel.app; contact@streetkeeper.app)",
+      },
     });
     const text = res.data;
 
@@ -211,7 +214,10 @@ export async function executeRawOverpassQuery(
     for (let attempt = 0; attempt < OVERPASS.MAX_RETRIES; attempt++) {
       try {
         const response = await axios.post<OverpassResponse>(url, query, {
-          headers: { "Content-Type": "text/plain" },
+          headers: {
+            "Content-Type": "text/plain",
+            "User-Agent": "StreetKeeper/1.0 (https://street-keeper-client.vercel.app; contact@streetkeeper.app)",
+          },
           timeout: OVERPASS.TIMEOUT_MS,
         });
 
@@ -235,6 +241,9 @@ export async function executeRawOverpassQuery(
         if (error.code && NETWORK_ERROR_CODES.has(error.code)) break;
 
         const httpStatus = error.response?.status;
+
+        // 406 (Not Acceptable) → server is refusing our requests (IP/UA policy). Skip immediately.
+        if (httpStatus === 406) break;
 
         // 504 (capacity) or 429 (rate-limit): re-check status, wait if slot imminent.
         if (
