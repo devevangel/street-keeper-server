@@ -109,6 +109,23 @@ async function main(): Promise<void> {
     console.warn("[PostGIS] Startup coverage query skipped:", msg);
   }
 
+  // Self-heal: reset activities marked processed but with zero node hits
+  // (caused by V2 failures e.g. Overpass outages). They'll be reprocessed on next sync.
+  try {
+    const healed = await prisma.$executeRaw`
+      UPDATE "Activity" SET "isProcessed" = false, "processedAt" = NULL
+      WHERE "isProcessed" = true
+        AND "id" NOT IN (SELECT DISTINCT "activityId" FROM "ProjectActivity")
+        AND "userId" NOT IN (SELECT DISTINCT "userId" FROM "UserNodeHit")
+    `;
+    if (healed > 0) {
+      console.log(`[Startup] Reset ${healed} activities with no node hits back to unprocessed`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[Startup] Self-heal query skipped:", msg);
+  }
+
   const server = app.listen(PORT, () => {
     console.log("🚀 Server is running!");
     console.log(`📍 Port: ${PORT}`);

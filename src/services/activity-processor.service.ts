@@ -160,21 +160,21 @@ async function processStandaloneActivity(
   userId: string,
   coordinates: GpxPoint[],
   startDate: Date | null
-): Promise<{ streetsCovered: number; streetsCompleted: number }> {
+): Promise<{ streetsCovered: number; streetsCompleted: number; v2Failed: boolean }> {
   try {
     const runDate = startDate ?? new Date();
     const result = await processActivityV2(userId, coordinates, runDate);
     console.log(
       `[Processor] Standalone v2: ${result.nodesHit} nodes hit for activity ${activityId}`
     );
+    return { streetsCovered: 0, streetsCompleted: 0, v2Failed: false };
   } catch (v2Error) {
     console.warn(
       `[Processor] V2 pipeline failed for activity ${activityId}:`,
       v2Error instanceof Error ? v2Error.message : v2Error
     );
+    return { streetsCovered: 0, streetsCompleted: 0, v2Failed: true };
   }
-
-  return { streetsCovered: 0, streetsCompleted: 0 };
 }
 
 // ============================================
@@ -254,10 +254,16 @@ export async function processActivity(
         coordinates,
         activity.startDate
       );
-      await markActivityProcessed(activityId);
+      if (!standalone.v2Failed) {
+        await markActivityProcessed(activityId);
+      } else {
+        console.warn(
+          `[Processor] Leaving activity ${activityId} unprocessed — V2 failed (will retry on next sync)`
+        );
+      }
       return {
         activityId,
-        success: true,
+        success: !standalone.v2Failed,
         projectsProcessed: 0,
         projects: [],
         standaloneStreetsCovered: standalone.streetsCovered,

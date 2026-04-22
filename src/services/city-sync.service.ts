@@ -58,10 +58,43 @@ function collectAltNames(
 // status-aware implementation with slot checking and server ranking).
 
 /**
+ * Short-lived in-flight cache for detectCity. Prevents 24 concurrent
+ * activity processors from each firing their own Overpass is_in query
+ * for the same neighbourhood. Entries auto-expire after 60s.
+ */
+const detectCityCache = new Map<string, { result: DetectedCity | null; expiresAt: number }>();
+const detectCityInFlight = new Map<string, Promise<DetectedCity | null>>();
+
+/**
  * Detect which OSM city (administrative boundary) contains the given point.
  * Uses Overpass is_in query. Prefers admin_level 8 (city), then 6–10.
+ * Results are cached per ~1km grid cell for 60s to deduplicate concurrent calls.
  */
 export async function detectCity(
+  lat: number,
+  lng: number,
+): Promise<DetectedCity | null> {
+  const key = gridKey(lat, lng);
+
+  const cached = detectCityCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.result;
+
+  const inflight = detectCityInFlight.get(key);
+  if (inflight) return inflight;
+
+  const promise = doDetectCity(lat, lng).then((result) => {
+    detectCityCache.set(key, { result, expiresAt: Date.now() + 60_000 });
+    detectCityInFlight.delete(key);
+    return result;
+  }).catch((err) => {
+    detectCityInFlight.delete(key);
+    throw err;
+  });
+  detectCityInFlight.set(key, promise);
+  return promise;
+}
+
+async function doDetectCity(
   lat: number,
   lng: number,
 ): Promise<DetectedCity | null> {
@@ -432,14 +465,24 @@ export async function findSyncedCityByPoint(
 /**
  * In-memory lock to prevent concurrent syncs for the same city.
  * Maps relationId -> Promise that resolves when sync completes.
- * For multi-server deployments, replace with Redis or DB advisory locks.
  */
 const syncInProgress = new Map<string, Promise<CitySyncRecord | null>>();
 
 /**
+ * In-memory lock for the full ensureCitySynced flow (detect + sync).
+ * Keyed by a ~1km grid cell so concurrent activities in the same area
+ * share a single detectCity Overpass call instead of firing 24+ in parallel.
+ */
+const ensureInProgress = new Map<string, Promise<CitySyncRecord | null>>();
+
+function gridKey(lat: number, lng: number): string {
+  return `${(lat * 100) | 0},${(lng * 100) | 0}`;
+}
+
+/**
  * Ensure the city containing (lat, lng) is synced. If not (or expired),
  * detect city and run sync. No-op if already synced and not expired.
- * Uses in-memory lock to prevent duplicate Overpass calls for the same city.
+ * Deduplicates both detectCity and syncCity calls for concurrent requests.
  *
  * Fast path: PostGIS boundary check (no Overpass).
  * Slow path: detectCity via Overpass (only for genuinely new cities).
@@ -452,7 +495,22 @@ export async function ensureCitySynced(
   const local = await findSyncedCityByPoint(lat, lng);
   if (local) return local;
 
-  // Slow path: new/unseen area — call Overpass once
+  // Dedup: if another call for the same grid cell is in-flight, piggyback on it.
+  const key = gridKey(lat, lng);
+  const existing = ensureInProgress.get(key);
+  if (existing) return existing;
+
+  const promise = doEnsureCitySynced(lat, lng).finally(() => {
+    ensureInProgress.delete(key);
+  });
+  ensureInProgress.set(key, promise);
+  return promise;
+}
+
+async function doEnsureCitySynced(
+  lat: number,
+  lng: number,
+): Promise<CitySyncRecord | null> {
   const city = await detectCity(lat, lng);
   if (!city) {
     return null;
@@ -466,21 +524,21 @@ export async function ensureCitySynced(
     return inProgress;
   }
 
-  // Check if already synced (not expired) — boundary may be NULL from old sync
-  const existing = await prisma.citySync.findUnique({
+  // Check if already synced (not expired)
+  const existingSync = await prisma.citySync.findUnique({
     where: { relationId: city.relationId },
   });
 
-  if (existing && existing.expiresAt > new Date()) {
+  if (existingSync && existingSync.expiresAt > new Date()) {
     return {
-      id: existing.id,
-      relationId: existing.relationId,
-      name: existing.name,
-      adminLevel: existing.adminLevel,
-      nodeCount: existing.nodeCount,
-      wayCount: existing.wayCount,
-      syncedAt: existing.syncedAt,
-      expiresAt: existing.expiresAt,
+      id: existingSync.id,
+      relationId: existingSync.relationId,
+      name: existingSync.name,
+      adminLevel: existingSync.adminLevel,
+      nodeCount: existingSync.nodeCount,
+      wayCount: existingSync.wayCount,
+      syncedAt: existingSync.syncedAt,
+      expiresAt: existingSync.expiresAt,
     };
   }
 
