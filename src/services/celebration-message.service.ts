@@ -3,10 +3,22 @@
  * No DB access — pure functions only.
  */
 
-export const STREET_KEEPER_HASHTAG_FOOTER = "\n\n#StreetKeeper #RunEveryStreet";
+/** Base footer line (no leading newlines). */
+export const STREET_KEEPER_HASHTAG_BASE = "#StreetKeeper #RunEveryStreet";
+
+/** Legacy export: base footer with leading newlines (used when appending combined Strava block). */
+export const STREET_KEEPER_HASHTAG_FOOTER = `\n\n${STREET_KEEPER_HASHTAG_BASE}`;
+
+/** Regex to strip our footer from a stored message, including optional contextual hashtags. */
+export const STREET_KEEPER_HASHTAG_FOOTER_STRIP_RE =
+  /\n\n#StreetKeeper #RunEveryStreet(?:\s+#[A-Za-z0-9_]+)*\s*$/u;
 
 export type CelebrationStoryline =
   | "project-finished"
+  | "long-run"
+  | "early-bird"
+  | "nighthawk"
+  | "minimalist"
   | "multi-project"
   | "single-street"
   | "completion-heavy"
@@ -29,6 +41,10 @@ export interface BuildShareMessageInput {
   projectCompleted: boolean;
   activityDistanceMeters: number;
   activityDurationSeconds: number;
+  /** Activity start instant (UTC from DB); hour-of-day uses `userTimeZone`. */
+  activityStartDate: Date;
+  /** IANA zone (e.g. `Europe/London`). Defaults to UTC when missing. */
+  userTimeZone?: string;
 }
 
 function hashSeed(activityId: string, projectId: string): number {
@@ -73,12 +89,40 @@ function streetListSummary(names: string[], maxShow: number): string {
   return shown.join(", ") + tail;
 }
 
+/** Local hour 0–23 in `timeZone` (falls back to UTC on invalid zone). */
+export function getLocalHour(date: Date, timeZone: string | undefined): number {
+  const zone = timeZone?.trim() || "UTC";
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      hour: "numeric",
+      hourCycle: "h23",
+      timeZone: zone,
+    }).formatToParts(date);
+    const hourPart = parts.find((p) => p.type === "hour");
+    if (hourPart?.value != null) {
+      const h = parseInt(hourPart.value, 10);
+      if (!Number.isNaN(h)) return h;
+    }
+  } catch {
+    /* invalid IANA */
+  }
+  return date.getUTCHours();
+}
+
 function pickStoryline(input: BuildShareMessageInput): CelebrationStoryline {
   const totalStreets =
     input.completedCount + input.startedCount + input.improvedCount;
+  const tz = input.userTimeZone;
+  const hour = getLocalHour(input.activityStartDate, tz);
 
   if (input.projectCompleted) return "project-finished";
+  if (input.activityDistanceMeters >= 10_000) return "long-run";
   if (input.sameRunProjectCount >= 2) return "multi-project";
+  if (hour < 7) return "early-bird";
+  if (hour >= 21) return "nighthawk";
+  if (totalStreets <= 2 && input.activityDistanceMeters >= 3000) {
+    return "minimalist";
+  }
   if (totalStreets === 1) return "single-street";
   if (
     input.completedCount > 0 &&
@@ -95,6 +139,26 @@ function pickStoryline(input: BuildShareMessageInput): CelebrationStoryline {
     return "discovery-heavy";
   }
   return "grinder";
+}
+
+function buildHashtagFooterSuffix(storyline: CelebrationStoryline): string {
+  const extra: Record<CelebrationStoryline, string | null> = {
+    "project-finished": "#ProjectDone",
+    "long-run": "#LongRun",
+    "early-bird": "#MorningRun",
+    nighthawk: "#NightRun",
+    minimalist: "#QuickHit",
+    "multi-project": null,
+    "single-street": null,
+    "completion-heavy": null,
+    "discovery-heavy": null,
+    grinder: null,
+  };
+  const tag = extra[storyline];
+  if (tag) {
+    return `\n\n${STREET_KEEPER_HASHTAG_BASE} ${tag}`;
+  }
+  return STREET_KEEPER_HASHTAG_FOOTER;
 }
 
 /**
@@ -129,6 +193,70 @@ export function buildShareMessage(input: BuildShareMessageInput): string {
           `Full clear: "${proj}". Nothing left to run here.\n\n${dist} · ${dur}`,
         () =>
           `Street-by-street, you emptied "${proj}". Huge.\n\n${dist} · ${dur}`,
+      ];
+      lines.push(pickVariant(variants, seed)());
+      break;
+    }
+    case "long-run": {
+      const variants = [
+        () =>
+          `Long miles, big map moves — "${proj}" felt every step.\n\n${dist} · ${dur} · ${pctBefore}% → ${pctAfter}%`,
+        () =>
+          `You stacked distance and still moved "${proj}" forward.\n\n${dist} · ${dur}`,
+        () =>
+          `Endurance day: "${proj}" now at ${pctAfter}%.\n\n${dist} · ${dur}`,
+        () =>
+          `Serious distance on the legs; "${proj}" shifted (${pctBefore}% → ${pctAfter}%).\n\n${dist} · ${dur}`,
+        () =>
+          `A long run that paid rent on "${proj}".\n\n${dist} · ${dur} · ${pctAfter}%`,
+      ];
+      lines.push(pickVariant(variants, seed)());
+      break;
+    }
+    case "early-bird": {
+      const variants = [
+        () =>
+          `Early light, early wins — "${proj}" before the city woke up.\n\n${dist} · ${dur} · ${pctBefore}% → ${pctAfter}%`,
+        () =>
+          `Morning miles moved "${proj}" to ${pctAfter}%.\n\n${dist} · ${dur}`,
+        () =>
+          `Beat the alarm, beat the grid: "${proj}" ticked forward.\n\n${dist} · ${dur}`,
+        () =>
+          `Sunrise session — "${proj}" is warmer now.\n\n${dist} · ${dur}`,
+        () =>
+          `Quiet streets, loud progress in "${proj}".\n\n${dist} · ${dur} · ${pctAfter}%`,
+      ];
+      lines.push(pickVariant(variants, seed)());
+      break;
+    }
+    case "nighthawk": {
+      const variants = [
+        () =>
+          `Night shift on the map — "${proj}" after dark.\n\n${dist} · ${dur} · ${pctBefore}% → ${pctAfter}%`,
+        () =>
+          `Headlamp energy: "${proj}" climbed to ${pctAfter}%.\n\n${dist} · ${dur}`,
+        () =>
+          `Late run, real progress in "${proj}".\n\n${dist} · ${dur}`,
+        () =>
+          `The city cooled down; "${proj}" heated up.\n\n${dist} · ${dur} · ${pctAfter}%`,
+        () =>
+          `After-hours miles banked in "${proj}".\n\n${dist} · ${dur}`,
+      ];
+      lines.push(pickVariant(variants, seed)());
+      break;
+    }
+    case "minimalist": {
+      const variants = [
+        () =>
+          `Lean run, sharp delta — "${proj}" moved without a crowd of streets.\n\n${dist} · ${dur} · ${pctBefore}% → ${pctAfter}%`,
+        () =>
+          `Few touches, high signal in "${proj}".\n\n${dist} · ${dur}`,
+        () =>
+          `Tight session: "${proj}" at ${pctAfter}%.\n\n${dist} · ${dur}`,
+        () =>
+          `Small footprint, big shift for "${proj}".\n\n${dist} · ${dur}`,
+        () =>
+          `Minimal streets, maximum intent in "${proj}".\n\n${dist} · ${dur} · ${pctAfter}%`,
       ];
       lines.push(pickVariant(variants, seed)());
       break;
@@ -229,7 +357,7 @@ export function buildShareMessage(input: BuildShareMessageInput): string {
     lines.push(`Improved: ${improvedLine}`);
   }
 
-  lines.push(STREET_KEEPER_HASHTAG_FOOTER);
+  lines.push(buildHashtagFooterSuffix(storyline));
   return lines.join("\n");
 }
 

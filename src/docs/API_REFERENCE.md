@@ -100,6 +100,19 @@ All activity routes require authentication.
 
 ---
 
+## Celebrations (`/api/v1/celebrations`)
+
+**Run celebration** is the post-activity overlay (per Strava run that advanced one or more projects). It is separate from **milestone** celebrations under `/api/v1/milestones` (goal achievements on the project detail page). All routes below require authentication.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/celebrations/pending` | Returns `{ success, hasPending, events, rollup }`. `events` are `RunCelebrationEvent` rows with `celebrationShownAt` null (newest first). Each event includes project name, street impact counts/names, before/after project %, `shareMessage` (server-built copy for Strava), and activity metadata. `rollup` aggregates totals across the batch. |
+| GET | `/celebrations/map-data` | Query: **`eventIds`** — comma-separated celebration event UUIDs (must belong to the user). Returns `{ success: true, runs, streets, bbox }`: downsampled GPS paths per activity, street polylines bucketed as `completed` \| `started` \| `improved` (from `ProjectActivity.impactDetails`), and a lat/lng bounding box for the mini-map. **400** if `eventIds` missing; **404** if any id not found. |
+| POST | `/celebrations/acknowledge` | Body: optional `{ eventIds?: string[] }`. Sets `celebrationShownAt` on matching pending events (or all pending if `eventIds` omitted). Response: `{ success, updated }` with count updated. |
+| POST | `/celebrations/share-to-strava` | Body: **`{ eventIds: string[] }`** (required, non-empty). Merges `shareMessage` bodies per Strava activity, updates activity description via Strava API, sets `sharedToStravaAt` on those events. Response: `{ success, activitiesUpdated, eventsMarked }`. **400** if `eventIds` empty; **401** / **403** for invalid token or missing Strava write scope (`TOKEN_INVALID`, `SCOPE_MISSING`); **404** if events missing. |
+
+---
+
 ## Docs (served by backend)
 
 | Method | Path | Description |

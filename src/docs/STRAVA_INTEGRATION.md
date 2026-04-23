@@ -47,6 +47,12 @@ Strava access tokens expire (typically 6 hours). Before any Strava API call that
 
 ---
 
+## Run celebration: updating activity descriptions
+
+When the user finishes a run that advances project progress, the app may show a **run celebration** overlay and offer **Share to Strava**. That flow calls **`POST /api/v1/celebrations/share-to-strava`** with the selected celebration event ids. The backend builds a combined description body from stored `shareMessage` text (including hashtags) and uses the Strava **update activity** API to write it onto each affected Strava activity. This is an explicit user action, not the same as any automatic footer appended elsewhere. See [API Reference — Celebrations](/docs/api-reference#celebrations-apiv1celebrations).
+
+---
+
 ## Webhook lifecycle
 
 1. **Subscription:** You create a subscription to Strava’s webhook (POST to Strava’s API with your callback URL and verify token). The backend can support a script or admin flow for this; the **verify token** is read from `STRAVA_WEBHOOK_VERIFY_TOKEN` (or a default).

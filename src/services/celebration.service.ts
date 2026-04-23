@@ -8,6 +8,7 @@ import type { ActivityImpact } from "../types/activity.types.js";
 import {
   buildShareMessage,
   STREET_KEEPER_HASHTAG_FOOTER,
+  STREET_KEEPER_HASHTAG_FOOTER_STRIP_RE,
 } from "./celebration-message.service.js";
 import {
   fetchActivity,
@@ -18,11 +19,7 @@ import { getValidStravaToken } from "./auth.service.js";
 
 /** Strip our hashtag footer from a stored share message (for multi-project merge). */
 export function stripHashtagFooter(message: string): string {
-  const escaped = STREET_KEEPER_HASHTAG_FOOTER.replace(
-    /[.*+?^${}()|[\]\\]/g,
-    "\\$&",
-  );
-  return message.replace(new RegExp(`${escaped}\\s*$`), "").trim();
+  return message.replace(STREET_KEEPER_HASHTAG_FOOTER_STRIP_RE, "").trim();
 }
 
 /** Strip leading Street Keeper header line from a stored share message. */
@@ -34,7 +31,7 @@ function normalizeShareBody(message: string): string {
   return stripHashtagFooter(stripStreetKeeperHeader(message));
 }
 
-const SK_BLOCK_END_MARKER = "#StreetKeeper #RunEveryStreet";
+const SK_FOOTER_BASE = "\n\n#StreetKeeper #RunEveryStreet";
 
 /** Remove all Street Keeper blocks from a Strava description (legacy auto-footer + celebrations). */
 export function stripAllStreetKeeperBlocks(description: string): string {
@@ -44,12 +41,14 @@ export function stripAllStreetKeeperBlocks(description: string): string {
     const start = s.indexOf(marker);
     if (start === -1) break;
     const tail = s.slice(start);
-    const endRel = tail.indexOf(SK_BLOCK_END_MARKER);
-    if (endRel === -1) {
+    const footIdx = tail.lastIndexOf(SK_FOOTER_BASE);
+    if (footIdx === -1) {
       s = (s.slice(0, start) + tail.slice(marker.length)).trim();
       break;
     }
-    const removeThrough = start + endRel + SK_BLOCK_END_MARKER.length;
+    const afterFoot = tail.slice(footIdx + SK_FOOTER_BASE.length);
+    const extra = afterFoot.match(/^(?:\s+#[A-Za-z0-9_]+)*/u);
+    const removeThrough = start + footIdx + SK_FOOTER_BASE.length + (extra?.[0].length ?? 0);
     s = (s.slice(0, start) + s.slice(removeThrough)).replace(/\n{3,}/g, "\n\n").trim();
   }
   return s.trim();
@@ -107,9 +106,16 @@ export async function writeCelebrationEventsForActivity(
       durationSeconds: true,
       startDate: true,
       isDeleted: true,
+      user: {
+        select: {
+          preferences: { select: { timezone: true } },
+        },
+      },
     },
   });
   if (!activity || activity.isDeleted) return;
+
+  const userTimeZone = activity.user?.preferences?.timezone ?? "UTC";
 
   const sameRunProjectCount = result.projects.filter((p) => {
     const { completedOsmIds, startedOsmIds, improvedOsmIds } =
@@ -182,6 +188,8 @@ export async function writeCelebrationEventsForActivity(
       projectCompleted,
       activityDistanceMeters: activity.distanceMeters,
       activityDurationSeconds: activity.durationSeconds,
+      activityStartDate: activity.startDate,
+      userTimeZone,
     });
 
     const existing = await prisma.runCelebrationEvent.findUnique({

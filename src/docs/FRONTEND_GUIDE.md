@@ -1427,6 +1427,12 @@ See **PRODUCT_ROADMAP.md** for business rationale and design decisions.
 - **projects.service** — `getMap(id)`, `getHeatmap(id)`, `preview(..., boundaryMode)`, `create({ ..., boundaryMode })`.
 - **suggestions.service** — `getSuggestions(projectId, { lat?, lng?, maxResults? })` → `GET /projects/:id/suggestions`.
 
+### Run celebration (global overlay)
+
+- **Shell:** `AppLayout` renders **`RunCelebrationController`**, which polls **`GET /celebrations/pending`** when activity sync is idle and shows **`RunCelebration`** for the batch.
+- **Service:** **`celebrations.service`** — `getPending()`, `getMapData(eventIds)`, `acknowledge(eventIds?)`, `shareToStrava(eventIds)`.
+- **Dev previews:** Preferences (development) links to `?__celebration=demo` (and variants). Query keys are stripped from production bundles; do not rely on them in shipped UX tests.
+
 ### Components (projects)
 
 - **UniversalSearchInput** — Debounced location search with dropdown.

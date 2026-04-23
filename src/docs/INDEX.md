@@ -16,12 +16,13 @@ In plain English: you run with your phone or watch. Strava records where you wen
 |----------|-------------|
 | [Getting Started](/docs/getting-started) | Setup, environment variables, running locally, PBF seeding |
 | [Architecture](/docs/architecture) | System layers, external services, data flows |
-| [Database](/docs/database) | All 12 tables, columns, relationships, ERD |
+| [Database](/docs/database) | Tables (including RunCelebrationEvent), columns, relationships, ERD |
 | [API Reference](/docs/api-reference) | Every route, method, parameters, responses |
 | [Engines](/docs/engines) | V1 vs V2 overview and comparison |
 | [How Engines Work](/docs/how-engines-work) | Step-by-step pipelines in plain English |
 | [GPX Street Analysis](/docs/gpx-street-analysis) | GPX upload and analysis (V1 and V2) |
 | [Map Feature](/docs/map-feature) | Map endpoint, geometry, completion display |
+| [API Reference — Celebrations](/docs/api-reference#celebrations-apiv1celebrations) | Run celebration batch, mini-map geometry, acknowledge, share to Strava |
 | [Strava Integration](/docs/strava-integration) | OAuth, token refresh, webhooks |
 | [Background Jobs](/docs/background-jobs) | pg-boss queue and activity processing |
 | [Scripts](/docs/scripts) | Seed, reset, wipe, backfill, and utility scripts |

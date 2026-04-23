@@ -18,6 +18,9 @@ erDiagram
   User ||--o{ SyncJob : "has"
   Project ||--o{ ProjectActivity : "links"
   Activity ||--o{ ProjectActivity : "links"
+  User ||--o{ RunCelebrationEvent : "has"
+  Activity ||--o{ RunCelebrationEvent : "has"
+  Project ||--o{ RunCelebrationEvent : "has"
   Project }o--|| ProjectActivity : "projectId"
   Activity }o--|| ProjectActivity : "activityId"
   WayTotalEdges ||--o{ WayNode : "wayId"
@@ -164,6 +167,36 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 **Relations:** ProjectActivity belongs to one Project and one Activity. Both relations use cascade delete: delete the project or the activity and the link is removed.
 
 **Design choice:** We use a junction table because one run can overlap several projects (e.g. you run through two different circles). So we need "many activities per project" and "many projects per activity" — that is a many-to-many, and the junction row is where we store the impact of that run on that project.
+
+---
+
+## 5b. RunCelebrationEvent (post-run celebration)
+
+**What it is:** One row per **(activity, project)** pair when that run created a celebration-worthy update for that project (new completions, starts, or improvements). Powers the **run celebration** overlay and optional **Share to Strava**.
+
+**Analogy:** A saved “trophy card” for one run on one project: what changed, the copy we generated for sharing, and whether the user has dismissed it or pushed it to Strava.
+
+| Column | Type | What it stores | Why |
+|--------|------|----------------|-----|
+| `id` | UUID | Primary key | Returned to the client as `eventId` for acknowledge, map-data, and share |
+| `userId` | UUID | Owner | Same user as the activity; cascade delete |
+| `activityId` | UUID | Which run | Links to Activity; cascade delete |
+| `projectId` | UUID (optional) | Which project | Nullable in schema; celebrations are normally per project |
+| `completedCount` / `startedCount` / `improvedCount` | int | Street impact counts | Rollup for the overlay |
+| `completedStreetNames` / `startedStreetNames` / `improvedStreetNames` | string[] | Sample names | Display in UI |
+| `projectProgressBefore` / `projectProgressAfter` | float | Project % before/after this run | Progress animation |
+| `projectCompleted` | boolean | Whether the project hit 100% on this run | Gold / “complete” treatment in UI |
+| `activityDistanceMeters` / `activityDurationSeconds` / `activityStartDate` | float / int / datetime | Run stats and local-time context | Copy and storyline selection |
+| `celebrationShownAt` | datetime (optional) | When the user dismissed the overlay | Pending batch = null |
+| `sharedToStravaAt` | datetime (optional) | When share succeeded | Avoid duplicate Strava writes |
+| `shareMessage` | string (optional) | Pre-rendered share body | Built server-side; merged per activity for Strava |
+| `createdAt` | datetime | When the row was created | Ordering |
+
+**Unique constraint:** One row per (`activityId`, `projectId`).
+
+**Relations:** Belongs to User, Activity, and optionally Project (all cascade on delete).
+
+**Design choice:** Milestone celebrations use the **milestone** tables and `CelebrationModal` on the project page. Run celebrations use this table and `/api/v1/celebrations/*` so post-run UX stays independent of goal definitions.
 
 ---
 
@@ -384,6 +417,9 @@ A JSON object: `{ streets: [ ... ], snapshotDate: "..." }`. Each street in `stre
 | Activity | ProjectActivity | One activity can link to many projects | Delete activity → delete those links |
 | ProjectActivity | Project | Many-to-one | Delete project → delete ProjectActivity rows |
 | ProjectActivity | Activity | Many-to-one | Delete activity → delete ProjectActivity rows |
+| User | RunCelebrationEvent | One user has many run celebration rows | Delete user → delete events |
+| Activity | RunCelebrationEvent | One activity can have many events (one per project) | Delete activity → delete events |
+| Project | RunCelebrationEvent | One project can have many events over time | Delete project → delete events |
 
 WayCache, WayTotalEdges, WayNode, NodeCache, CitySync, and GeometryCache have no foreign keys; they are lookup/cache tables.
 

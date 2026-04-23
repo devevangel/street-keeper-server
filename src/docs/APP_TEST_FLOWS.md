@@ -437,7 +437,9 @@ Response:
 | Celebration modal | **Implemented** | Shows on project detail page when pending celebration exists |
 | Share message copy | **Implemented** | "Copy" button copies generated share message to clipboard |
 | Milestone acknowledgment | **Implemented** | "Keep Going!" button marks celebration as shown |
-| Pending celebration check on app load | **Implemented** | `PendingCelebrationsChecker` in AppLayout checks all projects |
+| Pending milestone celebration on project load | **Implemented** | **Your Goals** (`MilestonesSection` on project detail): after `GET /projects/:id/milestones`, first `pendingCelebrations` entry can open `CelebrationModal` |
+
+**Run celebration (separate from milestones):** After sync, **`RunCelebrationController`** in **`AppLayout`** loads **`GET /api/v1/celebrations/pending`** and may show the full-screen **`RunCelebration`** overlay (mini-map via **`GET /api/v1/celebrations/map-data`**, share via **`POST /api/v1/celebrations/share-to-strava`**). The legacy **`PendingCelebrationsChecker`** milestone helper is not mounted in the main shell.
 
 **MVP milestone types (seeded):**
 

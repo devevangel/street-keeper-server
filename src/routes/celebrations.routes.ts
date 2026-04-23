@@ -2,6 +2,7 @@
  * Run celebrations API (Phase 1 — backend only; UI in Phase 2)
  *
  * GET  /celebrations/pending
+ * GET  /celebrations/map-data?eventIds=uuid,uuid2
  * POST /celebrations/acknowledge
  * POST /celebrations/share-to-strava
  */
@@ -12,11 +13,41 @@ import {
   getPendingCelebrationBatch,
   shareBatchToStrava,
 } from "../services/celebration.service.js";
+import { getCelebrationMapData } from "../services/celebration-map.service.js";
 import { StravaApiError } from "../services/strava.service.js";
 
 const router = Router();
 
 router.use(requireAuth);
+
+router.get("/map-data", async (req: Request, res: Response): Promise<void> => {
+  const userId = (req as Request & { user: { id: string } }).user.id;
+  const raw = req.query.eventIds;
+  const parts = Array.isArray(raw)
+    ? raw.flatMap((r) => String(r).split(","))
+    : typeof raw === "string"
+      ? raw.split(",")
+      : [];
+  const eventIds = parts.map((s) => s.trim()).filter(Boolean);
+  if (eventIds.length === 0) {
+    res.status(400).json({
+      success: false,
+      error: "eventIds query parameter is required (comma-separated UUIDs)",
+    });
+    return;
+  }
+  try {
+    const data = await getCelebrationMapData(userId, eventIds);
+    res.json(data);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("not found")) {
+      res.status(404).json({ success: false, error: err.message });
+      return;
+    }
+    console.error("[Celebrations] GET /map-data error:", err);
+    res.status(500).json({ success: false, error: "Failed to load celebration map data" });
+  }
+});
 
 router.get("/pending", async (req: Request, res: Response): Promise<void> => {
   const userId = (req as Request & { user: { id: string } }).user.id;
