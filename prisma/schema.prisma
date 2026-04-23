@@ -25,20 +25,21 @@ model User {
   stravaAccessToken    String?
   stravaRefreshToken   String?
   stravaTokenExpiresAt DateTime?
-  stravaGrantedScopes  String?   // Comma-separated scopes actually granted by user (e.g. "read,activity:read_all,activity:write")
+  stravaGrantedScopes  String? // Comma-separated scopes actually granted by user (e.g. "read,activity:read_all,activity:write")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // Relations
-  projects       Project[]
-  activities     Activity[]
-  streetProgress UserStreetProgress[]
-  edges          UserEdge[]
-  nodeHits       UserNodeHit[]
-  milestones     UserMilestone[]
-  preferences    UserPreferences?
-  syncJobs       SyncJob[]
+  projects             Project[]
+  activities           Activity[]
+  streetProgress       UserStreetProgress[]
+  edges                UserEdge[]
+  nodeHits             UserNodeHit[]
+  milestones           UserMilestone[]
+  preferences          UserPreferences?
+  syncJobs             SyncJob[]
+  runCelebrationEvents RunCelebrationEvent[]
 }
 
 // ============================================
@@ -46,25 +47,31 @@ model User {
 // ============================================
 
 model SyncJob {
-  id               String    @id @default(uuid())
-  userId           String
-  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  status           String    @default("queued") // "queued" | "running" | "completed" | "failed"
-  type             String    @default("initial") // "initial" | "incremental"
-  total            Int       @default(0)
-  processed        Int       @default(0)
-  skipped          Int       @default(0)
-  errors           Int       @default(0)
-  lastErrorMessage String?
-  /** Strava numeric activity IDs in stable order (crash-safe resume; avoids re-fetch order drift). */
+  id                String    @id @default(uuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status            String    @default("queued") // "queued" | "running" | "completed" | "failed"
+  type              String    @default("initial") // "initial" | "incremental"
+  total             Int       @default(0)
+  processed         Int       @default(0)
+  skipped           Int       @default(0)
+  errors            Int       @default(0)
+  lastErrorMessage  String?
+  /**
+   * Strava numeric activity IDs in stable order (crash-safe resume; avoids re-fetch order drift).
+   */
   stravaActivityIds Json?
-  /** Unix timestamp (seconds) - fetch activities after this time. Used by worker to re-fetch list. */
-  after            Int?
-  /** Unix timestamp (seconds) - fetch activities before this time. */
-  before           Int?
-  startedAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  completedAt      DateTime?
+  /**
+   * Unix timestamp (seconds) - fetch activities after this time. Used by worker to re-fetch list.
+   */
+  after             Int?
+  /**
+   * Unix timestamp (seconds) - fetch activities before this time.
+   */
+  before            Int?
+  startedAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  completedAt       DateTime?
 
   @@index([userId])
 }
@@ -78,13 +85,13 @@ model Project {
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  name         String
-  boundaryType String  @default("circle") // "circle" | "polygon"
-  centerLat    Float?  // Required for circle; null for polygon
-  centerLng    Float?
-  radiusMeters Int?    // Required for circle; null for polygon. Allowed: 100-10000 in 100m steps
+  name               String
+  boundaryType       String @default("circle") // "circle" | "polygon"
+  centerLat          Float? // Required for circle; null for polygon
+  centerLng          Float?
+  radiusMeters       Int? // Required for circle; null for polygon. Allowed: 100-10000 in 100m steps
   polygonCoordinates Json? // GeoJSON ring [lng, lat][] for polygon projects
-  boundaryMode String @default("intersects") // "intersects" = any part touches boundary; "centroid" = centroid in area; "strict" = entire street in area
+  boundaryMode       String @default("intersects") // "intersects" = any part touches boundary; "centroid" = centroid in area; "strict" = entire street in area
 
   // Street snapshot stored as JSON
   // Structure: { streets: SnapshotStreet[], snapshotDate: string }
@@ -98,8 +105,8 @@ model Project {
   progress          Float @default(0) // 0-100 percentage
 
   // Street name-based counts (for milestones and display)
-  totalStreetNames      Int?
-  completedStreetNames  Int?   @default(0)
+  totalStreetNames     Int?
+  completedStreetNames Int? @default(0)
 
   // Location data (from reverse geocoding)
   city        String?
@@ -110,15 +117,18 @@ model Project {
   deadline   DateTime?
   isArchived Boolean   @default(false)
 
-  /** Immutable after creation. If true, historical activities count toward progress. */
+  /**
+   * Immutable after creation. If true, historical activities count toward progress.
+   */
   includePreviousRuns Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // Relations
-  activities ProjectActivity[]
-  milestones UserMilestone[]
+  activities           ProjectActivity[]
+  milestones           UserMilestone[]
+  runCelebrationEvents RunCelebrationEvent[]
 
   @@index([userId])
   @@index([userId, isArchived])
@@ -148,13 +158,16 @@ model Activity {
   isProcessed Boolean   @default(false)
   processedAt DateTime?
 
-  /** Soft-delete when Strava sends delete webhook; keep row so we do not purge UserNodeHit. */
+  /**
+   * Soft-delete when Strava sends delete webhook; keep row so we do not purge UserNodeHit.
+   */
   isDeleted Boolean @default(false)
 
   createdAt DateTime @default(now())
 
   // Relations
-  projects ProjectActivity[]
+  projects             ProjectActivity[]
+  runCelebrationEvents RunCelebrationEvent[]
 
   @@index([userId])
   @@index([stravaId])
@@ -186,6 +199,46 @@ model ProjectActivity {
   @@unique([projectId, activityId])
   @@index([projectId])
   @@index([activityId])
+}
+
+// ============================================
+// Run celebration (per activity + project, Phase 1+)
+// ============================================
+
+model RunCelebrationEvent {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  projectId  String?
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  completedCount Int @default(0)
+  startedCount   Int @default(0)
+  improvedCount  Int @default(0)
+
+  completedStreetNames String[] @default([])
+  startedStreetNames   String[] @default([])
+  improvedStreetNames  String[] @default([])
+
+  projectProgressBefore Float
+  projectProgressAfter  Float
+  projectCompleted      Boolean @default(false)
+
+  activityDistanceMeters  Float
+  activityDurationSeconds Int
+  activityStartDate       DateTime
+
+  celebrationShownAt DateTime?
+  sharedToStravaAt   DateTime?
+  shareMessage       String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([activityId, projectId])
+  @@index([userId, celebrationShownAt])
+  @@index([userId, createdAt])
 }
 
 // ============================================
@@ -328,7 +381,7 @@ model WayTotalEdges {
   surface      String?
   access       String?
   ref          String?
-  altNames     String[] @default([])
+  altNames     String[]                                  @default([])
 }
 
 // ============================================
@@ -370,10 +423,10 @@ model WayNode {
 // Used by node proximity (25m snap) and previously by local map-matcher.
 
 model NodeCache {
-  nodeId    BigInt   @id // OSM node ID
+  nodeId    BigInt                               @id // OSM node ID
   lat       Float // Latitude
   lon       Float // Longitude
-  createdAt DateTime @default(now())
+  createdAt DateTime                             @default(now())
   // PostGIS point; maintained via raw SQL + city sync
   geom      Unsupported("geometry(Point,4326)")?
 
@@ -452,23 +505,23 @@ model UserMilestone {
 // ============================================
 
 model UserPreferences {
-  id               String   @id @default(uuid())
-  userId           String   @unique
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  timezone         String   @default("UTC")
-  weekStartsOn     Int      @default(1) // 1 = Monday (ISO)
+  id               String @id @default(uuid())
+  userId           String @unique
+  user             User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  timezone         String @default("UTC")
+  weekStartsOn     Int    @default(1) // 1 = Monday (ISO)
   lastViewedLat    Float?
   lastViewedLng    Float?
   lastViewedRadius Int?
 
   // Display preferences
-  distanceUnit         String  @default("km") // "km" | "miles" | "meters"
-  theme                String  @default("system") // "dark" | "light" | "system"
-  dateFormat           String  @default("short") // "short" | "long" | "numeric"
-  mapStyle             String  @default("satellite") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
-  defaultMapZoom       Int     @default(15) // 13-19
-  defaultProjectRadius Int     @default(300) // meters
-  defaultStreetFilter  String  @default("all") // "all" | "completed" | "inProgress" | "notStarted"
+  distanceUnit         String @default("km") // "km" | "miles" | "meters"
+  theme                String @default("system") // "dark" | "light" | "system"
+  dateFormat           String @default("short") // "short" | "long" | "numeric"
+  mapStyle             String @default("satellite") // Mapbox style key: "standard" | "outdoors" | "streets" | "light" | "dark" | "satellite"
+  defaultMapZoom       Int    @default(15) // 13-19
+  defaultProjectRadius Int    @default(300) // meters
+  defaultStreetFilter  String @default("all") // "all" | "completed" | "inProgress" | "notStarted"
 
   // Strava integration
   autoUpdateRunDescription Boolean @default(true) // Append Street Keeper stats to Strava run descriptions

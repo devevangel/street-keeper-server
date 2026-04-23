@@ -86,7 +86,6 @@ import {
   streamsToGpxPoints,
   refreshAccessToken,
   isTokenExpired,
-  updateStravaActivity,
   StravaApiError,
 } from "../services/strava.service.js";
 import {
@@ -96,7 +95,7 @@ import {
   getActivityByStravaId,
 } from "../services/activity.service.js";
 import { processActivity } from "../services/activity-processor.service.js";
-import { buildActivityDescription } from "../services/activity-description.service.js";
+import { writeCelebrationEventsForActivity } from "../services/celebration.service.js";
 import { registerActivityWorker, type ActivityJob } from "../queues/activity.queue.js";
 import type { ProcessActivityJob } from "../types/activity.types.js";
 
@@ -452,32 +451,20 @@ async function processActivityJob(
     `${result.projectsProcessed} projects, ${totalCompleted} streets completed`
   );
 
-  // Step 9: Optionally update Strava description with Street Keeper stats
-  try {
-    const prefs = await prisma.userPreferences.findUnique({
-      where: { userId },
-      select: { autoUpdateRunDescription: true },
-    });
-
-    if (prefs?.autoUpdateRunDescription !== false) {
-      const newDescription = buildActivityDescription({
-        processingResult: result,
-        activityType: stravaActivity.type,
-        existingDescription: stravaActivity.description,
-      });
-
-      if (newDescription) {
-        await updateStravaActivity(accessToken, stravaActivityId, {
-          description: newDescription,
-        });
-        console.log(`[Worker] Updated Strava description for activity ${stravaActivityId}`);
-      }
+  if (result.success && result.projects.length > 0) {
+    try {
+      await writeCelebrationEventsForActivity(saved.id, userId, result);
+    } catch (celeErr) {
+      const msg = celeErr instanceof Error ? celeErr.message : "Unknown";
+      console.warn(
+        `[Worker] Run celebration write failed (non-fatal): ${msg}`,
+      );
     }
-  } catch (error) {
-    // Non-fatal: don't fail the job if description update fails (missing scope, etc.)
-    const msg = error instanceof Error ? error.message : "Unknown";
-    console.warn(`[Worker] Failed to update Strava description (non-fatal): ${msg}`);
   }
+
+  // Step 9: Auto-append Strava description was removed for Phase 1.
+  // Users share from the celebration flow (Phase 2 UI → POST /celebrations/share-to-strava).
+  // See activity-description.service.ts + updateStravaActivity for the old behaviour.
 
   return {
     success: true,
