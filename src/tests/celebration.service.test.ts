@@ -1,14 +1,24 @@
 /**
  * Celebration bucket derivation and Strava block stripping.
  */
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import type { ActivityImpact } from "../types/activity.types.js";
 import {
   deriveBucketsFromImpact,
+  getCelebrationHistory,
   stripAllStreetKeeperBlocks,
   stripHashtagFooter,
   stripStreetKeeperHeader,
 } from "../services/celebration.service.js";
+import prisma from "../lib/prisma.js";
+
+vi.mock("../lib/prisma.js", () => ({
+  default: {
+    runCelebrationEvent: {
+      findMany: vi.fn(),
+    },
+  },
+}));
 
 describe("celebration.service deriveBucketsFromImpact", () => {
   it("splits completed vs started (from 0) vs improved", () => {
@@ -54,5 +64,161 @@ describe("celebration.service strip helpers", () => {
     expect(cleaned).toContain("My run");
     expect(cleaned).toContain("More text");
     expect(cleaned).not.toContain("Old stats");
+  });
+});
+
+describe("celebration.service getCelebrationHistory", () => {
+  const findMany = vi.mocked(prisma.runCelebrationEvent.findMany);
+
+  const baseRow = {
+    completedCount: 0,
+    startedCount: 0,
+    improvedCount: 0,
+    completedStreetNames: [] as string[],
+    startedStreetNames: [] as string[],
+    improvedStreetNames: [] as string[],
+    projectProgressBefore: 0,
+    projectProgressAfter: 10,
+    projectCompleted: false,
+    activityDistanceMeters: 5000,
+    activityDurationSeconds: 1800,
+    activityStartDate: new Date("2026-04-15T08:00:00Z"),
+    shareMessage: null as string | null,
+    celebrationShownAt: new Date("2026-04-15T09:00:00Z") as Date | null,
+    sharedToStravaAt: null as Date | null,
+  };
+
+  function makeRow(overrides: Partial<Record<string, unknown>>) {
+    return {
+      ...baseRow,
+      ...overrides,
+    } as unknown as Awaited<ReturnType<typeof prisma.runCelebrationEvent.findMany>>[number];
+  }
+
+  beforeEach(() => {
+    findMany.mockReset();
+  });
+
+  it("groups rows by activity and rolls up counts", async () => {
+    findMany.mockResolvedValueOnce([
+      makeRow({
+        id: "evt-a1",
+        activityId: "act-1",
+        projectId: "proj-a",
+        project: { name: "Weekday Loop" },
+        activity: { id: "act-1" },
+        completedCount: 2,
+        startedCount: 1,
+        improvedCount: 0,
+        createdAt: new Date("2026-04-15T08:30:00Z"),
+      }),
+      makeRow({
+        id: "evt-a2",
+        activityId: "act-1",
+        projectId: "proj-b",
+        project: { name: "Parkrun" },
+        activity: { id: "act-1" },
+        completedCount: 1,
+        improvedCount: 3,
+        createdAt: new Date("2026-04-15T08:29:00Z"),
+      }),
+      makeRow({
+        id: "evt-b1",
+        activityId: "act-2",
+        projectId: "proj-a",
+        project: { name: "Weekday Loop" },
+        activity: { id: "act-2" },
+        completedCount: 5,
+        createdAt: new Date("2026-04-12T07:00:00Z"),
+      }),
+    ] as any);
+
+    const page = await getCelebrationHistory("user-1", { limit: 10 });
+
+    expect(page.nextCursor).toBeNull();
+    expect(page.entries).toHaveLength(2);
+    const first = page.entries[0]!;
+    expect(first.activityId).toBe("act-1");
+    expect(first.events).toHaveLength(2);
+    expect(first.rollup).toEqual({
+      totalCompleted: 3,
+      totalStarted: 1,
+      totalImproved: 3,
+      projectCount: 2,
+    });
+    expect(first.acknowledged).toBe(true);
+    expect(first.sharedToStrava).toBe(false);
+    expect(page.entries[1]!.activityId).toBe("act-2");
+  });
+
+  it("emits a nextCursor when more rows remain", async () => {
+    const rows = [
+      makeRow({
+        id: "evt-1",
+        activityId: "act-1",
+        projectId: "proj-a",
+        project: { name: "Loop" },
+        activity: { id: "act-1" },
+        createdAt: new Date("2026-04-15T08:30:00Z"),
+      }),
+      makeRow({
+        id: "evt-2",
+        activityId: "act-2",
+        projectId: "proj-a",
+        project: { name: "Loop" },
+        activity: { id: "act-2" },
+        createdAt: new Date("2026-04-12T08:00:00Z"),
+      }),
+      makeRow({
+        id: "evt-3",
+        activityId: "act-3",
+        projectId: "proj-a",
+        project: { name: "Loop" },
+        activity: { id: "act-3" },
+        createdAt: new Date("2026-04-11T08:00:00Z"),
+      }),
+    ];
+    findMany.mockResolvedValueOnce(rows as any);
+
+    const page = await getCelebrationHistory("user-1", { limit: 2 });
+
+    expect(page.entries).toHaveLength(2);
+    expect(page.entries[0]!.activityId).toBe("act-1");
+    expect(page.entries[1]!.activityId).toBe("act-2");
+    expect(page.nextCursor).toBe("2026-04-12T08:00:00.000Z|act-2");
+  });
+
+  it("passes projectId filter through to the query", async () => {
+    findMany.mockResolvedValueOnce([]);
+    await getCelebrationHistory("user-1", { projectId: "proj-a" });
+    const args = findMany.mock.calls[0]![0]!;
+    expect((args as any).where.projectId).toBe("proj-a");
+  });
+
+  it("marks acknowledged=false when any row is not yet shown", async () => {
+    findMany.mockResolvedValueOnce([
+      makeRow({
+        id: "evt-1",
+        activityId: "act-1",
+        projectId: "proj-a",
+        project: { name: "Loop" },
+        activity: { id: "act-1" },
+        celebrationShownAt: null,
+        createdAt: new Date("2026-04-15T08:30:00Z"),
+      }),
+      makeRow({
+        id: "evt-2",
+        activityId: "act-1",
+        projectId: "proj-b",
+        project: { name: "B" },
+        activity: { id: "act-1" },
+        celebrationShownAt: new Date(),
+        sharedToStravaAt: new Date(),
+        createdAt: new Date("2026-04-15T08:29:00Z"),
+      }),
+    ] as any);
+    const page = await getCelebrationHistory("user-1", { limit: 5 });
+    expect(page.entries[0]!.acknowledged).toBe(false);
+    expect(page.entries[0]!.sharedToStrava).toBe(true);
   });
 });

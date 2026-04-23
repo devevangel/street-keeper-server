@@ -1430,7 +1430,8 @@ See **PRODUCT_ROADMAP.md** for business rationale and design decisions.
 ### Run celebration (global overlay)
 
 - **Shell:** `AppLayout` renders **`RunCelebrationController`**, which polls **`GET /celebrations/pending`** when activity sync is idle and shows **`RunCelebration`** for the batch.
-- **Service:** **`celebrations.service`** — `getPending()`, `getMapData(eventIds)`, `acknowledge(eventIds?)`, `shareToStrava(eventIds)`.
+- **Service:** **`celebrations.service`** — `getPending()`, `getHistory({ cursor, limit, projectId })`, `getMapData(eventIds)`, `acknowledge(eventIds?)`, `shareToStrava(eventIds)`.
+- **Run Journal (`/journal`):** the **`RunJournalPage`** renders **`CelebrationHistoryList`**, which paginates `/celebrations/history` and reopens any past entry through **`RunCelebration`** in `readOnly` mode (share button hidden, Close is the only action). The same list component is embedded in the Project Detail side panel via `projectId={project.id}` to scope it to a single project.
 - **Dev previews:** Preferences (development) links to `?__celebration=demo` (and variants). Query keys are stripped from production bundles; do not rely on them in shipped UX tests.
 
 ### Components (projects)

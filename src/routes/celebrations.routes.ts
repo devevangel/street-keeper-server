@@ -1,7 +1,8 @@
 /**
- * Run celebrations API (Phase 1 — backend only; UI in Phase 2)
+ * Run celebrations API
  *
  * GET  /celebrations/pending
+ * GET  /celebrations/history?cursor=<iso>|<activityId>&limit=20&projectId=<uuid>
  * GET  /celebrations/map-data?eventIds=uuid,uuid2
  * POST /celebrations/acknowledge
  * POST /celebrations/share-to-strava
@@ -10,6 +11,7 @@ import { Router, Request, Response } from "express";
 import { requireAuth } from "../middleware/auth.middleware.js";
 import {
   acknowledgeCelebrations,
+  getCelebrationHistory,
   getPendingCelebrationBatch,
   shareBatchToStrava,
 } from "../services/celebration.service.js";
@@ -46,6 +48,27 @@ router.get("/map-data", async (req: Request, res: Response): Promise<void> => {
     }
     console.error("[Celebrations] GET /map-data error:", err);
     res.status(500).json({ success: false, error: "Failed to load celebration map data" });
+  }
+});
+
+router.get("/history", async (req: Request, res: Response): Promise<void> => {
+  const userId = (req as Request & { user: { id: string } }).user.id;
+  const cursorParam = typeof req.query.cursor === "string" ? req.query.cursor : null;
+  const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
+  const projectIdParam =
+    typeof req.query.projectId === "string" && req.query.projectId.length > 0
+      ? req.query.projectId
+      : null;
+  try {
+    const page = await getCelebrationHistory(userId, {
+      cursor: cursorParam,
+      limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
+      projectId: projectIdParam,
+    });
+    res.json({ success: true, ...page });
+  } catch (err) {
+    console.error("[Celebrations] GET /history error:", err);
+    res.status(500).json({ success: false, error: "Failed to load celebration history" });
   }
 });
 

@@ -324,6 +324,199 @@ export async function getPendingCelebrationBatch(userId: string): Promise<{
   return { events, rollup };
 }
 
+export type CelebrationHistoryEntryDto = {
+  /** First event id in the group; stable key for UI and share-batch replays. */
+  groupKey: string;
+  activityId: string;
+  activityStartDate: string;
+  activityDistanceMeters: number;
+  activityDurationSeconds: number;
+  /** Latest `createdAt` across the activity's events — drives sort order & cursor. */
+  createdAt: string;
+  /** True once the overlay has been shown for every event in the group. */
+  acknowledged: boolean;
+  /** True once the group has been posted to Strava. */
+  sharedToStrava: boolean;
+  rollup: {
+    totalCompleted: number;
+    totalStarted: number;
+    totalImproved: number;
+    projectCount: number;
+  };
+  events: PendingCelebrationEventDto[];
+};
+
+export type CelebrationHistoryPage = {
+  entries: CelebrationHistoryEntryDto[];
+  /** Cursor to pass as `cursor` on the next request; null when no more pages. */
+  nextCursor: string | null;
+};
+
+const HISTORY_DEFAULT_LIMIT = 20;
+const HISTORY_MAX_LIMIT = 50;
+
+/**
+ * Paginated history of celebration events, grouped by activity.
+ *
+ * Results are ordered by the most recent `createdAt` of each activity's events,
+ * descending. The cursor encodes `<iso>|<activityId>` of the last returned
+ * group so subsequent pages resume from the same boundary without skipping
+ * ties. Optional `projectId` scopes the list to a single project's events.
+ *
+ * Because Prisma has no "group by with nested rows" helper, the query fetches
+ * rows and groups in memory. That's safe because the unique
+ * `(activityId, projectId)` constraint caps the number of rows per activity
+ * at `projectCount + 1` (for a standalone null-project event).
+ */
+export async function getCelebrationHistory(
+  userId: string,
+  opts: {
+    cursor?: string | null;
+    limit?: number;
+    projectId?: string | null;
+  } = {},
+): Promise<CelebrationHistoryPage> {
+  const limit = Math.max(
+    1,
+    Math.min(HISTORY_MAX_LIMIT, opts.limit ?? HISTORY_DEFAULT_LIMIT),
+  );
+
+  const decoded = decodeHistoryCursor(opts.cursor);
+
+  const where: Record<string, unknown> = {
+    userId,
+    activity: { isDeleted: false },
+    OR: [{ project: null }, { project: { isArchived: false } }],
+  };
+  if (opts.projectId) {
+    where.projectId = opts.projectId;
+  }
+
+  // Over-fetch by `limit * 3 + 1`: upper bound for rows-per-activity is small
+  // (projectCount + 1), but we only want `limit` groups, so grab enough rows
+  // to *always* fill a page + detect a next cursor without a second round-trip.
+  const take = limit * 8 + 1;
+
+  const rows = await prisma.runCelebrationEvent.findMany({
+    where: {
+      ...where,
+      ...(decoded
+        ? {
+            OR: [
+              { createdAt: { lt: decoded.createdAt } },
+              {
+                createdAt: decoded.createdAt,
+                activityId: { lt: decoded.activityId },
+              },
+            ],
+          }
+        : {}),
+    },
+    include: {
+      project: { select: { name: true } },
+      activity: { select: { id: true } },
+    },
+    orderBy: [{ createdAt: "desc" }, { activityId: "desc" }],
+    take,
+  });
+
+  type Row = (typeof rows)[number];
+  const byActivity = new Map<string, Row[]>();
+  const activityOrder: string[] = [];
+  for (const row of rows) {
+    const list = byActivity.get(row.activityId);
+    if (list) {
+      list.push(row);
+    } else {
+      byActivity.set(row.activityId, [row]);
+      activityOrder.push(row.activityId);
+    }
+  }
+
+  const groups: CelebrationHistoryEntryDto[] = [];
+  for (const activityId of activityOrder) {
+    const groupRows = byActivity.get(activityId)!;
+    groupRows.sort((a, b) => {
+      if (a.createdAt.getTime() !== b.createdAt.getTime()) {
+        return b.createdAt.getTime() - a.createdAt.getTime();
+      }
+      return a.id.localeCompare(b.id);
+    });
+    const first = groupRows[0]!;
+    const events: PendingCelebrationEventDto[] = groupRows.map((r) => ({
+      id: r.id,
+      activityId: r.activityId,
+      projectId: r.projectId,
+      projectName: r.project?.name ?? null,
+      completedCount: r.completedCount,
+      startedCount: r.startedCount,
+      improvedCount: r.improvedCount,
+      completedStreetNames: r.completedStreetNames,
+      startedStreetNames: r.startedStreetNames,
+      improvedStreetNames: r.improvedStreetNames,
+      projectProgressBefore: r.projectProgressBefore,
+      projectProgressAfter: r.projectProgressAfter,
+      projectCompleted: r.projectCompleted,
+      activityDistanceMeters: r.activityDistanceMeters,
+      activityDurationSeconds: r.activityDurationSeconds,
+      activityStartDate: r.activityStartDate.toISOString(),
+      shareMessage: r.shareMessage,
+      createdAt: r.createdAt.toISOString(),
+    }));
+
+    groups.push({
+      groupKey: first.id,
+      activityId,
+      activityStartDate: first.activityStartDate.toISOString(),
+      activityDistanceMeters: first.activityDistanceMeters,
+      activityDurationSeconds: first.activityDurationSeconds,
+      createdAt: first.createdAt.toISOString(),
+      acknowledged: groupRows.every((r) => r.celebrationShownAt != null),
+      sharedToStrava: groupRows.some((r) => r.sharedToStravaAt != null),
+      rollup: {
+        totalCompleted: events.reduce((s, e) => s + e.completedCount, 0),
+        totalStarted: events.reduce((s, e) => s + e.startedCount, 0),
+        totalImproved: events.reduce((s, e) => s + e.improvedCount, 0),
+        projectCount: new Set(
+          events.map((e) => e.projectId).filter((id): id is string => id != null),
+        ).size,
+      },
+      events,
+    });
+  }
+
+  // A trailing group might be incomplete if our over-fetch cut mid-activity.
+  // Drop it so the caller never sees a half-grouped activity; the next page
+  // will start at that activity's boundary.
+  const hasMore = groups.length > limit || rows.length === take;
+  const trimmed = hasMore ? groups.slice(0, limit) : groups;
+
+  const last = trimmed[trimmed.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeHistoryCursor(new Date(last.createdAt), last.activityId)
+      : null;
+
+  return { entries: trimmed, nextCursor };
+}
+
+function encodeHistoryCursor(createdAt: Date, activityId: string): string {
+  return `${createdAt.toISOString()}|${activityId}`;
+}
+
+function decodeHistoryCursor(
+  raw: string | null | undefined,
+): { createdAt: Date; activityId: string } | null {
+  if (!raw) return null;
+  const idx = raw.indexOf("|");
+  if (idx < 0) return null;
+  const iso = raw.slice(0, idx);
+  const activityId = raw.slice(idx + 1);
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime()) || !activityId) return null;
+  return { createdAt: d, activityId };
+}
+
 export async function acknowledgeCelebrations(
   userId: string,
   eventIds?: string[],
