@@ -24,6 +24,7 @@
  */
 
 import prisma from "../lib/prisma.js";
+import { getProjectStreetTotals } from "./street-totals.service.js";
 import {
   PROJECTS,
   isValidRadius,
@@ -788,7 +789,7 @@ export async function getProjectById(
     .filter((s) => s.percentage >= 90)
     .reduce((sum, s) => sum + s.lengthMeters, 0);
 
-  const [activityCount, lastActivityDate, activityDates] = await Promise.all([
+  const [activityCount, lastActivityDate, activityDates, userPrefs] = await Promise.all([
     prisma.projectActivity.count({ where: { projectId } }),
     prisma.projectActivity
       .findFirst({
@@ -802,7 +803,17 @@ export async function getProjectById(
       select: { activity: { select: { startDate: true } } },
       orderBy: { activity: { startDate: "asc" } },
     }),
+    prisma.userPreferences.findUnique({
+      where: { userId },
+      select: { timezone: true },
+    }),
   ]);
+
+  const { streetsThisMonth, monthLabel } = await getProjectStreetTotals(
+    projectId,
+    userId,
+    userPrefs?.timezone ?? "UTC",
+  );
 
   const uniqueDates = Array.from(
     new Set(
@@ -878,6 +889,8 @@ export async function getProjectById(
     projectedFinishDate,
     currentStreak,
     longestStreak,
+    streetsThisMonth,
+    monthLabel,
     ...(newStreetsDetected > 0 ? { newStreetsDetected } : {}),
   };
 

@@ -25,7 +25,7 @@ export function osmIdToWayId(osmId: string): bigint {
  * Whether a way is complete given hit nodes and total nodes (90% rule).
  * Short streets (<=10 nodes): 100% required. Longer: 90% required.
  */
-function isWayComplete(hitNodes: number, totalNodes: number): boolean {
+export function isWayComplete(hitNodes: number, totalNodes: number): boolean {
   if (totalNodes <= 0) return false;
   if (totalNodes <= SHORT_THRESHOLD) return hitNodes === totalNodes;
   return hitNodes / totalNodes >= STANDARD_THRESHOLD;

@@ -85,6 +85,12 @@ export interface HomepagePayload {
     completedStreets: number;
     progress: number;
   };
+  /** Lifetime + this-calendar-month streets completed (from ProjectActivity), using user timezone for the month window */
+  streetTotals: {
+    lifetimeStreetsCompleted: number;
+    streetsThisMonth: number;
+    monthLabel: string;
+  };
 }
 
 export interface MapContextQuery {

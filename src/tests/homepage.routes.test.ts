@@ -32,6 +32,11 @@ describe("GET /api/v1/homepage", () => {
       nextMilestone: null,
       mapContext: { lat: 0, lng: 0, radius: 1200 },
       userState: "brand_new",
+      streetTotals: {
+        lifetimeStreetsCompleted: 0,
+        streetsThisMonth: 0,
+        monthLabel: "April 2026",
+      },
     } as HomepagePayload);
   });
 

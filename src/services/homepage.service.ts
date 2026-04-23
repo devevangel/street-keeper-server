@@ -5,6 +5,7 @@
 import prisma from "../lib/prisma.js";
 import { getHomepageSuggestions, getNearestShortStreets } from "./suggestion.service.js";
 import { groupSnapshotByStreetName } from "./project.service.js";
+import { getUserStreetTotals } from "./street-totals.service.js";
 import type { HomepagePayload, UserState } from "../types/homepage.types.js";
 import type { ActivityImpact } from "../types/activity.types.js";
 import type { StreetSnapshot } from "../types/project.types.js";
@@ -264,6 +265,11 @@ export async function getHomepageData(
     prisma.activity.count({ where: { userId, isProcessed: true } }),
   ]);
 
+  const streetTotals = await getUserStreetTotals(
+    userId,
+    prefs?.timezone ?? "UTC",
+  );
+
   const userState = computeUserState(
     activityCount,
     activeSyncJob != null,
@@ -439,6 +445,7 @@ export async function getHomepageData(
     ...(recentRuns.length > 0 && { recentRuns }),
     ...(areaStats && { areaStats }),
     ...(projectContext && { projectContext }),
+    streetTotals,
   };
 
   return payload;

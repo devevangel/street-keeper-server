@@ -161,6 +161,11 @@ export interface ProjectDetail extends ProjectListItem {
   currentStreak: number; // Consecutive days with a run (ending today or yesterday)
   longestStreak: number;
 
+  /** Streets newly completed this calendar month on this project (ProjectActivity sum), user timezone */
+  streetsThisMonth: number;
+  /** e.g. "April 2026" — label for the month window above */
+  monthLabel: string;
+
   // Warnings
   newStreetsDetected?: number;
 }
